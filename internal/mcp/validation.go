@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -113,6 +114,22 @@ func ValidateArgs(args []string) error {
 // This provides DNS rebinding protection via IP pinning.
 func ValidateURL(rawURL string) error {
 	if rawURL == "" {
+		return nil
+	}
+
+	// Operator-provided allowlist bypass for trusted docker-network sidecars.
+	// Controlled ONLY via env GOCLAW_MCP_ALLOWED_HOSTS — never from DB/prompt.
+	if isMCPAllowedHost(rawURL) {
+		u, err := url.Parse(rawURL)
+		if err != nil {
+			return fmt.Errorf("URL validation failed: parse: %w", err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("URL validation failed: scheme %q not allowed (only http/https)", u.Scheme)
+		}
+		if u.Hostname() == "" {
+			return fmt.Errorf("URL validation failed: empty host")
+		}
 		return nil
 	}
 
