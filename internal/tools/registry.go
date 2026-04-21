@@ -32,6 +32,11 @@ type Registry struct {
 	// deferredActivator is called when a tool is not in the registry but may be
 	// a deferred MCP tool. Returns true if the tool was successfully activated.
 	deferredActivator func(name string) bool
+
+	// clientToolChannels routes client-tool results from the WS handler back to the
+	// agent goroutine that invoked the tool. Keyed by tool_call_id (globally unique
+	// per LLM call). See client_tools.go for Register/Route/Unregister helpers.
+	clientToolChannels sync.Map
 }
 
 func NewRegistry() *Registry {

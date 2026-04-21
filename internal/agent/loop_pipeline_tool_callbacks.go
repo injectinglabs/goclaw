@@ -44,8 +44,14 @@ func (l *Loop) makeExecuteToolCall(req *RunRequest, bridgeRS *runState) func(ctx
 			})
 		}
 
-		result := l.tools.ExecuteWithContext(ctx, registryName, tc.Arguments,
-			req.Channel, req.ChatID, req.PeerKind, req.SessionKey, nil)
+		var result *tools.Result
+		if l.registry != nil && l.registry.GetMetadata(registryName).IsClient {
+			// Client tool: dispatch to browser extension, block on result channel.
+			result = l.dispatchClientTool(ctx, req, emitRun, tc)
+		} else {
+			result = l.tools.ExecuteWithContext(ctx, registryName, tc.Arguments,
+				req.Channel, req.ChatID, req.PeerKind, req.SessionKey, nil)
+		}
 		toolDuration := time.Since(toolStart)
 
 		l.emitToolSpanEnd(ctx, toolSpanID, toolStart, result)
@@ -101,8 +107,15 @@ func (l *Loop) makeExecuteToolRaw(req *RunRequest) func(ctx context.Context, tc 
 			})
 		}
 
-		result := l.tools.ExecuteWithContext(ctx, registryName, tc.Arguments,
-			req.Channel, req.ChatID, req.PeerKind, req.SessionKey, nil)
+		var result *tools.Result
+		if l.registry != nil && l.registry.GetMetadata(registryName).IsClient {
+			// Client tool: dispatch to browser extension, block on result channel.
+			// Parallel path — still one goroutine per call, so blocking here is fine.
+			result = l.dispatchClientTool(ctx, req, emitRun, tc)
+		} else {
+			result = l.tools.ExecuteWithContext(ctx, registryName, tc.Arguments,
+				req.Channel, req.ChatID, req.PeerKind, req.SessionKey, nil)
+		}
 		dur := time.Since(start)
 
 		// Emit tool span end inside goroutine to prevent orphaned spans on ctx cancellation.

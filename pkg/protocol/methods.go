@@ -16,6 +16,7 @@ const (
 	MethodChatAbort         = "chat.abort"
 	MethodChatInject        = "chat.inject"
 	MethodChatSessionStatus = "chat.session.status"
+	MethodChatToolResult    = "chat.toolResult"
 
 	// Agents management
 	MethodAgentsList     = "agents.list"

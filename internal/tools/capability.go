@@ -16,9 +16,14 @@ const (
 type ToolMetadata struct {
 	Name              string
 	Capabilities      []ToolCapability
-	Group             string // "fs", "web", "runtime", "memory", "team", etc.
+	Group             string // "fs", "web", "runtime", "memory", "team", "browser", etc.
 	RequiresWorkspace bool
 	ProviderHints     map[string]any
+	// IsClient marks tools that execute in the connected client (browser extension)
+	// rather than on the server. The registry's Execute path refuses to run them;
+	// the agent loop intercepts via metadata lookup, emits a client_tool_call event,
+	// and waits on a registered result channel until the client posts tool_result.
+	IsClient bool
 }
 
 // HasCapability checks if metadata includes a specific capability.
