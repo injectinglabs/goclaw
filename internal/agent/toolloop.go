@@ -259,6 +259,12 @@ func (s *toolLoopState) detectSameResult(toolName, resultHash string) (level, me
 	if resultHash == "" {
 		return "", ""
 	}
+	// refresh_page_content naturally returns the same snapshot until something
+	// actually mutates the DOM. Counting these as "no progress" breaks the
+	// snapshot → act → snapshot verify pattern.
+	if toolName == "refresh_page_content" {
+		return "", ""
+	}
 	var count int
 	for _, rec := range s.history {
 		if rec.toolName == toolName && rec.resultHash == resultHash {
