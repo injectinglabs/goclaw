@@ -212,6 +212,8 @@ var coreToolSummaries = map[string]string{
 	"delegate":                "Delegate a task to a linked agent (requires agent_links). See ## Delegation Targets for available agents",
 	"memory_expand":           "Retrieve full session details from episodic memory results — use after memory_search returns episodic hits",
 	"vault_search": "Search documents in the knowledge vault (hybrid keyword + semantic)",
+	"refresh_page_content": "Read the user's current browser tab — returns URL, title, interactive elements with CSS selectors, headings, text preview. Call when the user asks about or wants to act on the page they are on.",
+	"execute_action":       "Perform an action on the user's current browser tab: fill (into input/textarea), click (button/link), or select (dropdown option). Always call refresh_page_content first to find selectors.",
 
 	// Tool aliases (edit_file, sessions_spawn, Read, Write, Edit, Bash, etc.)
 	// are registered in the tool registry but excluded from the system prompt
@@ -315,6 +317,14 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 
 	// 2. ## Tooling
 	lines = append(lines, buildToolingSection(cfg.ToolNames, cfg.SandboxEnabled, cfg.ShellDenyGroups)...)
+
+	// 2.05. ## Browser Page — when both client tools are available, tell the LLM
+	// about the page_hint mechanism and when to call refresh_page_content vs
+	// execute_action. Without this block the model tends to answer from the
+	// URL/title alone or prefer web_search over acting on the user's tab.
+	if slices.Contains(cfg.ToolNames, "refresh_page_content") && slices.Contains(cfg.ToolNames, "execute_action") {
+		lines = append(lines, buildBrowserPageSection()...)
+	}
 
 	// 2.1. ## Execution Bias — full + task mode (overridable by provider)
 	if (isFull || isTask) && !cfg.IsBootstrap {
@@ -582,6 +592,37 @@ func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups ma
 		"",
 	)
 	return lines
+}
+
+// buildBrowserPageSection tells the agent how to act on the user's current
+// browser tab. The user runs a Chrome extension that sends a page_hint (URL +
+// title) on every message; the agent decides whether to snapshot the DOM
+// (refresh_page_content) or act on it (execute_action). Without this block
+// the model tends to prefer web_search or text-only answers even when the
+// user explicitly asks to interact with the page they are on.
+func buildBrowserPageSection() []string {
+	return []string{
+		"## Browser Page",
+		"",
+		"The user is on a web page in their browser. Every user message that starts with `[current page: URL — Title]` carries that page's URL and title as an ambient hint — treat it as authoritative, not something to verify with web_search.",
+		"",
+		"You have two tools to interact with the page directly:",
+		"",
+		"- `refresh_page_content` — returns a compact semantic snapshot of the current tab: URL, title, h1–h3 headings, interactive elements (inputs/buttons/links) with stable CSS selectors, a visible-text preview. Call this when you need to see what is actually on the page or find element selectors.",
+		"- `execute_action` — performs a single `fill` / `click` / `select` on an element by CSS selector. Always call refresh_page_content first to discover the selector. Fill updates controlled React/Vue/Angular inputs correctly — no extra tricks needed.",
+		"",
+		"When to use these (prefer them over web_search, browser, or text-only answers):",
+		"- The user's question is about the page they are on (\"what is on this page?\", \"summarize this article\", \"find X on the page\") → call refresh_page_content.",
+		"- The user asks you to interact with the page (\"fill the form\", \"type X into the search\", \"click Submit\", \"log me in\") → refresh_page_content, then execute_action for each step. Do NOT fall back to web_search, do NOT just describe what the user could type — actually do it.",
+		"- After actions that likely changed the page (form submit, navigation, AJAX update), call refresh_page_content again before the next action.",
+		"",
+		"When NOT to use them:",
+		"- General chat, questions unrelated to the current page, or tasks clearly about other websites → leave the page alone.",
+		"- On a protected tab (chrome://, chrome-extension://, Chrome Web Store), the hint will be absent and the tools will return a clear error — acknowledge and ask the user to navigate somewhere else.",
+		"",
+		"Selector tips for execute_action: prefer `#id`, `[name=\"…\"]`, `[data-testid=\"…\"]`, `[aria-label=\"…\"]` over index-based selectors. Never invent a selector that was not in the snapshot — if you can't find the element, say so.",
+		"",
+	}
 }
 
 func buildSafetySection() []string {
