@@ -213,7 +213,7 @@ var coreToolSummaries = map[string]string{
 	"memory_expand":           "Retrieve full session details from episodic memory results — use after memory_search returns episodic hits",
 	"vault_search": "Search documents in the knowledge vault (hybrid keyword + semantic)",
 	"refresh_page_content": "Read the user's current browser tab — returns URL, title, interactive elements with CSS selectors, headings, text preview. Call when the user asks about or wants to act on the page they are on.",
-	"execute_action":       "Perform an action on the user's current browser tab: fill (into input/textarea), click (button/link), or select (dropdown option). Always call refresh_page_content first to find selectors.",
+	"execute_action":       "Perform an action on the user's current browser tab: fill (into input/textarea), click (button/link), select (dropdown option), or press_enter (submit a form via Enter key — preferred for search inputs on Google/GitHub/etc.). Always call refresh_page_content first to find selectors.",
 
 	// Tool aliases (edit_file, sessions_spawn, Read, Write, Edit, Bash, etc.)
 	// are registered in the tool registry but excluded from the system prompt
@@ -609,7 +609,7 @@ func buildBrowserPageSection() []string {
 		"You have two tools to interact with the page directly:",
 		"",
 		"- `refresh_page_content` — returns a compact semantic snapshot of the current tab: URL, title, h1–h3 headings, interactive elements (inputs/buttons/links) with stable CSS selectors, a visible-text preview. Call this when you need to see what is actually on the page or find element selectors.",
-		"- `execute_action` — performs a single `fill` / `click` / `select` on an element by CSS selector. Always call refresh_page_content first to discover the selector. Fill updates controlled React/Vue/Angular inputs correctly — no extra tricks needed.",
+		"- `execute_action` — performs a single `fill` / `click` / `select` / `press_enter` on an element by CSS selector. Always call refresh_page_content first to discover the selector. Fill updates controlled React/Vue/Angular inputs correctly. For submitting search forms (Google, GitHub, etc.) use `press_enter` on the input/textarea instead of clicking the submit button — the visible submit button is often hidden or needs interaction to become functional.",
 		"",
 		"When to use these (prefer them over web_search, browser, or text-only answers):",
 		"- The user's question is about the page they are on (\"what is on this page?\", \"summarize this article\", \"find X on the page\") → call refresh_page_content.",
