@@ -231,12 +231,16 @@ func (l *Loop) recordToolMetric(ctx context.Context, sessionKey, toolName string
 }
 
 // makeToolEmitRun creates a tool event emitter with request context.
+// TenantID is critical: clientCanReceiveEvent fail-closes events with
+// zero tenant for non-owner WS clients, silently dropping tool.call,
+// tool.result, and client_tool_call events if it isn't set.
 func makeToolEmitRun(l *Loop, req *RunRequest) func(AgentEvent) {
 	return func(event AgentEvent) {
 		event.RunKind = req.RunKind
 		event.SessionKey = req.SessionKey
 		event.UserID = req.UserID
 		event.Channel = req.Channel
+		event.TenantID = l.tenantID
 		l.emit(event)
 	}
 }
