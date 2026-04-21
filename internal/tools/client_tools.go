@@ -80,8 +80,44 @@ func NewExecuteActionTool() Tool {
 	}
 }
 
-// RegisterClientTools adds refresh_page_content and execute_action to the registry with
-// IsClient=true. Safe to call multiple times (overwrites prior registration).
+// NewExecuteJSTool returns the execute_js escape-hatch client tool.
+// The extension runs arbitrary JavaScript in the page's MAIN world (full
+// access to page globals, React/Vue state, etc.) and returns a JSON-
+// serialised result. Use when execute_action's structured primitives
+// (fill/click/select/press_enter) don't cover the interaction — custom
+// comboboxes, shadow DOM, reading arbitrary page state, multi-step
+// DOM manipulation.
+func NewExecuteJSTool() Tool {
+	return &clientTool{
+		name: "execute_js",
+		desc: "Runs arbitrary JavaScript in the user's current browser tab (MAIN world — " +
+			"sees page globals, React/Vue state, shadow roots). The `code` is wrapped in an " +
+			"async IIFE, so both expressions and multi-statement blocks work, and you can " +
+			"`await` and `return`. The return value is JSON-stringified (DOM nodes / Maps / " +
+			"etc. fall back to String). Use this as an ESCAPE HATCH when execute_action " +
+			"cannot reach the element — custom comboboxes (not native <select>), shadow DOM, " +
+			"reading computed styles, triggering multi-step widget interactions. For simple " +
+			"fill/click/select/press_enter prefer execute_action — it's more reliable.",
+		params: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"code": map[string]any{
+					"type": "string",
+					"description": "JavaScript body to execute. Use `return X` to return a value. " +
+						"Examples: `return document.title` — read page title. " +
+						"`document.querySelector('.btn').click(); return 'ok'` — click a button. " +
+						"`return Array.from(document.querySelectorAll('.item')).map(e => e.textContent)` — list items. " +
+						"`const el = document.querySelector('[role=combobox]'); el.click(); await new Promise(r => setTimeout(r, 200)); document.querySelector('[role=option][data-value=\"X\"]')?.click(); return 'selected'` — open a combobox and pick an option.",
+				},
+			},
+			"required": []string{"code"},
+		},
+	}
+}
+
+// RegisterClientTools adds the browser-extension client tools (refresh_page_content,
+// execute_action, execute_js) to the registry with IsClient=true. Safe to call
+// multiple times (overwrites prior registration).
 func RegisterClientTools(r *Registry) {
 	r.RegisterWithMetadata(NewRefreshPageContentTool(), ToolMetadata{
 		Group:        "browser",
@@ -91,6 +127,11 @@ func RegisterClientTools(r *Registry) {
 	r.RegisterWithMetadata(NewExecuteActionTool(), ToolMetadata{
 		Group:        "browser",
 		Capabilities: []ToolCapability{CapMutating},
+		IsClient:     true,
+	})
+	r.RegisterWithMetadata(NewExecuteJSTool(), ToolMetadata{
+		Group:        "browser",
+		Capabilities: []ToolCapability{CapMutating}, // conservative — code may mutate
 		IsClient:     true,
 	})
 }
