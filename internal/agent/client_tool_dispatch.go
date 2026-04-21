@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
@@ -13,7 +14,11 @@ import (
 // tool (refresh_page_content, execute_action) to respond before returning a
 // timeout error to the LLM. The client posts results over the same WS that
 // received the client_tool_call event.
-const ClientToolTimeout = 10 * time.Second
+//
+// 30s is generous — typical roundtrip is <100ms — but covers heavy-page DOM
+// snapshots and temporary WS queue buildup. Too-aggressive timeout here shows
+// up as "tool failed" to the LLM and triggers retry loops.
+const ClientToolTimeout = 30 * time.Second
 
 // dispatchClientTool emits a client_tool_call event to the WS client that owns
 // this run, then blocks on a registry-managed result channel until the matching
@@ -46,16 +51,23 @@ func (l *Loop) dispatchClientTool(
 			"input": tc.Arguments,
 		},
 	})
+	slog.Info("client tool dispatched", "tool", tc.Name, "id", tc.ID, "run", req.RunID)
 
+	start := time.Now()
 	select {
 	case res := <-resultCh:
 		if res == nil {
+			slog.Warn("client tool: empty result", "tool", tc.Name, "id", tc.ID)
 			return tools.ErrorResult("client tool: empty result from extension")
 		}
+		slog.Info("client tool result received", "tool", tc.Name, "id", tc.ID,
+			"ms", time.Since(start).Milliseconds(), "is_error", res.IsError, "content_len", len(res.ForLLM))
 		return res
 	case <-ctx.Done():
+		slog.Warn("client tool cancelled", "tool", tc.Name, "id", tc.ID, "ms", time.Since(start).Milliseconds())
 		return tools.ErrorResult("client tool: run cancelled before client responded")
 	case <-time.After(ClientToolTimeout):
-		return tools.ErrorResult("client tool: execution timed out after 10s")
+		slog.Warn("client tool timeout", "tool", tc.Name, "id", tc.ID, "timeout_s", ClientToolTimeout/time.Second)
+		return tools.ErrorResult("client tool: execution timed out")
 	}
 }
