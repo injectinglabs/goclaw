@@ -46,10 +46,11 @@ func (h *ChatCompletionsHandler) SetRateLimiter(fn func(string) bool) {
 }
 
 type chatCompletionsRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
-	User     string        `json:"user,omitempty"`
+	Model      string        `json:"model"`
+	Messages   []chatMessage `json:"messages"`
+	Stream     bool          `json:"stream"`
+	User       string        `json:"user,omitempty"`
+	SessionKey string        `json:"session_key,omitempty"`
 }
 
 type chatMessage struct {
@@ -156,12 +157,18 @@ func (h *ChatCompletionsHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	}
 
 	runID := uuid.NewString()
-	// Include userID in session key for multi-tenant isolation
-	sessionSuffix := "http-" + runID[:8]
-	if userID != "" {
-		sessionSuffix = "http-" + userID + "-" + runID[:8]
+
+	// Use client-provided session_key for session reuse, or generate a new one
+	var sessionKey string
+	if req.SessionKey != "" {
+		sessionKey = sessions.SessionKey(agentID, req.SessionKey)
+	} else {
+		sessionSuffix := "http-" + runID[:8]
+		if userID != "" {
+			sessionSuffix = "http-" + userID + "-" + runID[:8]
+		}
+		sessionKey = sessions.SessionKey(agentID, sessionSuffix)
 	}
-	sessionKey := sessions.SessionKey(agentID, sessionSuffix)
 
 	slog.Info("chat completions request", "agent", agentID, "stream", req.Stream, "user", userID)
 

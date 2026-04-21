@@ -126,6 +126,10 @@ const (
 	AgentEventToolResult   = "tool.result"
 	AgentEventBlockReply   = "block.reply"
 	AgentEventActivity     = "activity" // agent phase transitions: thinking, tool_exec, compacting
+	// AgentEventClientToolCall instructs the connected client (browser extension)
+	// to execute a client-side tool and return the result via chat.toolResult.
+	// Payload: { id, name, input }.
+	AgentEventClientToolCall = "client_tool_call"
 )
 
 // Chat event subtypes (in payload.type)
