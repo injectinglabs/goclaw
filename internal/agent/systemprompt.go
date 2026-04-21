@@ -621,6 +621,23 @@ func buildBrowserPageSection() []string {
 		"- If the snapshot does not contain the element you need (it happens on JS-heavy pages), do NOT retry the same snapshot — tell the user what you could not find and ask how to proceed.",
 		"- Verify via refresh_page_content ONLY after an execute_action you just ran has probably changed the page (submitted a form, clicked a link, triggered AJAX). Idle re-snapshotting is a loop.",
 		"",
+<<<<<<< Updated upstream
+=======
+		"CRITICAL — finish multi-step requests in one turn:",
+		"- If the user asks you to perform N actions (\"add 3 todos\", \"fill these 5 fields\", \"click all of these buttons\"), execute ALL N steps yourself before writing a final reply. Do NOT stop after one or two and narrate progress — the user is not waiting to approve each step, they asked for the whole thing.",
+		"- After a controlled-input fill + press_enter that clears the field (TodoMVC, most search UIs), the same selector still works for the next value — just call fill again with the next text, then press_enter. No refresh in between needed unless the structure clearly changed.",
+		"- Batch plan first, then emit the tool calls back-to-back. Don't write prose between them.",
+		"",
+		"Template for \"add N items to a list\" (TodoMVC, chat inputs, etc.):",
+		"  1. refresh_page_content (once)",
+		"  2. fill <selector> <item_1>",
+		"  3. press_enter <selector>",
+		"  4. fill <selector> <item_2>",
+		"  5. press_enter <selector>",
+		"  … repeat until all N items are done.",
+		"Do NOT stop after the first few. Count the items the user listed and match that exact count of fill+press_enter pairs.",
+		"",
+>>>>>>> Stashed changes
 		"When NOT to use them:",
 		"- General chat, questions unrelated to the current page, or tasks clearly about other websites → leave the page alone.",
 		"- On a protected tab (chrome://, chrome-extension://, Chrome Web Store), the hint will be absent and the tools will return a clear error — acknowledge and ask the user to navigate somewhere else.",
