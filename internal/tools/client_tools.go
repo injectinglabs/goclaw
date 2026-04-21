@@ -45,15 +45,19 @@ func NewRefreshPageContentTool() Tool {
 }
 
 // NewExecuteActionTool returns the execute_action client tool.
-// The extension performs fill / click / select on an element by CSS selector using
-// React-safe native setters + synthetic input/change events.
+// The extension performs fill / click / select / press_enter on an element by CSS
+// selector using React-safe native setters + synthetic input/change/keyboard events.
 func NewExecuteActionTool() Tool {
 	return &clientTool{
 		name: "execute_action",
 		desc: "Performs a single action on the current page by CSS selector. Call refresh_page_content " +
-			"first to see the elements and find the right selector. Actions: 'fill' (types into an " +
-			"input/textarea — requires value), 'click' (clicks a button/link/checkbox), 'select' " +
-			"(picks an option in a <select> — requires value).",
+			"first to see the elements and find the right selector. Actions: " +
+			"'fill' (types into an input/textarea — requires value), " +
+			"'click' (clicks a button/link/checkbox), " +
+			"'select' (picks an option in a <select> — requires value), " +
+			"'press_enter' (submits a form by simulating Enter on an input/textarea — preferred " +
+			"over click for search forms like Google/GitHub where a visible submit button may be " +
+			"hidden or non-functional until interaction).",
 		params: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -63,12 +67,12 @@ func NewExecuteActionTool() Tool {
 				},
 				"action": map[string]any{
 					"type":        "string",
-					"enum":        []string{"fill", "click", "select"},
+					"enum":        []string{"fill", "click", "select", "press_enter"},
 					"description": "The action to perform",
 				},
 				"value": map[string]any{
 					"type":        "string",
-					"description": "Value for 'fill' or 'select'. Not used for 'click'.",
+					"description": "Value for 'fill' or 'select'. Not used for 'click' or 'press_enter'.",
 				},
 			},
 			"required": []string{"selector", "action"},
