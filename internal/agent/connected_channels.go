@@ -37,10 +37,21 @@ func (l *Loop) fetchConnectedChannels(ctx context.Context) []ConnectedChannelSum
 		// bot — useful when deciding whose chat a reminder should land in.
 		if len(inst.Config) > 0 {
 			var cfg struct {
-				AutoLinkUserID string `json:"auto_link_user_id"`
+				AutoLinkUserID string   `json:"auto_link_user_id"`
+				AllowFrom      []string `json:"allow_from"`
+				DMPolicy       string   `json:"dm_policy"`
 			}
-			if err := json.Unmarshal(inst.Config, &cfg); err == nil && cfg.AutoLinkUserID != "" {
-				summary.OwnerHint = cfg.AutoLinkUserID
+			if err := json.Unmarshal(inst.Config, &cfg); err == nil {
+				if cfg.AutoLinkUserID != "" {
+					summary.OwnerHint = cfg.AutoLinkUserID
+				}
+				// dm_policy=allowlist with a single allow_from entry means this bot
+				// is dedicated to one peer — that peer's Telegram/Slack/... numeric
+				// chat_id is safe to surface as a deliver_to hint so the agent
+				// doesn't have to look it up or re-ask the user.
+				if cfg.DMPolicy == "allowlist" && len(cfg.AllowFrom) == 1 {
+					summary.DeliverTo = strings.TrimPrefix(cfg.AllowFrom[0], "@")
+				}
 			}
 		}
 		out = append(out, summary)
@@ -69,8 +80,11 @@ func buildConnectedChannelsSection(channels []ConnectedChannelSummary) []string 
 			label = c.ChannelType
 		}
 		line := fmt.Sprintf("- `%s` (%s)", c.Name, label)
+		if c.DeliverTo != "" {
+			line += fmt.Sprintf(" — use `deliver_to: %s` to reach the owner", c.DeliverTo)
+		}
 		if c.OwnerHint != "" {
-			line += fmt.Sprintf(" — owner user_id: `%s`", c.OwnerHint)
+			line += fmt.Sprintf(" — internal user_id: `%s`", c.OwnerHint)
 		}
 		b.WriteString(line + "\n")
 	}
