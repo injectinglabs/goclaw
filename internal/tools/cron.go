@@ -307,8 +307,22 @@ func (t *CronTool) handleAdd(ctx context.Context, args map[string]any, agentID, 
 			}
 		}
 		if to == "" {
-			if ctxChatID := ToolChatIDFromCtx(ctx); ctxChatID != "" {
-				to = ctxChatID
+			// Internal channels (ws/browser) have no external chat_id — the ws
+			// client broadcasts cron.delivered to the tenant and routes by
+			// session_key. ChatID on a ws chat.send frame is the user's UUID
+			// (see cmd/gateway/methods/chat.go), which carries no routing
+			// meaning for the client. Fall back to the originating session
+			// key so cron.delivered lands in the right chat and the
+			// extension can render it / surface it in the reminders inbox.
+			if channel == "ws" || channel == "browser" {
+				if sk := ToolSessionKeyFromCtx(ctx); sk != "" {
+					to = sk
+				}
+			}
+			if to == "" {
+				if ctxChatID := ToolChatIDFromCtx(ctx); ctxChatID != "" {
+					to = ctxChatID
+				}
 			}
 		}
 	}
