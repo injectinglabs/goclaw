@@ -15,6 +15,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
 	"github.com/nextlevelbuilder/goclaw/internal/sessions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
 // makeCronJobHandler creates a cron job handler that routes through the scheduler's cron lane.
@@ -125,16 +126,36 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 
 		// If job wants delivery to a channel, send the agent response to the target chat.
 		if job.Deliver && job.DeliverChannel != "" && job.DeliverTo != "" {
-			outMsg := bus.OutboundMessage{
-				Channel: job.DeliverChannel,
-				ChatID:  job.DeliverTo,
-				Content: result.Content,
+			// Internal channels (browser, ws, cli, system, subagent) never reach the
+			// outbound dispatcher — docs/05-channels-messaging.md states they "use
+			// WebSocket directly on the gateway connection". Broadcast an event on
+			// the gateway bus so any connected WS client scoped to this tenant can
+			// inject the cron result straight into its session. Keeps cron delivery
+			// working for the extension / CLI without bending the outbound path.
+			if channels.IsInternalChannel(job.DeliverChannel) {
+				bus.BroadcastForTenant(msgBus, protocol.EventCronDelivered, job.TenantID,
+					map[string]any{
+						"session_key":     job.DeliverTo,
+						"cron_session_key": sessionKey,
+						"channel":         job.DeliverChannel,
+						"content":         result.Content,
+						"media":           result.Media,
+						"agent_id":        agentID,
+						"job_id":          job.ID,
+						"job_name":        job.Name,
+					})
+			} else {
+				outMsg := bus.OutboundMessage{
+					Channel: job.DeliverChannel,
+					ChatID:  job.DeliverTo,
+					Content: result.Content,
+				}
+				if peerKind == "group" {
+					outMsg.Metadata = map[string]string{"group_id": job.DeliverTo}
+				}
+				appendMediaToOutbound(&outMsg, result.Media)
+				msgBus.PublishOutbound(outMsg)
 			}
-			if peerKind == "group" {
-				outMsg.Metadata = map[string]string{"group_id": job.DeliverTo}
-			}
-			appendMediaToOutbound(&outMsg, result.Media)
-			msgBus.PublishOutbound(outMsg)
 		} else if job.Deliver {
 			slog.Warn("cron: delivery configured but channel/chatID missing — output discarded",
 				"job_id", job.ID, "job_name", job.Name, "channel", job.DeliverChannel, "to", job.DeliverTo)
