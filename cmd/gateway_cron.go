@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
 	"github.com/nextlevelbuilder/goclaw/internal/sessions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -133,16 +135,49 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 			// inject the cron result straight into its session. Keeps cron delivery
 			// working for the extension / CLI without bending the outbound path.
 			if channels.IsInternalChannel(job.DeliverChannel) {
+				// Persist the cron-generated reply into the originating chat's
+				// message history so it becomes part of the conversation that
+				// is visible when the user reloads the extension / opens another
+				// device. Using AddMessage keeps the cron reply indistinguishable
+				// from any other assistant turn in that session — history
+				// loaders, summaries, and reminder inboxes can all pick it up
+				// via normal session queries. When origin_session_key is empty
+				// (jobs scheduled via non-ctx paths), skip the write — the
+				// broadcast below still delivers it live and the reminders
+				// inbox can fall back to cron_run_logs for replay.
+				if job.OriginSessionKey != "" && strings.TrimSpace(result.Content) != "" {
+					now := time.Now().UTC()
+					persistMsg := providers.Message{
+						Role:      "assistant",
+						Content:   result.Content,
+						CreatedAt: &now,
+					}
+					// Best-effort — any persistence error must not block delivery.
+					// AddMessage is fire-and-forget in the store interface.
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								slog.Warn("cron: failed to persist reply to origin session",
+									"session_key", job.OriginSessionKey, "job_id", job.ID, "recover", r)
+							}
+						}()
+						sessionMgr.AddMessage(cronCtx, job.OriginSessionKey, persistMsg)
+					}()
+				}
 				bus.BroadcastForTenant(msgBus, protocol.EventCronDelivered, job.TenantID,
 					map[string]any{
-						"session_key":     job.DeliverTo,
-						"cron_session_key": sessionKey,
-						"channel":         job.DeliverChannel,
-						"content":         result.Content,
-						"media":           result.Media,
-						"agent_id":        agentID,
-						"job_id":          job.ID,
-						"job_name":        job.Name,
+						// session_key keeps the legacy field name for backwards compat
+						// with already-deployed clients; new clients should prefer
+						// origin_session_key for routing.
+						"session_key":        job.DeliverTo,
+						"origin_session_key": job.OriginSessionKey,
+						"cron_session_key":   sessionKey,
+						"channel":            job.DeliverChannel,
+						"content":            result.Content,
+						"media":              result.Media,
+						"agent_id":           agentID,
+						"job_id":             job.ID,
+						"job_name":           job.Name,
 					})
 			} else {
 				outMsg := bus.OutboundMessage{
