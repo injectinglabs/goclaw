@@ -196,6 +196,8 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		}
 	}
 
+	connectedChannels := l.fetchConnectedChannels(ctx)
+
 	systemPrompt := BuildSystemPrompt(SystemPromptConfig{
 		AgentID:                l.id,
 		AgentUUID:              l.agentUUID.String(),
@@ -238,6 +240,7 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		DelegateTargets:        l.delegateTargets,
 		OrchMode:               l.orchMode,
 		ProviderContribution:   l.providerContribution(),
+		ConnectedChannels:      connectedChannels,
 	})
 
 	messages = append(messages, providers.Message{

@@ -71,6 +71,11 @@ type CacheInvalidateFunc func(agentID uuid.UUID, userID string)
 // Loop is the agent execution loop for one agent instance.
 // Think → Act → Observe cycle with tool execution.
 type Loop struct {
+	// channelInstanceStore lets the loop enumerate active channel_instances
+	// at prompt-build time so the agent knows which delivery targets are
+	// already wired (used by buildConnectedChannelsSection). Nil-safe.
+	channelInstanceStore store.ChannelInstanceStore
+
 	// id is the human-readable agent_key (e.g. "goctech-leader"). Use for logs,
 	// UI events, system prompt rendering, filesystem paths, and context keys.
 	// NEVER set on DB FK columns or DomainEvent.AgentID — those require UUID.
@@ -297,7 +302,8 @@ type LoopConfig struct {
 	MaxToolCalls     int
 	Workspace        string
 	DataDir          string // global workspace root for team workspace resolution
-	WorkspaceSharing *store.WorkspaceSharingConfig
+	WorkspaceSharing     *store.WorkspaceSharingConfig
+	ChannelInstanceStore store.ChannelInstanceStore
 
 	// v3 memory/retrieval flags removed — always true at runtime.
 	AutoInjector memory.AutoInjector // v3 L0 memory auto-inject (nil = disabled)
@@ -491,6 +497,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		workspace:              cfg.Workspace,
 		dataDir:                cfg.DataDir,
 		workspaceSharing:       cfg.WorkspaceSharing,
+		channelInstanceStore:   cfg.ChannelInstanceStore,
 		autoInjector:           cfg.AutoInjector,
 		restrictToWs:           cfg.RestrictToWs,
 		subagentsCfg:           cfg.SubagentsCfg,
