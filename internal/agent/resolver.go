@@ -107,6 +107,11 @@ type ResolverDeps struct {
 	// Contact store for user identity resolution (channel contacts → tenant users)
 	ContactStore store.ContactStore
 
+	// Exposes currently registered channel_instances for the tenant so the
+	// agent loop can render a "Connected Channels" section into the system
+	// prompt. Nil-safe — when unset the section is simply omitted.
+	ChannelInstanceStore store.ChannelInstanceStore
+
 	// Tenant store for workspace path resolution
 	TenantStore store.TenantStore
 
@@ -518,6 +523,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			SkillEvolve:            ag.AgentType == store.AgentTypePredefined && ag.ParseSkillEvolve(),
 			SkillNudgeInterval:     ag.ParseSkillNudgeInterval(),
 			WorkspaceSharing:       ag.ParseWorkspaceSharing(),
+			ChannelInstanceStore:   deps.ChannelInstanceStore,
 			ShellDenyGroups:        ag.ParseShellDenyGroups(),
 			ConfigPermStore:        deps.ConfigPermStore,
 			TeamStore:              deps.TeamStore,

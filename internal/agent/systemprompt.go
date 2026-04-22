@@ -157,6 +157,23 @@ type SystemPromptConfig struct {
 
 	// Provider-specific prompt customizations (nil = defaults).
 	ProviderContribution *providers.PromptContribution
+
+	// ConnectedChannels is a snapshot of the tenant's enabled
+	// channel_instances, collected right before prompt build. When non-empty
+	// a "## Connected Channels" section is injected so the agent knows which
+	// targets are wired for proactive delivery (cron, message, sessions_send)
+	// and doesn't ask the user to re-connect an already-active bot.
+	ConnectedChannels []ConnectedChannelSummary
+}
+
+// ConnectedChannelSummary is the minimum shape buildConnectedChannelsSection
+// needs to render a readable routing hint. Values come from channel_instances
+// rows but we reduce them to display-safe fields (no credentials).
+type ConnectedChannelSummary struct {
+	Name        string // channel_instance.name (use as deliver_channel)
+	ChannelType string // "telegram", "slack", etc.
+	DisplayName string // optional human-readable label
+	OwnerHint   string // e.g. auto_link_user_id from config — empty when unknown
 }
 
 // sectionContent returns override content if provider contribution has one,
@@ -468,6 +485,10 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 
 	// 9.5. Channel formatting hints — full mode only
 	if isFull {
+	if section := buildConnectedChannelsSection(cfg.ConnectedChannels); len(section) > 0 {
+		lines = append(lines, section...)
+	}
+
 		if hint := buildChannelFormattingHint(cfg.ChannelType); hint != nil {
 			lines = append(lines, hint...)
 		}
