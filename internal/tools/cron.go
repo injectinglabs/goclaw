@@ -45,9 +45,10 @@ VALID ACTIONS AND EXACT PAYLOAD SHAPES:
     "name": "string",             // required, lowercase slug: [a-z0-9-]+
     "schedule": { ... },          // required
     "message": "string",          // required
-    "deliver": true|false,        // optional, default false
-    "channel": "string",          // optional, auto-filled from current channel context
-    "to": "string",               // optional
+    "deliver": true|false,        // set true for reminders / proactive messages. Auto-defaults to true for one-shot at-jobs with a non-empty message.
+    "channel": "string",          // channel_instance name (see ## Connected Channels in system prompt). Auto-falls back to the current session channel if you omit it. When the user explicitly asks "in Telegram/Slack/...", pass that channel name.
+    "to": "string",               // deliver_to (chat_id). For DM bots pick the value from ## Connected Channels; for ws/browser pass current session key.
+    "stateless": true|false,      // default false. Set true when job.message is the exact text to send and no reasoning is needed at fire time ("every 10s send \"ping\""). Stateless jobs skip the LLM turn entirely and broadcast the literal message — cheap, instant, safe at any interval. Leave false when the job must look up data, call tools, or compute at run time.
     "agentId": "string",          // optional, defaults to current agent
     "deleteAfterRun": true|false  // optional, default true for schedule.kind="at"
   }
@@ -75,6 +76,12 @@ VALID ACTIONS AND EXACT PAYLOAD SHAPES:
 
 6) run
 { "action": "run", "jobId": "string" }
+// Force-triggers a job right now. Use ONLY when the user explicitly asks
+// to run/test a specific job. Do NOT call this to "check" whether a
+// scheduled job is working — scheduled fires happen automatically; use
+// action="runs" to inspect recent outcomes. If a manual run returns
+// "already running", the job is fine — a previous fire is still in
+// flight. Never delete a job just because a run probe hit that state.
 
 7) runs
 { "action": "runs", "jobId": "string" }
@@ -260,6 +267,14 @@ func (t *CronTool) handleAdd(ctx context.Context, args map[string]any, agentID, 
 	deliver, _ := jobObj["deliver"].(bool)
 	channel, _ := jobObj["channel"].(string)
 	to, _ := jobObj["to"].(string)
+	_ = jobObj["stateless"] // reserved: stateless flag not wired through AddJob yet; add via action="update" after creation if needed
+
+	// Safety net for the common reminder use-case: one-shot at-job with
+	// a non-empty message almost always wants deliver=true. Models drop this
+	// flag often — flip it on when it wasn't explicitly set false.
+	if _, deliverExplicit := jobObj["deliver"]; !deliverExplicit && schedule.Kind == "at" && message != "" {
+		deliver = true
+	}
 
 	// Auto-default deliver=true when the request comes from a real channel
 	// (not CLI/system/subagent). Users chatting on Zalo/Telegram expect
@@ -315,6 +330,8 @@ func (t *CronTool) handleAdd(ctx context.Context, args map[string]any, agentID, 
 			job = updated
 		}
 	}
+
+
 
 	data, _ := json.MarshalIndent(map[string]any{"job": job}, "", "  ")
 	return NewResult(string(data))
