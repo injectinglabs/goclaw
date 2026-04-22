@@ -173,11 +173,15 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 				if compactionCount > 0 {
 					summary = l.sessions.GetSummary(ctx, sessionKey)
 				}
+				// See loop_finalize.go — unify user_id across channels via the
+				// existing contact-merge resolver so memory writers see one
+				// canonical identity per human.
+				memUserID := l.resolveCredentialUserID(ctx, *req)
 				l.domainBus.Publish(eventbus.DomainEvent{
 					Type:     eventbus.EventSessionCompleted,
 					TenantID: l.tenantID.String(),
 					AgentID:  l.agentUUID.String(),
-					UserID:   req.UserID,
+					UserID:   memUserID,
 					SourceID: sessionKey,
 					Payload: &eventbus.SessionCompletedPayload{
 						SessionKey:      sessionKey,
