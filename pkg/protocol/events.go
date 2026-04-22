@@ -6,6 +6,12 @@ const (
 	EventChat               = "chat"
 	EventHealth             = "health"
 	EventCron               = "cron"
+	// EventCronDelivered is broadcast when a cron job fires and its result
+	// targets an internal channel (browser, ws, cli) that cannot go through
+	// the outbound dispatcher. Payload carries {session_key, content, media,
+	// agent_id, chat_id} so connected clients can inject the delivered
+	// message directly into their session view.
+	EventCronDelivered      = "cron.delivered"
 	EventHeartbeat          = "heartbeat"
 	EventExecApprovalReq    = "exec.approval.requested"
 	EventExecApprovalRes    = "exec.approval.resolved"
