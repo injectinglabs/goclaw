@@ -198,11 +198,18 @@ func (l *Loop) finalizeRun(
 
 	// V3: emit session.completed for consolidation pipeline (episodic → semantic → dreaming)
 	if l.domainBus != nil {
+		// Unify user_id across channels. When a channel_contact is already
+		// merged to a tenant_user via POST /v1/contacts/merge, this returns
+		// that canonical tenant_users.user_id so Episodic/Semantic/Dreaming
+		// workers write memory under one identity for the same human. Falls
+		// back to req.UserID when no merge exists, preserving isolation for
+		// unknown senders.
+		memUserID := l.resolveCredentialUserID(ctx, *req)
 		l.domainBus.Publish(eventbus.DomainEvent{
 			Type:     eventbus.EventSessionCompleted,
 			TenantID: l.tenantID.String(),
 			AgentID:  l.agentUUID.String(),
-			UserID:   req.UserID,
+			UserID:   memUserID,
 			SourceID: req.SessionKey,
 			Payload: &eventbus.SessionCompletedPayload{
 				SessionKey:      req.SessionKey,
