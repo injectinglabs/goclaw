@@ -275,15 +275,26 @@ func (t *CronTool) handleAdd(ctx context.Context, args map[string]any, agentID, 
 		}
 	}
 
-	// Auto-fill channel and to from context when deliver is requested.
-	// Always prefer context values over LLM-provided values to prevent
-	// misrouted deliveries (e.g. LLM confusing guild ID with channel ID).
+	// Fill channel/to from the current session context ONLY when the agent
+	// did not supply them explicitly. Previously we always overrode the
+	// agent's values to protect against misrouting (LLM confusing guild ID
+	// with channel ID), but that also blocked legitimate cross-channel
+	// reminders like "in extension: remind me in Telegram in 10s" — the
+	// agent's channel="telegram-<sub>" was silently rewritten to the current
+	// ws session. The Connected Channels prompt section already enumerates
+	// the tenant's real channel_instance names; trusting an agent-supplied
+	// value is safer than the dispatcher-level unknown-channel drop that
+	// would result from an LLM hallucination.
 	if deliver {
-		if ctxChannel := ToolChannelFromCtx(ctx); ctxChannel != "" {
-			channel = ctxChannel
+		if channel == "" {
+			if ctxChannel := ToolChannelFromCtx(ctx); ctxChannel != "" {
+				channel = ctxChannel
+			}
 		}
-		if ctxChatID := ToolChatIDFromCtx(ctx); ctxChatID != "" {
-			to = ctxChatID
+		if to == "" {
+			if ctxChatID := ToolChatIDFromCtx(ctx); ctxChatID != "" {
+				to = ctxChatID
+			}
 		}
 	}
 
