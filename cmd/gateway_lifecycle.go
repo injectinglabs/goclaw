@@ -131,7 +131,7 @@ func (d *gatewayDeps) runLifecycle(
 	// Contact collector: auto-collect user info from channels with in-memory dedup cache.
 	var contactCollector *store.ContactCollector
 	if d.pgStores.Contacts != nil {
-		contactCollector = store.NewContactCollector(d.pgStores.Contacts, cache.NewInMemoryCache[bool]())
+		contactCollector = store.NewContactCollectorWithAutoLink(d.pgStores.Contacts, d.pgStores.ChannelInstances, d.pgStores.Tenants, cache.NewInMemoryCache[bool]())
 		d.channelMgr.SetContactCollector(contactCollector)
 	}
 
