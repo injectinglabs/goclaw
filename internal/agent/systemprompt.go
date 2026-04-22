@@ -174,6 +174,7 @@ type ConnectedChannelSummary struct {
 	ChannelType string // "telegram", "slack", etc.
 	DisplayName string // optional human-readable label
 	OwnerHint   string // e.g. auto_link_user_id from config — empty when unknown
+	DeliverTo   string // ready-to-use deliver_to value (derived from allow_from[0] for single-peer allowlist bots); empty when unambiguous chat_id cannot be inferred
 }
 
 // sectionContent returns override content if provider contribution has one,
