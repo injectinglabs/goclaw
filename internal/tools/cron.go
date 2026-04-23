@@ -323,18 +323,6 @@ func (t *CronTool) handleAdd(ctx context.Context, args map[string]any, agentID, 
 		return ErrorResult(fmt.Sprintf("failed to create cron job: %v", err))
 	}
 
-	// Persist the originating session key so cron-delivered messages for
-	// internal channels (ws/browser) can be written back to that session's
-	// history at fire time. This keeps the DB — not in-memory client state —
-	// as the source of truth for cron results visible in the extension chat.
-	// Scheduled via other paths (HTTP API, scripts) leaves it empty, and the
-	// cron handler simply skips the origin-session write in that case.
-	if sessionKey := ToolSessionKeyFromCtx(ctx); sessionKey != "" {
-		if updated, uErr := t.cronStore.UpdateJob(ctx, job.ID, store.CronJobPatch{OriginSessionKey: &sessionKey}); uErr == nil {
-			job = updated
-		}
-	}
-
 	// Set wake_heartbeat if requested (triggers heartbeat after cron job completes)
 	if wh, _ := jobObj["wake_heartbeat"].(bool); wh {
 		wakeTrue := true

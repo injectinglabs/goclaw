@@ -35,13 +35,6 @@ type CronJob struct {
 	DeliverChannel string       `json:"deliverChannel" db:"deliver_channel"`
 	DeliverTo      string       `json:"deliverTo" db:"deliver_to"`
 	WakeHeartbeat  bool         `json:"wakeHeartbeat" db:"wake_heartbeat"`
-	// OriginSessionKey records the session from which this job was scheduled.
-	// For internal-channel delivery (ws/browser) the cron-generated message is
-	// written to this session's message history so a client reloading its chat
-	// list sees cron reminders in the right conversation without relying on
-	// ephemeral WS event state. Empty for jobs scheduled via HTTP API or
-	// predating the 000056 migration.
-	OriginSessionKey string `json:"originSessionKey,omitempty" db:"origin_session_key"`
 }
 
 // CronSchedule defines when a job should run.
@@ -98,10 +91,9 @@ type CronJobPatch struct {
 	DeleteAfterRun *bool         `json:"deleteAfterRun,omitempty" db:"-"`
 	Stateless      *bool         `json:"stateless,omitempty" db:"-"`
 	Deliver        *bool         `json:"deliver,omitempty" db:"-"`
-	DeliverChannel   *string       `json:"deliverChannel,omitempty" db:"-"`
-	DeliverTo        *string       `json:"deliverTo,omitempty" db:"-"`
-	WakeHeartbeat    *bool         `json:"wakeHeartbeat,omitempty" db:"-"`
-	OriginSessionKey *string       `json:"originSessionKey,omitempty" db:"-"`
+	DeliverChannel *string       `json:"deliverChannel,omitempty" db:"-"`
+	DeliverTo      *string       `json:"deliverTo,omitempty" db:"-"`
+	WakeHeartbeat  *bool         `json:"wakeHeartbeat,omitempty" db:"-"`
 }
 
 // CronEvent represents a job lifecycle event sent to subscribers.
