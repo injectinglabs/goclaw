@@ -42,9 +42,24 @@ func (s *FinalizeStage) Execute(ctx context.Context, state *RunState) error {
 	// Must run BEFORE session flush so the agent message is persisted even if suppressed.
 	isSilent := s.deps.IsSilentReply != nil && s.deps.IsSilentReply(state.Observe.FinalContent)
 
-	// 2b. Fallback for empty content (matching v2: channels need non-empty content to deliver).
+	// 2b. Rescue empty reply: when the model ended its turn without text
+	// (usually after a tool-call round), fire one tools-disabled "finalise
+	// please" call so the model is forced to produce an answer from the
+	// data already in history. If rescue still returns empty, the callback
+	// falls back to a localised user-facing sentence. Keeping the legacy
+	// "..." placeholder is a last resort when no callback is wired.
 	if state.Observe.FinalContent == "" && !isSilent {
-		state.Observe.FinalContent = "..."
+		if s.deps.HandleEmptyReply != nil {
+			if rescued := s.deps.HandleEmptyReply(ctx, state.Messages.All()); rescued != "" {
+				if s.deps.SanitizeContent != nil {
+					rescued = s.deps.SanitizeContent(rescued)
+				}
+				state.Observe.FinalContent = rescued
+			}
+		}
+		if state.Observe.FinalContent == "" {
+			state.Observe.FinalContent = "..."
+		}
 	}
 
 	// 2c. Append content suffix (e.g. image markdown for WS) with dedup.

@@ -108,6 +108,15 @@ type PipelineDeps struct {
 	UpdateMetadata         func(ctx context.Context, sessionKey string, usage providers.Usage) error
 	BootstrapCleanup       func(ctx context.Context, state *RunState) error
 	MaybeSummarize         func(ctx context.Context, sessionKey string)
+
+	// HandleEmptyReply is called by FinalizeStage when the iteration loop
+	// ends with no final assistant text (typical symptom: a tool-call round
+	// where the model fetched data but forgot to summarise). Implementations
+	// should first try a tools-disabled rescue call that forces the model to
+	// produce text from existing history; if that still returns empty, fall
+	// back to a user-facing sentence (localised). Returning "" means the
+	// caller should keep the legacy "..." placeholder.
+	HandleEmptyReply func(ctx context.Context, history []providers.Message) string
 }
 
 // FireHook is nil-safe. Returns FireResult{Decision: DecisionAllow} when no
