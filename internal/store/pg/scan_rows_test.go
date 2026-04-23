@@ -477,15 +477,20 @@ func TestCronRunLogRow_ToCronRunLogEntry(t *testing.T) {
 	ranAt := time.Unix(1700000000, 0)
 	errMsg := "boom"
 	sum := "ok"
+	jobID := uuid.New()
 	r := cronRunLogRow{
-		JobID: uuid.New(), Status: "success",
-		Error: &errMsg, Summary: &sum,
+		JobID: &jobID, JobName: "nightly-sync", OriginSessionKey: "agent:default:abc",
+		Status: "success",
+		Error:  &errMsg, Summary: &sum,
 		RanAt: ranAt, DurationMS: 500,
 		InputTokens: 100, OutputTokens: 50,
 	}
 	got := r.toCronRunLogEntry()
-	if got.JobID != r.JobID.String() {
+	if got.JobID != jobID.String() {
 		t.Errorf("JobID")
+	}
+	if got.JobName != "nightly-sync" || got.OriginSessionKey != "agent:default:abc" {
+		t.Errorf("snapshot fields not propagated: %+v", got)
 	}
 	if got.Status != "success" || got.Error != "boom" || got.Summary != "ok" {
 		t.Errorf("%+v", got)
@@ -501,8 +506,22 @@ func TestCronRunLogRow_ToCronRunLogEntry(t *testing.T) {
 	}
 }
 
+func TestCronRunLogRow_NilJobIDAfterJobDeletion(t *testing.T) {
+	// After a one-shot cron_jobs row is deleted, the FK becomes NULL.
+	// Entry should still surface with JobID="" plus any snapshotted metadata.
+	r := cronRunLogRow{JobID: nil, JobName: "one-shot", OriginSessionKey: "agent:default:xyz", Status: "success", RanAt: time.Now()}
+	got := r.toCronRunLogEntry()
+	if got.JobID != "" {
+		t.Errorf("expected empty JobID when FK is nil, got %q", got.JobID)
+	}
+	if got.JobName != "one-shot" || got.OriginSessionKey != "agent:default:xyz" {
+		t.Errorf("snapshot should survive orphaning: %+v", got)
+	}
+}
+
 func TestCronRunLogRow_NilErrorAndSummary(t *testing.T) {
-	r := cronRunLogRow{JobID: uuid.New(), Status: "ok", RanAt: time.Now()}
+	jobID := uuid.New()
+	r := cronRunLogRow{JobID: &jobID, Status: "ok", RanAt: time.Now()}
 	got := r.toCronRunLogEntry()
 	if got.Error != "" || got.Summary != "" {
 		t.Errorf("nil pointers should deref empty: %+v", got)

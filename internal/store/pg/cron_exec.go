@@ -71,18 +71,21 @@ func (s *PGCronStore) GetRunLog(ctx context.Context, jobID string, limit, offset
 
 	// Aliased cols so sqlx StructScan maps to cronRunLogRow db tags.
 	const cols = "r.job_id, r.status, r.error, r.summary, r.ran_at," +
+		" r.job_name, r.origin_session_key," +
 		" COALESCE(r.duration_ms, 0) AS duration_ms," +
 		" COALESCE(r.input_tokens, 0) AS input_tokens," +
 		" COALESCE(r.output_tokens, 0) AS output_tokens"
 
-	// Build tenant-aware WHERE clause via JOIN with cron_jobs.
+	// Build tenant-aware WHERE clause. After migration 000057, cron_run_logs
+	// can outlive their parent job (FK ON DELETE SET NULL), so we LEFT JOIN
+	// and fall back to the origin session's tenant_id for orphaned rows.
 	var tenantJoin, tenantWhere string
 	var tenantArgs []any
 	if !store.IsCrossTenant(ctx) {
 		tid := store.TenantIDFromContext(ctx)
 		if tid != uuid.Nil {
-			tenantJoin = " JOIN cron_jobs j ON r.job_id = j.id"
-			tenantWhere = " AND j.tenant_id = $1"
+			tenantJoin = " LEFT JOIN cron_jobs j ON r.job_id = j.id LEFT JOIN sessions s ON s.session_key = r.origin_session_key"
+			tenantWhere = " AND (j.tenant_id = $1 OR s.tenant_id = $1)"
 			tenantArgs = append(tenantArgs, tid)
 		}
 	}

@@ -57,17 +57,20 @@ func (s *SQLiteCronStore) GetRunLog(ctx context.Context, jobID string, limit, of
 		offset = 0
 	}
 
-	const cols = "r.job_id, r.status, r.error, r.summary, r.ran_at, COALESCE(r.duration_ms, 0), COALESCE(r.input_tokens, 0), COALESCE(r.output_tokens, 0)"
+	const cols = "r.job_id, r.status, r.error, r.summary, r.ran_at, r.job_name, r.origin_session_key, COALESCE(r.duration_ms, 0), COALESCE(r.input_tokens, 0), COALESCE(r.output_tokens, 0)"
 
-	// Tenant isolation via JOIN with cron_jobs.
+	// Tenant isolation via JOIN with cron_jobs. After migration 000057 the
+	// FK is ON DELETE SET NULL, so one-shot runs can outlive their parent
+	// job. Use LEFT JOIN + tenant scope on sessions via origin_session_key
+	// fallback so orphaned runs still match the tenant they belong to.
 	var tenantJoin, tenantWhere string
 	var tenantArgs []any
 	if !store.IsCrossTenant(ctx) {
 		tid := store.TenantIDFromContext(ctx)
 		if tid != uuid.Nil {
-			tenantJoin = " JOIN cron_jobs j ON r.job_id = j.id"
-			tenantWhere = " AND j.tenant_id = ?"
-			tenantArgs = append(tenantArgs, tid)
+			tenantJoin = " LEFT JOIN cron_jobs j ON r.job_id = j.id LEFT JOIN sessions s ON s.session_key = r.origin_session_key"
+			tenantWhere = " AND (j.tenant_id = ? OR s.tenant_id = ?)"
+			tenantArgs = append(tenantArgs, tid, tid)
 		}
 	}
 
@@ -104,24 +107,30 @@ func (s *SQLiteCronStore) GetRunLog(ctx context.Context, jobID string, limit, of
 
 	var result []store.CronRunLogEntry
 	for rows.Next() {
-		var jobUUID uuid.UUID
-		var status string
+		var jobUUIDPtr *uuid.UUID
+		var status, jobName, originSessionKey string
 		var errStr, summary *string
 		var ranAt time.Time
 		var durationMS int64
 		var inputTokens, outputTokens int
-		if err := rows.Scan(&jobUUID, &status, &errStr, &summary, &ranAt, &durationMS, &inputTokens, &outputTokens); err != nil {
+		if err := rows.Scan(&jobUUIDPtr, &status, &errStr, &summary, &ranAt, &jobName, &originSessionKey, &durationMS, &inputTokens, &outputTokens); err != nil {
 			continue
 		}
+		var jobID string
+		if jobUUIDPtr != nil {
+			jobID = jobUUIDPtr.String()
+		}
 		result = append(result, store.CronRunLogEntry{
-			Ts:           ranAt.UnixMilli(),
-			JobID:        jobUUID.String(),
-			Status:       status,
-			Error:        derefStr(errStr),
-			Summary:      derefStr(summary),
-			DurationMS:   durationMS,
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
+			Ts:               ranAt.UnixMilli(),
+			JobID:            jobID,
+			JobName:          jobName,
+			OriginSessionKey: originSessionKey,
+			Status:           status,
+			Error:            derefStr(errStr),
+			Summary:          derefStr(summary),
+			DurationMS:       durationMS,
+			InputTokens:      inputTokens,
+			OutputTokens:     outputTokens,
 		})
 	}
 	if rErr := rows.Err(); rErr != nil {

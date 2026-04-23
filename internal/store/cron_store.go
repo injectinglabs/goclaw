@@ -68,16 +68,20 @@ type CronJobState struct {
 	LastError   string `json:"lastError,omitempty" db:"-"`
 }
 
-// CronRunLogEntry records a job execution.
+// CronRunLogEntry records a job execution. origin_session_key and job_name
+// are snapshotted from cron_jobs at INSERT time so the reminder inbox can
+// still attribute runs whose parent one-shot job has since been deleted.
 type CronRunLogEntry struct {
-	Ts           int64  `json:"ts" db:"-"`
-	JobID        string `json:"jobId" db:"-"`
-	Status       string `json:"status,omitempty" db:"-"`
-	Error        string `json:"error,omitempty" db:"-"`
-	Summary      string `json:"summary,omitempty" db:"-"`
-	DurationMS   int64  `json:"durationMs,omitempty" db:"-"`
-	InputTokens  int    `json:"inputTokens,omitempty" db:"-"`
-	OutputTokens int    `json:"outputTokens,omitempty" db:"-"`
+	Ts               int64  `json:"ts" db:"-"`
+	JobID            string `json:"jobId" db:"-"`
+	JobName          string `json:"jobName,omitempty" db:"-"`
+	OriginSessionKey string `json:"originSessionKey,omitempty" db:"-"`
+	Status           string `json:"status,omitempty" db:"-"`
+	Error            string `json:"error,omitempty" db:"-"`
+	Summary          string `json:"summary,omitempty" db:"-"`
+	DurationMS       int64  `json:"durationMs,omitempty" db:"-"`
+	InputTokens      int    `json:"inputTokens,omitempty" db:"-"`
+	OutputTokens     int    `json:"outputTokens,omitempty" db:"-"`
 }
 
 // CronJobResult is the output of a cron job handler execution.
