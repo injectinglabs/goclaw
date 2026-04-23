@@ -190,6 +190,11 @@ const (
 	MsgSkillNudge70Pct      = "skill.nudge_70_pct"
 	MsgSkillNudge90Pct      = "skill.nudge_90_pct"
 
+	// Shown when an agent loop finishes with no assistant content — e.g.
+	// the model silently terminated after a tool round. Replaces the
+	// legacy "..." placeholder with a sentence the user can actually act on.
+	MsgEmptyReplyFallback = "agent.empty_reply_fallback"
+
 	// --- Tenants ---
 	MsgInvalidRole = "error.invalid_role" // "invalid role: allowed values are owner, admin, operator, member, viewer"
 
