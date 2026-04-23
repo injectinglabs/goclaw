@@ -490,20 +490,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_cron_jobs_agent_tenant_name ON cron_jobs(ag
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS cron_run_logs (
-    id                 TEXT NOT NULL PRIMARY KEY,
-    job_id             TEXT REFERENCES cron_jobs(id) ON DELETE SET NULL,
-    agent_id           TEXT REFERENCES agents(id) ON DELETE SET NULL,
-    status             VARCHAR(20) NOT NULL,
-    summary            TEXT,
-    error              TEXT,
-    duration_ms        INT,
-    input_tokens       INT DEFAULT 0,
-    output_tokens      INT DEFAULT 0,
-    job_name           TEXT NOT NULL DEFAULT '',
-    origin_session_key TEXT NOT NULL DEFAULT '',
-    team_id            TEXT REFERENCES agent_teams(id) ON DELETE SET NULL,
-    ran_at             TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    created_at         TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    id            TEXT NOT NULL PRIMARY KEY,
+    job_id        TEXT NOT NULL REFERENCES cron_jobs(id) ON DELETE CASCADE,
+    agent_id      TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    status        VARCHAR(20) NOT NULL,
+    summary       TEXT,
+    error         TEXT,
+    duration_ms   INT,
+    input_tokens  INT DEFAULT 0,
+    output_tokens INT DEFAULT 0,
+    team_id       TEXT REFERENCES agent_teams(id) ON DELETE SET NULL,
+    ran_at        TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_cron_run_logs_job ON cron_run_logs(job_id, ran_at DESC);
