@@ -230,6 +230,14 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 		chatReq.Options[providers.OptSessionKey] = req.SessionKey
 		chatReq.Options[providers.OptAgentID] = l.agentUUID.String()
 		chatReq.Options[providers.OptUserID] = req.UserID
+		// Forward the canonical user id as OpenAI's standard `user` field in
+		// the request body (OpenAI-compatible providers accept this for
+		// attribution). resolveCredentialUserID picks up merged_id when a
+		// channel contact is linked to a tenant_user — gives a stable id
+		// across channels that LLM-Service can use as fallback attribution.
+		if credUserID := l.resolveCredentialUserID(ctx, *req); credUserID != "" {
+			chatReq.Options[providers.OptUser] = credUserID
+		}
 		chatReq.Options[providers.OptChannel] = req.Channel
 		chatReq.Options[providers.OptChatID] = req.ChatID
 		chatReq.Options[providers.OptPeerKind] = req.PeerKind

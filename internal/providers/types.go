@@ -24,6 +24,12 @@ const (
 	OptFastMode             = "fast_mode"
 	OptPromptCacheKey       = "prompt_cache_key"
 	OptPromptCacheRetention = "prompt_cache_retention"
+
+	// OptUser forwards OpenAI's end-user identifier. OpenAI-compatible
+	// proxies (including our own LLM-Service) use it to attribute usage /
+	// rate-limit per downstream user. Caller sets it to the canonical
+	// tenant_users.user_id from the agent loop context.
+	OptUser = "user"
 )
 
 // TokenSource provides an OAuth access token (with auto-refresh).
