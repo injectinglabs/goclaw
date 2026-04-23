@@ -146,6 +146,14 @@ func (p *OpenAIProvider) buildRequestBody(model string, req ChatRequest, stream 
 		"stream":   stream,
 	}
 
+	// OpenAI standard `user` field — opaque identifier forwarded to the
+	// provider for usage attribution / abuse-detection on their side.
+	// Our LLM-Service uses this as a fallback for user_id when no
+	// X-User-Id header is present (see LLM-Service app.py).
+	if v, ok := req.Options[OptUser].(string); ok && v != "" {
+		body["user"] = v
+	}
+
 	if len(req.Tools) > 0 {
 		body["tools"] = CleanToolSchemas(p.schemaProviderName(), req.Tools)
 		body["tool_choice"] = "auto"
