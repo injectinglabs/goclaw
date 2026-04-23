@@ -25,7 +25,7 @@ import (
 // Safe because cron jobs only fire after Start(), well after this is set.
 var cronHeartbeatWakeFn func(agentID string)
 
-func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg *config.Config, channelMgr *channels.Manager, sessionMgr store.SessionStore, agentStore store.AgentStore) func(job *store.CronJob) (*store.CronJobResult, error) {
+func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg *config.Config, channelMgr *channels.Manager, sessionMgr store.SessionStore, agentStore store.AgentStore, reminderStore store.ReminderStore) func(job *store.CronJob) (*store.CronJobResult, error) {
 	return func(job *store.CronJob) (*store.CronJobResult, error) {
 		agentID := job.AgentID
 		if agentID == "" && agentStore != nil {
@@ -133,16 +133,37 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 			// inject the cron result straight into its session. Keeps cron delivery
 			// working for the extension / CLI without bending the outbound path.
 			if channels.IsInternalChannel(job.DeliverChannel) {
+				slog.Info("cron: delivering to internal channel",
+					"job_id", job.ID, "channel", job.DeliverChannel, "session_key", job.DeliverTo, "content_len", len(result.Content))
+				// Persist the reminder to the dedicated inbox table. Deliberately
+				// not FK-linked to cron_jobs so one-shot auto-deletion doesn't
+				// cascade away the reminder. Best-effort: a DB failure here must
+				// not block the live WS broadcast below.
+				if reminderStore != nil && strings.TrimSpace(result.Content) != "" {
+					rem := &store.Reminder{
+						TenantID:         job.TenantID,
+						UserID:           job.UserID,
+						JobID:            job.ID,
+						JobName:          job.Name,
+						OriginSessionKey: job.DeliverTo,
+						Channel:          job.DeliverChannel,
+						Content:          result.Content,
+					}
+					if err := reminderStore.Insert(cronCtx, rem); err != nil {
+						slog.Warn("cron: reminder persist failed",
+							"job_id", job.ID, "error", err)
+					}
+				}
 				bus.BroadcastForTenant(msgBus, protocol.EventCronDelivered, job.TenantID,
 					map[string]any{
-						"session_key":     job.DeliverTo,
+						"session_key":      job.DeliverTo,
 						"cron_session_key": sessionKey,
-						"channel":         job.DeliverChannel,
-						"content":         result.Content,
-						"media":           result.Media,
-						"agent_id":        agentID,
-						"job_id":          job.ID,
-						"job_name":        job.Name,
+						"channel":          job.DeliverChannel,
+						"content":          result.Content,
+						"media":            result.Media,
+						"agent_id":         agentID,
+						"job_id":           job.ID,
+						"job_name":         job.Name,
 					})
 			} else {
 				outMsg := bus.OutboundMessage{

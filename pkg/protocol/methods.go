@@ -62,6 +62,11 @@ const (
 	MethodCronRun    = "cron.run"
 	MethodCronRuns   = "cron.runs"
 
+	MethodRemindersList        = "reminders.list"
+	MethodRemindersMarkRead    = "reminders.markRead"
+	MethodRemindersMarkAllRead = "reminders.markAllRead"
+	MethodRemindersDelete      = "reminders.delete"
+
 	MethodChannelsList   = "channels.list"
 	MethodChannelsStatus = "channels.status"
 	MethodChannelsToggle = "channels.toggle"

@@ -507,6 +507,25 @@ CREATE INDEX IF NOT EXISTS idx_cron_run_logs_job ON cron_run_logs(job_id, ran_at
 CREATE INDEX IF NOT EXISTS idx_cron_run_logs_team ON cron_run_logs(team_id) WHERE team_id IS NOT NULL;
 
 -- ============================================================
+-- Table: reminders
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS reminders (
+    id                 TEXT NOT NULL PRIMARY KEY,
+    tenant_id          TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id            TEXT NOT NULL,
+    job_id             TEXT,
+    job_name           TEXT NOT NULL DEFAULT '',
+    origin_session_key TEXT NOT NULL,
+    channel            TEXT NOT NULL,
+    content            TEXT NOT NULL,
+    delivered_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    read_at            TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_tenant_user_delivered ON reminders(tenant_id, user_id, delivered_at DESC);
+
+-- ============================================================
 -- Table: pairing_requests
 -- ============================================================
 
