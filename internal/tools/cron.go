@@ -48,7 +48,7 @@ VALID ACTIONS AND EXACT PAYLOAD SHAPES:
     "deliver": true|false,        // set true for reminders / proactive messages. Auto-defaults to true for one-shot at-jobs with a non-empty message.
     "channel": "string",          // channel_instance name (see ## Connected Channels in system prompt). Auto-falls back to the current session channel if you omit it. When the user explicitly asks "in Telegram/Slack/...", pass that channel name.
     "to": "string",               // deliver_to (chat_id). For DM bots pick the value from ## Connected Channels; for ws/browser pass current session key.
-    "stateless": true|false,      // default false. Set true when job.message is the exact text to send and no reasoning is needed at fire time ("every 10s send \"ping\""). Stateless jobs skip the LLM turn entirely and broadcast the literal message — cheap, instant, safe at any interval. Leave false when the job must look up data, call tools, or compute at run time.
+    "stateless": true|false,      // Auto-defaults to true for one-shot "at" reminders with a non-empty message (common case — skip the fire-time LLM turn and broadcast the literal message, cheap and instant). Explicitly set false when the job must compute at fire time — look up data, call tools, generate fresh content ("tomorrow 18:00, fetch the weather forecast"). For "every" / "cron" schedules the flag is not auto-applied; set it explicitly when the recurring job is a literal reminder.
     "agentId": "string",          // optional, defaults to current agent
     "deleteAfterRun": true|false  // optional, default true for schedule.kind="at"
   }
@@ -267,7 +267,23 @@ func (t *CronTool) handleAdd(ctx context.Context, args map[string]any, agentID, 
 	deliver, _ := jobObj["deliver"].(bool)
 	channel, _ := jobObj["channel"].(string)
 	to, _ := jobObj["to"].(string)
-	_ = jobObj["stateless"] // reserved: stateless flag not wired through AddJob yet; add via action="update" after creation if needed
+
+	// Resolve `stateless` with auto-default for reminder-shaped jobs.
+	// User intent "напомни мне X в 18:00" → schedule.kind == "at" + short
+	// message = deliver the literal message at fire time. Without stateless,
+	// cron fires a fresh agent turn with `message` as a prompt, and the LLM
+	// expands it (e.g. "brew tea" → full brewing recipe). LLMs usually don't
+	// set stateless on create, so we default it on for one-shot "at" jobs.
+	// The flag is still honoured when explicitly set — e.g. {"stateless":false}
+	// for a reminder that must compute data at fire time ("tomorrow at 18:00,
+	// fetch the weather forecast").
+	statelessExplicit, statelessWasSet := jobObj["stateless"].(bool)
+	var stateless bool
+	if statelessWasSet {
+		stateless = statelessExplicit
+	} else if schedule.Kind == "at" && message != "" {
+		stateless = true
+	}
 
 	// Safety net for the common reminder use-case: one-shot at-job with
 	// a non-empty message almost always wants deliver=true. Models drop this
@@ -341,6 +357,16 @@ func (t *CronTool) handleAdd(ctx context.Context, args map[string]any, agentID, 
 	if wh, _ := jobObj["wake_heartbeat"].(bool); wh {
 		wakeTrue := true
 		if updated, uErr := t.cronStore.UpdateJob(ctx, job.ID, store.CronJobPatch{WakeHeartbeat: &wakeTrue}); uErr == nil {
+			job = updated
+		}
+	}
+
+	// Apply `stateless` via patch. AddJob doesn't thread the flag through
+	// (historical reason — store/cron_store.go:111 signature predates it),
+	// so reproduce the same pattern used for wake_heartbeat above.
+	if stateless {
+		statelessVal := true
+		if updated, uErr := t.cronStore.UpdateJob(ctx, job.ID, store.CronJobPatch{Stateless: &statelessVal}); uErr == nil {
 			job = updated
 		}
 	}
