@@ -468,7 +468,6 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
     deliver_channel  TEXT NOT NULL DEFAULT '',
     deliver_to       TEXT NOT NULL DEFAULT '',
     wake_heartbeat   INTEGER NOT NULL DEFAULT 0,
-    origin_session_key TEXT NOT NULL DEFAULT '',
     next_run_at      TEXT,
     last_run_at      TEXT,
     last_status      VARCHAR(20),
@@ -490,24 +489,41 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_cron_jobs_agent_tenant_name ON cron_jobs(ag
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS cron_run_logs (
-    id                 TEXT NOT NULL PRIMARY KEY,
-    job_id             TEXT REFERENCES cron_jobs(id) ON DELETE SET NULL,
-    agent_id           TEXT REFERENCES agents(id) ON DELETE SET NULL,
-    status             VARCHAR(20) NOT NULL,
-    summary            TEXT,
-    error              TEXT,
-    duration_ms        INT,
-    input_tokens       INT DEFAULT 0,
-    output_tokens      INT DEFAULT 0,
-    job_name           TEXT NOT NULL DEFAULT '',
-    origin_session_key TEXT NOT NULL DEFAULT '',
-    team_id            TEXT REFERENCES agent_teams(id) ON DELETE SET NULL,
-    ran_at             TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    created_at         TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    id            TEXT NOT NULL PRIMARY KEY,
+    job_id        TEXT NOT NULL REFERENCES cron_jobs(id) ON DELETE CASCADE,
+    agent_id      TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    status        VARCHAR(20) NOT NULL,
+    summary       TEXT,
+    error         TEXT,
+    duration_ms   INT,
+    input_tokens  INT DEFAULT 0,
+    output_tokens INT DEFAULT 0,
+    team_id       TEXT REFERENCES agent_teams(id) ON DELETE SET NULL,
+    ran_at        TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_cron_run_logs_job ON cron_run_logs(job_id, ran_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cron_run_logs_team ON cron_run_logs(team_id) WHERE team_id IS NOT NULL;
+
+-- ============================================================
+-- Table: reminders
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS reminders (
+    id                 TEXT NOT NULL PRIMARY KEY,
+    tenant_id          TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id            TEXT NOT NULL,
+    job_id             TEXT,
+    job_name           TEXT NOT NULL DEFAULT '',
+    origin_session_key TEXT NOT NULL,
+    channel            TEXT NOT NULL,
+    content            TEXT NOT NULL,
+    delivered_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    read_at            TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_tenant_user_delivered ON reminders(tenant_id, user_id, delivered_at DESC);
 
 -- ============================================================
 -- Table: pairing_requests

@@ -41,7 +41,6 @@ func (s *SQLiteCronStore) refreshJobCache() {
 	rows, err := s.db.QueryContext(s.baseCtx,
 		`SELECT id, tenant_id, agent_id, user_id, name, enabled, schedule_kind, cron_expression, run_at, timezone,
 		 interval_ms, payload, delete_after_run, stateless, deliver, deliver_channel, deliver_to, wake_heartbeat,
-		 origin_session_key,
 		 next_run_at, last_run_at, last_status, last_error,
 		 created_at, updated_at FROM cron_jobs WHERE enabled = 1`)
 	if err != nil {
@@ -288,10 +287,9 @@ func (s *SQLiteCronStore) executeOneJob(job store.CronJob, handler func(job *sto
 			agentUUID = &aid
 		}
 		if _, err := s.db.ExecContext(s.baseCtx,
-			`INSERT INTO cron_run_logs (id, job_id, agent_id, status, error, summary, duration_ms, input_tokens, output_tokens, ran_at, job_name, origin_session_key)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			`INSERT INTO cron_run_logs (id, job_id, agent_id, status, error, summary, duration_ms, input_tokens, output_tokens, ran_at)
+			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
 			logID, id, agentUUID, status, lastError, summary, durationMS, inputTokens, outputTokens, now,
-			job.Name, job.OriginSessionKey,
 		); err != nil {
 			slog.Warn("cron: failed to insert run log", "job_id", job.ID, "error", err)
 		}
@@ -367,7 +365,6 @@ func (s *SQLiteCronStore) loadClaimedJob(id uuid.UUID) (*store.CronJob, bool) {
 		s.baseCtx,
 		`SELECT id, tenant_id, agent_id, user_id, name, enabled, schedule_kind, cron_expression, run_at, timezone,
 		 interval_ms, payload, delete_after_run, stateless, deliver, deliver_channel, deliver_to, wake_heartbeat,
-		 origin_session_key,
 		 next_run_at, last_run_at, last_status, last_error,
 		 created_at, updated_at
 		 FROM cron_jobs

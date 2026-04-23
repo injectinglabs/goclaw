@@ -89,9 +89,6 @@ func (s *PGCronStore) UpdateJob(ctx context.Context, jobID string, patch store.C
 	if patch.WakeHeartbeat != nil {
 		updates["wake_heartbeat"] = *patch.WakeHeartbeat
 	}
-	if patch.OriginSessionKey != nil {
-		updates["origin_session_key"] = *patch.OriginSessionKey
-	}
 
 	if patch.Message != "" {
 		payload := current.Payload
