@@ -291,9 +291,10 @@ func (s *PGCronStore) executeOneJob(job store.CronJob, handler func(job *store.C
 			agentUUID = &aid
 		}
 		if _, err := s.db.ExecContext(s.baseCtx,
-			`INSERT INTO cron_run_logs (id, job_id, agent_id, status, error, summary, duration_ms, input_tokens, output_tokens, ran_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			`INSERT INTO cron_run_logs (id, job_id, agent_id, status, error, summary, duration_ms, input_tokens, output_tokens, ran_at, job_name, origin_session_key)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 			logID, id, agentUUID, status, lastError, summary, durationMS, inputTokens, outputTokens, now,
+			job.Name, job.OriginSessionKey,
 		); err != nil {
 			slog.Warn("cron: failed to insert run log", "job_id", job.ID, "error", err)
 		}
