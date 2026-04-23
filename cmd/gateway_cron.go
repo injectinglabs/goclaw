@@ -145,6 +145,18 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 				//    fail at this layer and the broadcast still delivers live).
 				if trimmed != "" && strings.Contains(job.DeliverTo, ":") {
 					now := time.Now().UTC()
+					// Write a hidden boundary marker first. The `[System]` prefix
+					// on a user-role message is a convention the extension's
+					// history loader knows: it flushes the pending assistant
+					// bubble (separating the reminder from the previous turn's
+					// reply) and then skips rendering the marker itself. This
+					// gives cron-delivered replies their own bubble on reload
+					// without needing time-gap heuristics.
+					boundaryMsg := providers.Message{
+						Role:      "user",
+						Content:   fmt.Sprintf("[System] cron-delivered: %s", job.Name),
+						CreatedAt: &now,
+					}
 					persistMsg := providers.Message{
 						Role:      "assistant",
 						Content:   result.Content,
@@ -157,6 +169,7 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 									"session_key", job.DeliverTo, "job_id", job.ID, "recover", r)
 							}
 						}()
+						sessionMgr.AddMessage(cronCtx, job.DeliverTo, boundaryMsg)
 						sessionMgr.AddMessage(cronCtx, job.DeliverTo, persistMsg)
 					}()
 				}
