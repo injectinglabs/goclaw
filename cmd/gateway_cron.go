@@ -86,43 +86,59 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 		defer cancelCron()
 		cronCtx = store.WithTenantID(cronCtx, job.TenantID)
 
-		// Reset session before each cron run to prevent tool errors from previous
-		// runs from polluting the context and blocking future executions (#294).
-		// Save() persists the empty session to DB so stale data won't reload after restart.
-		// Stateless jobs skip this — they intentionally carry no session history.
-		if !job.Stateless {
+		var result *agent.RunResult
+
+		if job.Stateless {
+			// Stateless = deliver the literal job.Payload.Message verbatim.
+			// Skip the LLM turn entirely: no session reset, no scheduler
+			// dispatch, no token cost. Documented in the cron tool (line 48-51
+			// of internal/tools/cron.go) but until now only gated the session
+			// reset — the agent run still fired, so "stateless" reminders
+			// went through the LLM and users saw the message expanded into a
+			// paragraph. Wire the bypass here to match the documented
+			// contract: stateless jobs are pure scheduled broadcasts.
+			result = &agent.RunResult{
+				Content: job.Payload.Message,
+				RunID:   fmt.Sprintf("cron:%s", job.ID),
+			}
+			slog.Info("cron: stateless fire (literal broadcast)", "job_id", job.ID, "job_name", job.Name)
+		} else {
+			// Reset session before each cron run to prevent tool errors from
+			// previous runs from polluting the context and blocking future
+			// executions (#294). Save() persists the empty session to DB so
+			// stale data won't reload after restart.
 			sessionMgr.Reset(cronCtx, sessionKey)
 			sessionMgr.Save(cronCtx, sessionKey)
-		}
 
-		// Schedule through cron lane — scheduler handles agent resolution and concurrency
-		outCh := sched.Schedule(cronCtx, scheduler.LaneCron, agent.RunRequest{
-			SessionKey:        sessionKey,
-			Message:           job.Payload.Message,
-			Channel:           channel,
-			ChannelType:       channelType,
-			ChatID:            job.DeliverTo,
-			PeerKind:          peerKind,
-			UserID:            job.UserID,
-			RunID:             fmt.Sprintf("cron:%s", job.ID),
-			Stream:            false,
-			ExtraSystemPrompt: extraPrompt,
-			TraceName:         fmt.Sprintf("Cron [%s] - %s", job.Name, agentID),
-			TraceTags:         []string{"cron"},
-		})
+			// Schedule through cron lane — scheduler handles agent resolution
+			// and concurrency.
+			outCh := sched.Schedule(cronCtx, scheduler.LaneCron, agent.RunRequest{
+				SessionKey:        sessionKey,
+				Message:           job.Payload.Message,
+				Channel:           channel,
+				ChannelType:       channelType,
+				ChatID:            job.DeliverTo,
+				PeerKind:          peerKind,
+				UserID:            job.UserID,
+				RunID:             fmt.Sprintf("cron:%s", job.ID),
+				Stream:            false,
+				ExtraSystemPrompt: extraPrompt,
+				TraceName:         fmt.Sprintf("Cron [%s] - %s", job.Name, agentID),
+				TraceTags:         []string{"cron"},
+			})
 
-		// Block until the scheduled run completes or the timeout fires.
-		var outcome scheduler.RunOutcome
-		select {
-		case outcome = <-outCh:
-		case <-cronCtx.Done():
-			return nil, fmt.Errorf("cron job %s timed out after %s", job.Name, jobTimeout)
-		}
-		if outcome.Err != nil {
-			return nil, outcome.Err
-		}
+			var outcome scheduler.RunOutcome
+			select {
+			case outcome = <-outCh:
+			case <-cronCtx.Done():
+				return nil, fmt.Errorf("cron job %s timed out after %s", job.Name, jobTimeout)
+			}
+			if outcome.Err != nil {
+				return nil, outcome.Err
+			}
 
-		result := outcome.Result
+			result = outcome.Result
+		}
 
 		// If job wants delivery to a channel, send the agent response to the target chat.
 		if job.Deliver && job.DeliverChannel != "" && job.DeliverTo != "" {
