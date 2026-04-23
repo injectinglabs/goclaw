@@ -57,13 +57,21 @@ func (l *Loop) finalizeRun(
 		rs.finalContent += "\n\n---\n_" + i18n.T(locale, i18n.MsgSkillNudgePostscript) + "_"
 	}
 
-	// 7. Fallback for empty content
+	// 7. Fallback for empty content.
+	//
+	// Upstream behaviour was to emit a literal "..." whenever the model
+	// ended its turn without producing text. That rendered in the UI as
+	// three dots — users saw it as a broken / silent agent. Replace with
+	// a localised, actionable sentence so the user knows what happened
+	// and what to do about it. Full retry-with-tools at this edge is a
+	// separate engineering item that needs pipeline-state access; the
+	// fallback text below covers the UX gap on its own.
 	if rs.finalContent == "" {
-		if len(rs.asyncToolCalls) > 0 {
-			rs.finalContent = "..."
-		} else {
-			rs.finalContent = "..."
-		}
+		locale := store.LocaleFromContext(ctx)
+		rs.finalContent = i18n.T(locale, i18n.MsgEmptyReplyFallback)
+		slog.Info("agent: empty assistant content, using localised fallback",
+			"locale", locale,
+			"hadAsyncToolCalls", len(rs.asyncToolCalls) > 0)
 	}
 
 	// Append content suffix (e.g. image markdown for WS) before saving to session.

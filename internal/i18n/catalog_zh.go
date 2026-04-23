@@ -188,6 +188,8 @@ func init() {
 		MsgSkillNudge70Pct:      "[System] 您已使用 70% 的迭代预算。请考虑本次会话中的模式是否值得保存为技能。",
 		MsgSkillNudge90Pct:      "[System] 您已使用 90% 的迭代预算。如果本次会话涉及可重用的模式，请考虑在完成前将其保存为技能。",
 
+		MsgEmptyReplyFallback: "我没能生成回复。请尝试换种方式表达您的请求。",
+
 		MsgInvalidRole: "无效角色：允许的值为 owner、admin、operator、member、viewer",
 
 		MsgContactIDsRequired:  "contact_ids 为必填项",
