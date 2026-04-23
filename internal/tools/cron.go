@@ -4,10 +4,47 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
+
+// looksLikeLiteralReminder returns true when a cron `message` reads like a
+// short reminder the user wants delivered verbatim (take vitamins, brush
+// teeth, call mom) rather than an instruction to run at fire time (fetch
+// weather, summarise news, search for X). Used to auto-default
+// stateless=true for both one-shot and recurring cron jobs — most reminders
+// don't need an LLM re-run, and without this models routinely expand a
+// two-word reminder into a paragraph.
+//
+// Heuristic rationale: imperative/verbless short texts are reminders;
+// anything containing a "go fetch/compute/look up" keyword is a task.
+// Keyword set covers English + Russian since those are the primary
+// languages agents receive from users here.
+func looksLikeLiteralReminder(message string) bool {
+	m := strings.ToLower(strings.TrimSpace(message))
+	if m == "" || len(m) > 200 {
+		return false
+	}
+	tasky := []string{
+		// English
+		"fetch", "retrieve", "look up", "lookup", "search for",
+		"calculate", "summarize", "summarise", "analyze", "analyse",
+		"generate ", "compose ", "draft ", "write me ",
+		"check the ", "check my ", "review the ", "review my ",
+		// Russian
+		"найди ", "найти ", "получи ", "получить ", "посмотри ",
+		"проверь ", "подсчитай ", "проанализируй ", "собери ",
+		"скачай ", "покажи мне ", "выведи ", "напиши мне ",
+	}
+	for _, k := range tasky {
+		if strings.Contains(m, k) {
+			return false
+		}
+	}
+	return true
+}
 
 // CronTool lets agents manage Gateway cron jobs.
 // Matching OpenClaw src/agents/tools/cron-tool.ts.
@@ -48,7 +85,7 @@ VALID ACTIONS AND EXACT PAYLOAD SHAPES:
     "deliver": true|false,        // set true for reminders / proactive messages. Auto-defaults to true for one-shot at-jobs with a non-empty message.
     "channel": "string",          // channel_instance name (see ## Connected Channels in system prompt). Auto-falls back to the current session channel if you omit it. When the user explicitly asks "in Telegram/Slack/...", pass that channel name.
     "to": "string",               // deliver_to (chat_id). For DM bots pick the value from ## Connected Channels; for ws/browser pass current session key.
-    "stateless": true|false,      // Auto-defaults to true for one-shot "at" reminders with a non-empty message (common case — skip the fire-time LLM turn and broadcast the literal message, cheap and instant). Explicitly set false when the job must compute at fire time — look up data, call tools, generate fresh content ("tomorrow 18:00, fetch the weather forecast"). For "every" / "cron" schedules the flag is not auto-applied; set it explicitly when the recurring job is a literal reminder.
+    "stateless": true|false,      // Auto-defaults to true for literal reminders: short messages with no fetch/look-up/compute keywords ("заварить чай", "принять витамины", "call mom"). Works for all schedule kinds — one-shot and recurring alike skip the fire-time LLM turn and broadcast the literal message. Explicitly set false when the job must compute at fire time — look up data, call tools, generate fresh content ("fetch weather forecast", "summarize today's unread emails").
     "agentId": "string",          // optional, defaults to current agent
     "deleteAfterRun": true|false  // optional, default true for schedule.kind="at"
   }
@@ -269,19 +306,24 @@ func (t *CronTool) handleAdd(ctx context.Context, args map[string]any, agentID, 
 	to, _ := jobObj["to"].(string)
 
 	// Resolve `stateless` with auto-default for reminder-shaped jobs.
-	// User intent "напомни мне X в 18:00" → schedule.kind == "at" + short
-	// message = deliver the literal message at fire time. Without stateless,
-	// cron fires a fresh agent turn with `message` as a prompt, and the LLM
-	// expands it (e.g. "brew tea" → full brewing recipe). LLMs usually don't
-	// set stateless on create, so we default it on for one-shot "at" jobs.
-	// The flag is still honoured when explicitly set — e.g. {"stateless":false}
-	// for a reminder that must compute data at fire time ("tomorrow at 18:00,
-	// fetch the weather forecast").
+	// User intent "напомни мне X" → cron fires and the user should see the
+	// short reminder text. Without stateless, cron starts a fresh agent turn
+	// with `message` as a prompt, and the LLM expands it (e.g. "brew tea" →
+	// full brewing recipe, "принять витамины" → article on vitamins). LLMs
+	// usually don't set stateless on create.
+	//
+	// Auto-default stateless=true whenever the message looks like a literal
+	// reminder (short, no "fetch / look up / summarise / ..." keywords) —
+	// independent of schedule kind, so daily/weekly vitamins reminders work
+	// the same way as one-shot "in 20s" reminders.
+	//
+	// Explicit override wins: {"stateless":false} for reminders that really
+	// do need an agent run ("tomorrow 18:00 fetch the weather forecast").
 	statelessExplicit, statelessWasSet := jobObj["stateless"].(bool)
 	var stateless bool
 	if statelessWasSet {
 		stateless = statelessExplicit
-	} else if schedule.Kind == "at" && message != "" {
+	} else if looksLikeLiteralReminder(message) {
 		stateless = true
 	}
 
