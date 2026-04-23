@@ -307,8 +307,22 @@ func (t *CronTool) handleAdd(ctx context.Context, args map[string]any, agentID, 
 			}
 		}
 		if to == "" {
-			if ctxChatID := ToolChatIDFromCtx(ctx); ctxChatID != "" {
-				to = ctxChatID
+			// For internal channels (ws/browser) there's no external chat_id —
+			// the WS chat.send frame populates RunRequest.ChatID with the
+			// user_id for workspace scoping, not routing. What cron delivery
+			// actually needs as DeliverTo is the originating session_key so:
+			//   - AddMessage can write the reply into the right chat's history
+			//   - the broadcast's session_key maps to a real client chat
+			//   - the reminders row's origin_session_key is actionable for jump
+			if channel == "ws" || channel == "browser" {
+				if sk := ToolSessionKeyFromCtx(ctx); sk != "" {
+					to = sk
+				}
+			}
+			if to == "" {
+				if ctxChatID := ToolChatIDFromCtx(ctx); ctxChatID != "" {
+					to = ctxChatID
+				}
 			}
 		}
 	}

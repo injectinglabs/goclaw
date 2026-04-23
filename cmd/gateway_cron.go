@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
 	"github.com/nextlevelbuilder/goclaw/internal/sessions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -135,11 +137,33 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 			if channels.IsInternalChannel(job.DeliverChannel) {
 				slog.Info("cron: delivering to internal channel",
 					"job_id", job.ID, "channel", job.DeliverChannel, "session_key", job.DeliverTo, "content_len", len(result.Content))
-				// Persist the reminder to the dedicated inbox table. Deliberately
-				// not FK-linked to cron_jobs so one-shot auto-deletion doesn't
-				// cascade away the reminder. Best-effort: a DB failure here must
-				// not block the live WS broadcast below.
-				if reminderStore != nil && strings.TrimSpace(result.Content) != "" {
+				trimmed := strings.TrimSpace(result.Content)
+				// 1. Append to originating chat's message history (only when
+				//    DeliverTo is a session_key — the cron tool's ctx-fallback
+				//    uses session_key for ws/browser channels; legacy or
+				//    mis-populated values that aren't session keys safely
+				//    fail at this layer and the broadcast still delivers live).
+				if trimmed != "" && strings.Contains(job.DeliverTo, ":") {
+					now := time.Now().UTC()
+					persistMsg := providers.Message{
+						Role:      "assistant",
+						Content:   result.Content,
+						CreatedAt: &now,
+					}
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								slog.Warn("cron: failed to persist reply to origin session",
+									"session_key", job.DeliverTo, "job_id", job.ID, "recover", r)
+							}
+						}()
+						sessionMgr.AddMessage(cronCtx, job.DeliverTo, persistMsg)
+					}()
+				}
+				// 2. Persist to the dedicated reminders inbox. Deliberately not
+				//    FK-linked to cron_jobs so one-shot auto-deletion doesn't
+				//    cascade away the reminder row.
+				if reminderStore != nil && trimmed != "" {
 					rem := &store.Reminder{
 						TenantID:         job.TenantID,
 						UserID:           job.UserID,
@@ -154,6 +178,8 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 							"job_id", job.ID, "error", err)
 					}
 				}
+				// 3. Live broadcast — gives connected WS clients the message
+				//    without a chat.preview roundtrip.
 				bus.BroadcastForTenant(msgBus, protocol.EventCronDelivered, job.TenantID,
 					map[string]any{
 						"session_key":      job.DeliverTo,
