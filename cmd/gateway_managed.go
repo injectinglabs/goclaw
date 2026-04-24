@@ -231,6 +231,7 @@ func wireExtras(
 		MemoryStore:            stores.Memory,
 		ContactStore:           stores.Contacts,
 		TenantStore:            stores.Tenants,
+		ChannelInstanceStore:   stores.ChannelInstances,
 		BuiltinToolTenantCfgs:  stores.BuiltinToolTenantCfgs,
 		SkillTenantCfgs:        stores.SkillTenantCfgs,
 		SystemConfigs:          stores.SystemConfigs,

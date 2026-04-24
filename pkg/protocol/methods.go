@@ -16,6 +16,7 @@ const (
 	MethodChatAbort         = "chat.abort"
 	MethodChatInject        = "chat.inject"
 	MethodChatSessionStatus = "chat.session.status"
+	MethodChatToolResult    = "chat.toolResult"
 
 	// Agents management
 	MethodAgentsList     = "agents.list"
@@ -60,6 +61,11 @@ const (
 	MethodCronStatus = "cron.status"
 	MethodCronRun    = "cron.run"
 	MethodCronRuns   = "cron.runs"
+
+	MethodRemindersList        = "reminders.list"
+	MethodRemindersMarkRead    = "reminders.markRead"
+	MethodRemindersMarkAllRead = "reminders.markAllRead"
+	MethodRemindersDelete      = "reminders.delete"
 
 	MethodChannelsList   = "channels.list"
 	MethodChannelsStatus = "channels.status"

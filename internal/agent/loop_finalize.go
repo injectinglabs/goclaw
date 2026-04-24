@@ -57,13 +57,33 @@ func (l *Loop) finalizeRun(
 		rs.finalContent += "\n\n---\n_" + i18n.T(locale, i18n.MsgSkillNudgePostscript) + "_"
 	}
 
-	// 7. Fallback for empty content
+	// 7. Fallback for empty content.
+	//
+	// Upstream behaviour was to emit a literal "..." whenever the model
+	// ended its turn without producing text — usually after a tool-call
+	// round where the model fetched data but forgot to summarise. Before
+	// giving up we try a single lightweight rescue: call the provider
+	// once with tools disabled and an explicit "finalise please" nudge,
+	// so the model is forced to produce text using the data already in
+	// history. Keeps the call cheap (no tool dispatch, no iteration) and
+	// handles the most common empty-reply case without pipeline
+	// surgery. A full retry-with-tools (where the model might call more
+	// tools) is still on the backlog — that needs the pipeline to
+	// re-execute a stage, which this file can't do.
 	if rs.finalContent == "" {
-		if len(rs.asyncToolCalls) > 0 {
-			rs.finalContent = "..."
-		} else {
-			rs.finalContent = "..."
+		if rescued := l.rescueEmptyReply(ctx, history); rescued != "" {
+			rs.finalContent = SanitizeAssistantContent(rescued)
 		}
+	}
+
+	// If even the rescue returned nothing, fall back to a localised
+	// sentence the user can act on — replaces the legacy "..." placeholder.
+	if rs.finalContent == "" {
+		locale := store.LocaleFromContext(ctx)
+		rs.finalContent = i18n.T(locale, i18n.MsgEmptyReplyFallback)
+		slog.Info("agent: empty assistant content, using localised fallback",
+			"locale", locale,
+			"hadAsyncToolCalls", len(rs.asyncToolCalls) > 0)
 	}
 
 	// Append content suffix (e.g. image markdown for WS) before saving to session.
@@ -198,11 +218,18 @@ func (l *Loop) finalizeRun(
 
 	// V3: emit session.completed for consolidation pipeline (episodic → semantic → dreaming)
 	if l.domainBus != nil {
+		// Unify user_id across channels. When a channel_contact is already
+		// merged to a tenant_user via POST /v1/contacts/merge, this returns
+		// that canonical tenant_users.user_id so Episodic/Semantic/Dreaming
+		// workers write memory under one identity for the same human. Falls
+		// back to req.UserID when no merge exists, preserving isolation for
+		// unknown senders.
+		memUserID := l.resolveCredentialUserID(ctx, *req)
 		l.domainBus.Publish(eventbus.DomainEvent{
 			Type:     eventbus.EventSessionCompleted,
 			TenantID: l.tenantID.String(),
 			AgentID:  l.agentUUID.String(),
-			UserID:   req.UserID,
+			UserID:   memUserID,
 			SourceID: req.SessionKey,
 			Payload: &eventbus.SessionCompletedPayload{
 				SessionKey:      req.SessionKey,
@@ -225,4 +252,51 @@ func (l *Loop) finalizeRun(
 		LastBlockReply: rs.lastBlockReply,
 		LoopKilled:     rs.loopKilled,
 	}
+}
+
+// rescueEmptyReply fires one provider.Chat with tools disabled and a
+// "finalise using the history above" nudge, to pull text out of a model
+// that ended its previous turn silent after a tool-call round.
+//
+// Scope kept deliberately narrow: single call, tools=nil, non-streaming.
+// If the model tries to call a tool here it'll be rejected at the provider
+// edge — that's fine, we want text only. If it still returns empty, the
+// caller falls through to the localised fallback sentence.
+//
+// Future work: a full retry-with-tools needs to re-enter the pipeline
+// stages (BuildFilteredTools → CallLLM → HandleToolCalls) and is blocked
+// on refactoring FinalizeStage to expose the provider/state plumbing.
+func (l *Loop) rescueEmptyReply(ctx context.Context, history []providers.Message) string {
+	if l.provider == nil || l.model == "" || len(history) == 0 {
+		return ""
+	}
+
+	nudge := providers.Message{
+		Role: "user",
+		Content: "[System] You ended your previous turn with an empty reply. " +
+			"Using the information you've already gathered above (tool results, " +
+			"prior messages), give the user a direct answer now. Do not call " +
+			"any more tools — reply in plain text only.",
+	}
+
+	msgs := make([]providers.Message, 0, len(history)+1)
+	msgs = append(msgs, history...)
+	msgs = append(msgs, nudge)
+
+	resp, err := l.provider.Chat(ctx, providers.ChatRequest{
+		Messages: msgs,
+		Tools:    nil, // force text
+		Model:    l.model,
+		Options: map[string]any{
+			providers.OptStripThinking: true,
+		},
+	})
+	if err != nil {
+		slog.Warn("agent: rescue retry failed", "error", err)
+		return ""
+	}
+	if resp == nil {
+		return ""
+	}
+	return strings.TrimSpace(resp.Content)
 }

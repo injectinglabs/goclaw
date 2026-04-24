@@ -32,16 +32,27 @@ type Registry struct {
 	// deferredActivator is called when a tool is not in the registry but may be
 	// a deferred MCP tool. Returns true if the tool was successfully activated.
 	deferredActivator func(name string) bool
+
+	// clientToolChannels routes client-tool results from the WS handler back to the
+	// agent goroutine that invoked the tool. Keyed by tool_call_id (globally unique
+	// per LLM call). See client_tools.go for Register/Route/Unregister helpers.
+	//
+	// Pointer so Clone() keeps the same map across agent-cloned registries: the
+	// agent Loop calls RegisterClientToolResultCh on its per-agent cloned registry,
+	// while the WS handler calls RouteClientToolResult on the gateway-scoped
+	// original — they must share the same sync.Map or the route will always miss.
+	clientToolChannels *sync.Map
 }
 
 func NewRegistry() *Registry {
 	r := &Registry{
-		tools:      make(map[string]Tool),
-		metadata:   make(map[string]ToolMetadata),
-		aliases:    make(map[string]string),
-		disabled:   make(map[string]bool),
-		toolGroups: make(map[string][]string),
-		scrubbing:  true, // enabled by default
+		tools:              make(map[string]Tool),
+		metadata:           make(map[string]ToolMetadata),
+		aliases:            make(map[string]string),
+		disabled:           make(map[string]bool),
+		toolGroups:         make(map[string][]string),
+		scrubbing:          true, // enabled by default
+		clientToolChannels: &sync.Map{},
 	}
 	// Seed built-in tool groups (deep copy from package-level constant data)
 	for name, members := range builtinToolGroups {
@@ -352,13 +363,14 @@ func (r *Registry) Clone() *Registry {
 	defer r.toolGroupsMu.RUnlock()
 
 	clone := &Registry{
-		tools:       make(map[string]Tool, len(r.tools)),
-		metadata:    make(map[string]ToolMetadata, len(r.metadata)),
-		aliases:     make(map[string]string, len(r.aliases)),
-		disabled:    make(map[string]bool, len(r.disabled)),
-		toolGroups:  make(map[string][]string, len(r.toolGroups)),
-		rateLimiter: r.rateLimiter,
-		scrubbing:   r.scrubbing,
+		tools:              make(map[string]Tool, len(r.tools)),
+		metadata:           make(map[string]ToolMetadata, len(r.metadata)),
+		aliases:            make(map[string]string, len(r.aliases)),
+		disabled:           make(map[string]bool, len(r.disabled)),
+		toolGroups:         make(map[string][]string, len(r.toolGroups)),
+		rateLimiter:        r.rateLimiter,
+		scrubbing:          r.scrubbing,
+		clientToolChannels: r.clientToolChannels, // share: Loop registers, gateway handler routes.
 	}
 	maps.Copy(clone.tools, r.tools)
 	maps.Copy(clone.metadata, r.metadata)

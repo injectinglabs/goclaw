@@ -6,6 +6,12 @@ const (
 	EventChat               = "chat"
 	EventHealth             = "health"
 	EventCron               = "cron"
+	// EventCronDelivered is broadcast when a cron job fires and its result
+	// targets an internal channel (browser, ws, cli) that cannot go through
+	// the outbound dispatcher. Payload carries {session_key, content, media,
+	// agent_id, chat_id} so connected clients can inject the delivered
+	// message directly into their session view.
+	EventCronDelivered      = "cron.delivered"
 	EventHeartbeat          = "heartbeat"
 	EventExecApprovalReq    = "exec.approval.requested"
 	EventExecApprovalRes    = "exec.approval.resolved"
@@ -126,6 +132,10 @@ const (
 	AgentEventToolResult   = "tool.result"
 	AgentEventBlockReply   = "block.reply"
 	AgentEventActivity     = "activity" // agent phase transitions: thinking, tool_exec, compacting
+	// AgentEventClientToolCall instructs the connected client (browser extension)
+	// to execute a client-side tool and return the result via chat.toolResult.
+	// Payload: { id, name, input }.
+	AgentEventClientToolCall = "client_tool_call"
 )
 
 // Chat event subtypes (in payload.type)

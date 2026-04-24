@@ -42,6 +42,7 @@ var mutatingTools = map[string]bool{
 	"create_image": true, "create_video": true, "create_audio": true,
 	"tts": true, "cron": true, "publish_skill": true,
 	"sessions_send": true,
+	"execute_action": true, // browser-page mutation (fill/click/select)
 }
 
 // teamTasksReadOnlyActions are team_tasks actions that don't indicate real progress.
@@ -100,6 +101,13 @@ func (s *toolLoopState) recordResult(argsHash, resultContent string) {
 // detect checks for repeated no-progress tool calls.
 // Returns level ("warning", "critical", or "") and a human-readable message.
 func (s *toolLoopState) detect(toolName string, argsHash string) (level, message string) {
+	// refresh_page_content legitimately returns identical results on a static
+	// page, and agents may snapshot → act → snapshot again to verify state.
+	// Skip same-args/same-result detection for this client tool specifically;
+	// the mutating execute_action in between is the real progress signal.
+	if toolName == "refresh_page_content" {
+		return "", ""
+	}
 	if len(s.history) < toolLoopWarningThreshold {
 		return "", ""
 	}
@@ -169,8 +177,12 @@ func (s *toolLoopState) recordMutation(toolName string, args map[string]any) {
 	}
 	// exec/bash: ambiguous (could be ls or rm).
 	// mcp_*: user-defined external tools — GoClaw cannot determine read vs write.
+	// refresh_page_content: read-only client tool but legitimately re-called on the
+	// same page after execute_action or user-visible navigation — skip the
+	// same-args/same-result streak detector which otherwise mislabels a second
+	// verification snapshot as "no progress".
 	// Neither reset nor increment the read-only streak.
-	if toolName == "exec" || toolName == "bash" || strings.HasPrefix(toolName, "mcp_") {
+	if toolName == "exec" || toolName == "bash" || toolName == "refresh_page_content" || strings.HasPrefix(toolName, "mcp_") {
 		return
 	}
 	s.incrementReadOnly(toolName, args)
@@ -245,6 +257,12 @@ func (s *toolLoopState) detectReadOnlyStreak() (level, message string) {
 // args slightly but gets no new information.
 func (s *toolLoopState) detectSameResult(toolName, resultHash string) (level, message string) {
 	if resultHash == "" {
+		return "", ""
+	}
+	// refresh_page_content naturally returns the same snapshot until something
+	// actually mutates the DOM. Counting these as "no progress" breaks the
+	// snapshot → act → snapshot verify pattern.
+	if toolName == "refresh_page_content" {
 		return "", ""
 	}
 	var count int

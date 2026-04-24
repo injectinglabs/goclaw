@@ -157,6 +157,24 @@ type SystemPromptConfig struct {
 
 	// Provider-specific prompt customizations (nil = defaults).
 	ProviderContribution *providers.PromptContribution
+
+	// ConnectedChannels is a snapshot of the tenant's enabled
+	// channel_instances, collected right before prompt build. When non-empty
+	// a "## Connected Channels" section is injected so the agent knows which
+	// targets are wired for proactive delivery (cron, message, sessions_send)
+	// and doesn't ask the user to re-connect an already-active bot.
+	ConnectedChannels []ConnectedChannelSummary
+}
+
+// ConnectedChannelSummary is the minimum shape buildConnectedChannelsSection
+// needs to render a readable routing hint. Values come from channel_instances
+// rows but we reduce them to display-safe fields (no credentials).
+type ConnectedChannelSummary struct {
+	Name        string // channel_instance.name (use as deliver_channel)
+	ChannelType string // "telegram", "slack", etc.
+	DisplayName string // optional human-readable label
+	OwnerHint   string // e.g. auto_link_user_id from config — empty when unknown
+	DeliverTo   string // ready-to-use deliver_to value (derived from allow_from[0] for single-peer allowlist bots); empty when unambiguous chat_id cannot be inferred
 }
 
 // sectionContent returns override content if provider contribution has one,
@@ -212,6 +230,9 @@ var coreToolSummaries = map[string]string{
 	"delegate":                "Delegate a task to a linked agent (requires agent_links). See ## Delegation Targets for available agents",
 	"memory_expand":           "Retrieve full session details from episodic memory results — use after memory_search returns episodic hits",
 	"vault_search": "Search documents in the knowledge vault (hybrid keyword + semantic)",
+	"refresh_page_content": "Read the user's current browser tab — returns URL, title, interactive elements with CSS selectors, headings, text preview. Call when the user asks about or wants to act on the page they are on.",
+	"execute_action":       "Perform an action on the user's current browser tab: fill (into input/textarea), click (button/link), select (dropdown option), or press_enter (submit a form via Enter key — preferred for search inputs on Google/GitHub/etc.). Always call refresh_page_content first to find selectors.",
+	"execute_js":           "Escape hatch: run arbitrary JavaScript in the user's current browser tab (MAIN world) and return the result. Use ONLY when execute_action cannot reach the element — custom comboboxes, shadow DOM, reading page state, multi-step widget interactions. Prefer execute_action for plain fill/click/select.",
 
 	// Tool aliases (edit_file, sessions_spawn, Read, Write, Edit, Bash, etc.)
 	// are registered in the tool registry but excluded from the system prompt
@@ -315,6 +336,14 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 
 	// 2. ## Tooling
 	lines = append(lines, buildToolingSection(cfg.ToolNames, cfg.SandboxEnabled, cfg.ShellDenyGroups)...)
+
+	// 2.05. ## Browser Page — when both client tools are available, tell the LLM
+	// about the page_hint mechanism and when to call refresh_page_content vs
+	// execute_action. Without this block the model tends to answer from the
+	// URL/title alone or prefer web_search over acting on the user's tab.
+	if slices.Contains(cfg.ToolNames, "refresh_page_content") && slices.Contains(cfg.ToolNames, "execute_action") {
+		lines = append(lines, buildBrowserPageSection()...)
+	}
 
 	// 2.1. ## Execution Bias — full + task mode (overridable by provider)
 	if (isFull || isTask) && !cfg.IsBootstrap {
@@ -457,6 +486,10 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 
 	// 9.5. Channel formatting hints — full mode only
 	if isFull {
+	if section := buildConnectedChannelsSection(cfg.ConnectedChannels); len(section) > 0 {
+		lines = append(lines, section...)
+	}
+
 		if hint := buildChannelFormattingHint(cfg.ChannelType); hint != nil {
 			lines = append(lines, hint...)
 		}
@@ -582,6 +615,43 @@ func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups ma
 		"",
 	)
 	return lines
+}
+
+// buildBrowserPageSection tells the agent how to act on the user's current
+// browser tab. The user runs a Chrome extension that sends a page_hint (URL +
+// title) on every message; the agent decides whether to snapshot the DOM
+// (refresh_page_content) or act on it (execute_action). Without this block
+// the model tends to prefer web_search or text-only answers even when the
+// user explicitly asks to interact with the page they are on.
+func buildBrowserPageSection() []string {
+	return []string{
+		"## Browser Page",
+		"",
+		"The user is on a web page in their browser. Every user message that starts with `[current page: URL — Title]` carries that page's URL and title as an ambient hint — treat it as authoritative, not something to verify with web_search.",
+		"",
+		"You have two tools to interact with the page directly:",
+		"",
+		"- `refresh_page_content` — returns a compact semantic snapshot of the current tab: URL, title, h1–h3 headings, interactive elements (inputs/buttons/links) with stable CSS selectors, a visible-text preview. Call this when you need to see what is actually on the page or find element selectors.",
+		"- `execute_action` — performs a single `fill` / `click` / `select` / `press_enter` on an element by CSS selector. Always call refresh_page_content first to discover the selector. Fill updates controlled React/Vue/Angular inputs correctly. For submitting search forms (Google, GitHub, etc.) use `press_enter` on the input/textarea instead of clicking the submit button — the visible submit button is often hidden or needs interaction to become functional.",
+		"- `execute_js` — ESCAPE HATCH. Runs arbitrary JavaScript in the page's MAIN world and returns the result. Use when execute_action's primitives don't reach the element: custom comboboxes (not native <select>), shadow DOM, reading computed state, multi-step widget interactions. The body is wrapped in an async IIFE — you can `await` and `return`. Examples: `return document.title`, `document.querySelector('[aria-label=Search]').click(); return 'ok'`, `const host = document.querySelector('my-widget'); return host.shadowRoot.querySelector('input').value`.",
+		"",
+		"DEFAULT BIAS — ignore the page unless the user explicitly points at it.",
+		"The page_hint is context, not an instruction. For generic requests (\"find info about X\", \"what is Y\", \"search for Z\") use web_search — NOT refresh_page_content — even if the user is on a search engine like Google. The user is talking to you (the chat agent), not asking you to use the website.",
+		"",
+		"Use browser page tools ONLY when the user explicitly references the current page. Triggers include: \"на этой странице\", \"на этом сайте\", \"здесь\", \"тут\", \"в этой статье\", \"на этой вкладке\", \"on this page\", \"on this site\", \"here\", \"in this article\", \"this tab\", or the user asks you to interact (\"fill\", \"click\", \"заполни\", \"нажми\", \"введи\"). Without such a phrase, default to web_search or text-only answer.",
+		"",
+		"Then:",
+		"- Read-the-page intents (\"what's on this page\", \"summarize this article\", \"find X on this page\") → refresh_page_content once, answer from the snapshot.",
+		"- Act-on-the-page intents (\"fill the form\", \"type X into the search on this page\", \"click Submit here\", \"log me in\") → refresh_page_content, then execute_action for each step.",
+		"- After an execute_action that plausibly changed the page (form submit, navigation, AJAX), refresh_page_content before the next action.",
+		"",
+		"Do not call refresh_page_content twice in a row on an unchanged page. If the snapshot lacks the element you need, tell the user — retrying returns the same result.",
+		"",
+		"On a protected tab (chrome://, chrome-extension://, Chrome Web Store) the hint is absent and the tools return a clear error — acknowledge and ask the user to navigate somewhere else.",
+		"",
+		"Selector tips for execute_action: prefer `#id`, `[name=\"…\"]`, `[data-testid=\"…\"]`, `[aria-label=\"…\"]` over index-based selectors. Never invent a selector that was not in the snapshot — if you can't find the element, say so.",
+		"",
+	}
 }
 
 func buildSafetySection() []string {

@@ -31,7 +31,8 @@ type ChatMethods struct {
 	rateLimiter *gateway.RateLimiter
 	eventBus    bus.EventPublisher
 	postTurn    tools.PostTurnProcessor
-	audioMgr    *audio.Manager // for TTS auto-apply on WS responses (nil = disabled)
+	audioMgr    *audio.Manager  // for TTS auto-apply on WS responses (nil = disabled)
+	tools       *tools.Registry // used to route chat.toolResult → pending client tool channels
 }
 
 func NewChatMethods(agents *agent.Router, sess store.SessionStore, cfg *config.Config, rl *gateway.RateLimiter, eventBus bus.EventPublisher) *ChatMethods {
@@ -41,6 +42,12 @@ func NewChatMethods(agents *agent.Router, sess store.SessionStore, cfg *config.C
 // SetAudioManager sets the audio manager for TTS auto-apply on WS responses.
 func (m *ChatMethods) SetAudioManager(mgr *audio.Manager) {
 	m.audioMgr = mgr
+}
+
+// SetToolRegistry sets the tool registry so handleToolResult can route client-tool
+// results back to the agent goroutine that is blocked waiting on the call.
+func (m *ChatMethods) SetToolRegistry(reg *tools.Registry) {
+	m.tools = reg
 }
 
 // SetPostTurnProcessor sets the post-turn processor for team task dispatch.
@@ -55,6 +62,7 @@ func (m *ChatMethods) Register(router *gateway.MethodRouter) {
 	router.Register(protocol.MethodChatAbort, m.handleAbort)
 	router.Register(protocol.MethodChatInject, m.handleInject)
 	router.Register(protocol.MethodChatSessionStatus, m.handleSessionStatus)
+	router.Register(protocol.MethodChatToolResult, m.handleToolResult)
 }
 
 // handleSessionStatus returns the running state and activity for a session.
@@ -102,11 +110,21 @@ type chatMediaItem struct {
 }
 
 type chatSendParams struct {
-	Message    string            `json:"message"`
-	AgentID    string            `json:"agentId"`
-	SessionKey string            `json:"sessionKey"`
-	Stream     bool              `json:"stream"`
-	Media      json.RawMessage   `json:"media,omitempty"` // []string (legacy) or []chatMediaItem
+	Message    string          `json:"message"`
+	AgentID    string          `json:"agentId"`
+	SessionKey string          `json:"sessionKey"`
+	Stream     bool            `json:"stream"`
+	Media      json.RawMessage `json:"media,omitempty"` // []string (legacy) or []chatMediaItem
+	PageHint   *pageHint       `json:"pageHint,omitempty"`
+}
+
+// pageHint carries the URL+title of the user's currently active browser tab.
+// Sent by the web-agent extension on every chat.send so the LLM can decide
+// whether to call refresh_page_content without paying for an unconditional
+// HTML snapshot per turn.
+type pageHint struct {
+	URL   string `json:"url"`
+	Title string `json:"title,omitempty"`
 }
 
 // parseMedia handles both legacy string paths and new {path,filename} objects.
@@ -272,6 +290,22 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 				} else {
 					message = tags
 				}
+			}
+		}
+
+		// Prepend page_hint so the LLM sees the user's current browser tab URL+title
+		// on every turn. Lets the model decide whether to call refresh_page_content
+		// instead of paying for an unconditional HTML snapshot per message.
+		if params.PageHint != nil && params.PageHint.URL != "" {
+			hint := "[current page: " + params.PageHint.URL
+			if params.PageHint.Title != "" {
+				hint += " — " + params.PageHint.Title
+			}
+			hint += "]"
+			if message != "" {
+				message = hint + "\n\n" + message
+			} else {
+				message = hint
 			}
 		}
 
@@ -548,5 +582,53 @@ func (m *ChatMethods) handleAbort(ctx context.Context, client *gateway.Client, r
 		"notFound":        notFound > 0 && stopped+forced+alreadyAborting == 0,
 		"unauthorized":    respUnauthorized > 0,
 		"runIds":          runIDs,
+	}))
+}
+
+// chatToolResultParams is the payload the browser extension sends after executing
+// a client tool (refresh_page_content, execute_action). The goclaw agent loop is
+// blocked on a channel keyed by toolCallId; we route `content` into that channel
+// and let the loop continue.
+type chatToolResultParams struct {
+	ToolCallID string `json:"toolCallId"`
+	Content    string `json:"content"`
+	IsError    bool   `json:"isError"`
+}
+
+// handleToolResult accepts a client-tool response from the extension and routes
+// it into the matching pending tool-call channel on the registry. Returns
+// ok=true when the waiting goroutine was still there, ok=false when the call
+// had already timed out or been cleaned up.
+//
+// There is no ownership check by sessionKey here: tool_call_ids are UUIDs minted
+// per LLM invocation and are not guessable. Misrouting is impossible because the
+// channel map is scoped to this process and the ID must be an exact match.
+func (m *ChatMethods) handleToolResult(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
+	var params chatToolResultParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidJSON)))
+		return
+	}
+	if params.ToolCallID == "" {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "toolCallId")))
+		return
+	}
+	if m.tools == nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "tool registry not wired"))
+		return
+	}
+
+	var result *tools.Result
+	if params.IsError {
+		result = tools.ErrorResult(params.Content)
+	} else {
+		result = tools.NewResult(params.Content)
+	}
+
+	routed := m.tools.RouteClientToolResult(params.ToolCallID, result)
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
+		"ok":      routed,
+		"stale":   !routed,
 	}))
 }

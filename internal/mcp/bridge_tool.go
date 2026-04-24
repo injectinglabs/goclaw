@@ -132,6 +132,22 @@ func (t *BridgeTool) Execute(ctx context.Context, args map[string]any) *tools.Re
 	// (e.g. empty string for UUID fields).
 	cleanedArgs := t.stripEmptyOptionalArgs(args)
 
+	// Inject session user_id for tools that declare it. Without this the LLM
+	// fills the field with a placeholder like "current", which downstream
+	// services (e.g. per-user token vaults) can't resolve. Only overwrites
+	// when the tool's input schema actually has a `user_id` property, so
+	// tools without that field are untouched.
+	if sessionUserID := store.UserIDFromContext(ctx); sessionUserID != "" {
+		if props, ok := t.inputSchema["properties"].(map[string]any); ok {
+			if _, has := props["user_id"]; has {
+				if cleanedArgs == nil {
+					cleanedArgs = map[string]any{}
+				}
+				cleanedArgs["user_id"] = sessionUserID
+			}
+		}
+	}
+
 	req := mcpgo.CallToolRequest{}
 	req.Params.Name = t.toolName
 	req.Params.Arguments = cleanedArgs

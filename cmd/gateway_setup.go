@@ -55,6 +55,10 @@ func setupToolRegistry(
 	toolsReg = tools.NewRegistry()
 	agentCfg = cfg.ResolveAgent("default")
 
+	// Browser-extension client tools (refresh_page_content, execute_action).
+	// No external deps — registered early so all agents see them.
+	tools.RegisterClientTools(toolsReg)
+
 	// Sandbox manager (optional — routes tools through Docker containers)
 	if sbCfg := cfg.Agents.Defaults.Sandbox; sbCfg != nil && sbCfg.Mode != "" && sbCfg.Mode != "off" {
 		if err := sandbox.CheckDockerAvailable(context.Background()); err != nil {

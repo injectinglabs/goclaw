@@ -38,7 +38,12 @@ func (s *PGCronStore) RunJob(ctx context.Context, jobID string, force bool) (boo
 		return false, "", err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return false, "", fmt.Errorf("job %s is already running", jobID)
+		// Already running is routine for repeated schedules (the cron lane is
+		// serialised per-session, so a still-in-flight previous fire correctly
+		// locks the job). Treat as a clean skip so callers — including agents
+		// invoking action="run" to poke a job — don't mistake concurrency for
+		// failure and delete the job.
+		return false, fmt.Sprintf("job %s is already running — skipped this trigger", jobID), nil
 	}
 	s.mu.Lock()
 	s.cacheLoaded = false

@@ -5,6 +5,7 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/eventbus"
+	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/memory"
 	"github.com/nextlevelbuilder/goclaw/internal/pipeline"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
@@ -173,11 +174,15 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 				if compactionCount > 0 {
 					summary = l.sessions.GetSummary(ctx, sessionKey)
 				}
+				// See loop_finalize.go — unify user_id across channels via the
+				// existing contact-merge resolver so memory writers see one
+				// canonical identity per human.
+				memUserID := l.resolveCredentialUserID(ctx, *req)
 				l.domainBus.Publish(eventbus.DomainEvent{
 					Type:     eventbus.EventSessionCompleted,
 					TenantID: l.tenantID.String(),
 					AgentID:  l.agentUUID.String(),
-					UserID:   req.UserID,
+					UserID:   memUserID,
 					SourceID: sessionKey,
 					Payload: &eventbus.SessionCompletedPayload{
 						SessionKey:      sessionKey,
@@ -192,6 +197,17 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 		UpdateMetadata:   cb.updateMetadata,
 		BootstrapCleanup: cb.bootstrapCleanup,
 		MaybeSummarize:   cb.maybeSummarize,
+		HandleEmptyReply: func(ctx context.Context, history []providers.Message) string {
+			// One tools-disabled retry that forces the model to summarise
+			// the data already in history into a user-facing reply.
+			if rescued := l.rescueEmptyReply(ctx, history); rescued != "" {
+				return SanitizeAssistantContent(rescued)
+			}
+			// Rescue also empty — return a localised sentence so the user
+			// sees something actionable instead of a "..." placeholder.
+			locale := store.LocaleFromContext(ctx)
+			return i18n.T(locale, i18n.MsgEmptyReplyFallback)
+		},
 	}
 }
 
