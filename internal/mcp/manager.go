@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -226,7 +228,31 @@ func (m *Manager) resolveServerCredentials(ctx context.Context, info store.MCPAc
 
 	args := jsonBytesToStringSlice(srv.Args)
 	env := jsonBytesToStringMap(srv.Env)
-	headers, err := resolveEnvVars(jsonBytesToStringMap(srv.Headers))
+	parsedHeaders := jsonBytesToStringMap(srv.Headers)
+	rawHeadersLen := len(srv.Headers)
+	rawHeadersFirstByte := byte(0)
+	if rawHeadersLen > 0 {
+		rawHeadersFirstByte = srv.Headers[0]
+	}
+	rawHeadersSha := ""
+	if rawHeadersLen > 0 {
+		sum := sha256.Sum256(srv.Headers)
+		rawHeadersSha = hex.EncodeToString(sum[:])[:16]
+	}
+	hdrTokSha := ""
+	if v, ok := parsedHeaders["X-Service-Token"]; ok && v != "" {
+		sum := sha256.Sum256([]byte(v))
+		hdrTokSha = hex.EncodeToString(sum[:])[:16]
+	}
+	slog.Info("mcp.diag.headers_load",
+		"server", srv.Name,
+		"raw_len", rawHeadersLen,
+		"raw_first_byte", string([]byte{rawHeadersFirstByte}),
+		"raw_sha", rawHeadersSha,
+		"parsed_keys_count", len(parsedHeaders),
+		"hdr_tok_sha", hdrTokSha,
+	)
+	headers, err := resolveEnvVars(parsedHeaders)
 	if err != nil {
 		slog.Warn("security.mcp.env_var_rejected", "server", srv.Name, "err", err)
 		return nil
