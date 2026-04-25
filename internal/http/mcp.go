@@ -172,6 +172,17 @@ func (h *MCPHandler) handleCreateServer(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Defense in depth: bump the pool's evictGen for this (tenant, name)
+	// so any in-flight Acquire that started against an old, stale row (e.g.
+	// before this Create completed in another goroutine) discards its
+	// dialed client instead of caching it. Pool *should* be empty for a
+	// fresh server, but the evictGen bump is what guarantees mid-dial
+	// goroutines re-resolve creds.
+	if h.poolEvictor != nil {
+		tid := store.TenantIDFromContext(r.Context())
+		h.poolEvictor.Evict(tid, srv.Name)
+	}
+
 	h.emitCacheInvalidate()
 	emitAudit(h.msgBus, r, "mcp_server.created", "mcp_server", srv.ID.String())
 	writeJSON(w, http.StatusCreated, srv)
@@ -297,10 +308,21 @@ func (h *MCPHandler) handleDeleteServer(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Capture name before delete so we can drop the pool entry.
+	var serverName string
+	if existing, _ := h.store.GetServer(r.Context(), id); existing != nil {
+		serverName = existing.Name
+	}
+
 	if err := h.store.DeleteServer(r.Context(), id); err != nil {
 		slog.Error("mcp.delete_server", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+
+	if h.poolEvictor != nil && serverName != "" {
+		tid := store.TenantIDFromContext(r.Context())
+		h.poolEvictor.Evict(tid, serverName)
 	}
 
 	h.emitCacheInvalidate()
