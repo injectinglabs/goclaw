@@ -246,6 +246,13 @@ func createClient(transportType, command string, args []string, env map[string]s
 		var opts []transport.StreamableHTTPCOption
 		if len(headers) > 0 {
 			opts = append(opts, transport.WithHTTPHeaders(headers))
+		} else if url != "" {
+			// streamable-http MCP servers almost always require an
+			// X-Service-Token / Authorization header. Connecting without any
+			// headers usually means a credential-resolution bug upstream
+			// (decrypt failure, empty DB row, env-var miss). Surface it
+			// loudly so it's caught in seconds instead of as a 403 burst.
+			slog.Warn("mcp.connect.no_headers", "transport", "streamable-http", "url", url)
 		}
 		return mcpclient.NewStreamableHttpClient(url, opts...)
 

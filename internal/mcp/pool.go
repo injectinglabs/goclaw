@@ -54,10 +54,16 @@ type Pool struct {
 	servers     map[string]*poolEntry            // shared connections: tenantID/serverName
 	userServers map[string]*poolEntry            // user connections: tenantID/serverName/user:userID
 	userSlots   map[string]chan struct{}          // per-server semaphores: tenantID/serverName → capacity MaxUserConns
+	evictGen    map[string]uint64                 // bumped per-key on Evict; Acquire snapshots before connect to detect races
 	cfg         PoolConfig
 	slot        chan struct{} // semaphore for MaxSize
 	stopCh      chan struct{}
 }
+
+// ErrEvictRace signals that an Evict call landed while Acquire was connecting,
+// so the freshly-built client likely uses stale config (headers, url, env).
+// Caller should re-resolve config from DB and retry once.
+var ErrEvictRace = fmt.Errorf("mcp pool: evicted during connect, retry with fresh config")
 
 // NewPool creates a shared MCP connection pool with idle eviction.
 func NewPool(cfg PoolConfig) *Pool {
@@ -87,6 +93,7 @@ func NewPool(cfg PoolConfig) *Pool {
 		servers:     make(map[string]*poolEntry),
 		userServers: make(map[string]*poolEntry),
 		userSlots:   make(map[string]chan struct{}),
+		evictGen:    make(map[string]uint64),
 		cfg:         cfg,
 		slot:        make(chan struct{}, cfg.MaxSize),
 		stopCh:      make(chan struct{}),
@@ -141,6 +148,10 @@ func (p *Pool) Acquire(ctx context.Context, tenantID uuid.UUID, name, transportT
 		default:
 		}
 	}
+	// Snapshot eviction generation BEFORE releasing the lock. If Evict bumps
+	// this counter while we connect, our resolved config (headers/url/env)
+	// is stale and the freshly-built client must be discarded.
+	genSnapshot := p.evictGen[key]
 	p.mu.Unlock()
 
 	// Acquire a slot (blocks if pool full, evicts idle if possible)
@@ -172,6 +183,20 @@ func (p *Pool) Acquire(ctx context.Context, tenantID uuid.UUID, name, transportT
 	}
 
 	p.mu.Lock()
+	// Eviction-during-connect race: a credential rotation landed while we
+	// were dialing. Drop the freshly-built client so the next Acquire reads
+	// the new credentials from DB. Caller retries with fresh config.
+	if p.evictGen[key] != genSnapshot {
+		p.mu.Unlock()
+		hcancel()
+		_ = ss.client.Close()
+		select {
+		case <-p.slot:
+		default:
+		}
+		slog.Warn("mcp.pool.evict_race", "key", key)
+		return nil, ErrEvictRace
+	}
 	// Check if another goroutine connected while we were connecting
 	if existing, ok := p.servers[key]; ok && existing.state.connected.Load() {
 		p.mu.Unlock()
@@ -411,27 +436,58 @@ func (p *Pool) Stop() {
 
 // Evict closes a specific pooled connection by tenant + server name.
 // Called when server credentials are rotated to force reconnection with new credentials.
+//
+// Bumps evictGen[key] so any in-flight Acquire goroutine (dialing with
+// pre-rotation config) discards its result instead of caching it. Also drops
+// matching per-user pool entries — they share the same shared-secret transport
+// auth and are equally invalidated by a rotation.
 func (p *Pool) Evict(tenantID uuid.UUID, serverName string) {
 	key := poolKey(tenantID, serverName)
+	userPrefix := key + "/user:"
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	entry, ok := p.servers[key]
-	if !ok {
-		return
+	// Bump generation unconditionally — even if no entry exists, an in-flight
+	// Acquire may be mid-dial with stale config and must drop its result.
+	p.evictGen[key]++
+
+	if entry, ok := p.servers[key]; ok {
+		if entry.state.cancel != nil {
+			entry.state.cancel()
+		}
+		if client := entry.state.clientPtr.Load(); client != nil {
+			_ = client.Close()
+		}
+		delete(p.servers, key)
+		select {
+		case <-p.slot:
+		default:
+		}
 	}
-	if entry.state.cancel != nil {
-		entry.state.cancel()
+
+	// Clear per-user entries for this server. They were created with the
+	// same server-level headers (plus user creds merged on top) and a
+	// rotated shared secret invalidates them just as much.
+	userEvicted := 0
+	for ukey, entry := range p.userServers {
+		if !strings.HasPrefix(ukey, userPrefix) {
+			continue
+		}
+		if entry.state.cancel != nil {
+			entry.state.cancel()
+		}
+		if client := entry.state.clientPtr.Load(); client != nil {
+			_ = client.Close()
+		}
+		delete(p.userServers, ukey)
+		userEvicted++
 	}
-	if client := entry.state.clientPtr.Load(); client != nil {
-		_ = client.Close()
-	}
-	delete(p.servers, key)
-	select {
-	case <-p.slot:
-	default:
-	}
-	slog.Info("mcp.pool.evicted_on_rotation", "key", key)
+
+	slog.Info("mcp.pool.evicted_on_rotation",
+		"key", key,
+		"user_entries_dropped", userEvicted,
+		"gen", p.evictGen[key],
+	)
 }
 
 // evictLoop runs periodically to close idle connections over MaxIdle count.

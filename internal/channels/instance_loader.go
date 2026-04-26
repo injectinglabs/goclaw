@@ -25,6 +25,13 @@ import (
 // var (not const) so tests can shrink it without waiting a real minute+.
 var reloadStartTimeout = 90 * time.Second
 
+// reloadStopTimeout bounds how long Reload()/RestartInstance() will wait for
+// a single channel's Stop() before abandoning it. A hung Stop in the upstream
+// channel implementation must not freeze the entire reload loop and starve
+// every other tenant. 30s sits above Telegram's internal pollDone+handlerWg
+// budget (10s+15s).
+var reloadStopTimeout = 30 * time.Second
+
 // ChannelFactory creates a Channel from DB instance data.
 // name: channel name (registered in Manager, used in session keys).
 // creds: decrypted credentials JSON (token, API keys, etc.).
@@ -116,12 +123,11 @@ func (l *InstanceLoader) Reload(ctx context.Context) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Stop and unregister old channels
+	// Stop and unregister old channels. Each Stop is bounded so a single
+	// hung channel impl can't wedge the loop and freeze every other tenant.
 	for name := range l.loaded {
 		if ch, ok := l.manager.GetChannel(name); ok {
-			if err := ch.Stop(ctx); err != nil {
-				slog.Warn("failed to stop channel instance on reload", "name", name, "error", err)
-			}
+			l.stopChannelWithTimeout(ctx, name, ch)
 		}
 		l.manager.UnregisterChannel(name)
 	}
@@ -158,13 +164,85 @@ func (l *InstanceLoader) Stop(ctx context.Context) {
 
 	for name := range l.loaded {
 		if ch, ok := l.manager.GetChannel(name); ok {
-			if err := ch.Stop(ctx); err != nil {
-				slog.Warn("failed to stop channel instance", "name", name, "error", err)
-			}
+			l.stopChannelWithTimeout(ctx, name, ch)
 		}
 		l.manager.UnregisterChannel(name)
 	}
 	l.loaded = make(map[string]struct{})
+}
+
+// RestartInstance stops, reloads, and starts a single channel by ID. Used for
+// targeted updates (credentials rotation, enable/disable, config edits) so a
+// single-instance change doesn't churn every tenant's bots through the full
+// Reload path — and sidesteps any single hung Stop blocking unrelated channels.
+//
+// If the instance no longer exists or is disabled, the channel (if any) is
+// stopped and unregistered without restart.
+func (l *InstanceLoader) RestartInstance(ctx context.Context, id uuid.UUID) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// Cross-tenant lookup — server-internal call from the cache invalidation bus.
+	inst, err := l.store.Get(store.WithCrossTenant(ctx), id)
+	if err != nil {
+		slog.Warn("targeted reload: instance not found, skipping",
+			"id", id, "error", err)
+		return
+	}
+
+	// Stop the existing channel for this name, if any.
+	if _, alreadyLoaded := l.loaded[inst.Name]; alreadyLoaded {
+		if ch, ok := l.manager.GetChannel(inst.Name); ok {
+			l.stopChannelWithTimeout(ctx, inst.Name, ch)
+		}
+		l.manager.UnregisterChannel(inst.Name)
+		delete(l.loaded, inst.Name)
+	}
+
+	if !inst.Enabled {
+		slog.Info("targeted reload: instance disabled, leaving stopped",
+			"name", inst.Name, "type", inst.ChannelType)
+		return
+	}
+
+	// Brief pause so external APIs (Telegram getUpdates) release polling locks.
+	time.Sleep(500 * time.Millisecond)
+
+	if err := l.loadInstance(ctx, *inst, true); err != nil {
+		slog.Error("targeted reload: failed to load instance",
+			"name", inst.Name, "type", inst.ChannelType, "error", err)
+		return
+	}
+	slog.Info("targeted reload: instance restarted",
+		"name", inst.Name, "type", inst.ChannelType)
+}
+
+// stopChannelWithTimeout runs ch.Stop in a goroutine with a bounded timeout.
+// A hung Stop must not block the caller (Reload, RestartInstance, Stop) and
+// starve other channels. The late-returning Stop is drained asynchronously so
+// its goroutine can eventually exit.
+func (l *InstanceLoader) stopChannelWithTimeout(ctx context.Context, name string, ch Channel) {
+	stopErr := make(chan error, 1)
+	go func() { stopErr <- ch.Stop(ctx) }()
+
+	timer := time.NewTimer(reloadStopTimeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-stopErr:
+		if err != nil {
+			slog.Warn("failed to stop channel instance", "name", name, "error", err)
+		}
+	case <-timer.C:
+		slog.Warn("channel stop timed out; abandoning",
+			"name", name, "timeout", reloadStopTimeout)
+		go func() {
+			if err := <-stopErr; err != nil {
+				slog.Warn("channel stop returned after timeout",
+					"name", name, "error", err)
+			}
+		}()
+	}
 }
 
 // coerceStringBools converts string "true"/"false" values to JSON booleans

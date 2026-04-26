@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -292,8 +293,29 @@ func (m *Manager) connectAndFilter(ctx context.Context, rs *resolvedServer) erro
 	if m.pool != nil && !rs.hasUserCreds {
 		// Pool mode: acquire shared connection, create per-agent BridgeTools
 		tid := store.TenantIDFromContext(ctx)
-		if err := m.connectViaPool(ctx, tid, srv.Name, srv.Transport, srv.Command,
-			rs.args, rs.env, srv.URL, rs.headers, srv.ToolPrefix, srv.TimeoutSec, srv.ID); err != nil {
+		err := m.connectViaPool(ctx, tid, srv.Name, srv.Transport, srv.Command,
+			rs.args, rs.env, srv.URL, rs.headers, srv.ToolPrefix, srv.TimeoutSec, srv.ID)
+		// Eviction race: a credential rotation landed mid-connect. Re-read
+		// the server row, re-resolve creds, and retry once. Without this the
+		// pool would either return ErrEvictRace forever (caller saw a fresh
+		// rotation) or — worse, before this guard existed — silently cache
+		// a client built with the pre-rotation headers.
+		if errors.Is(err, ErrEvictRace) && m.store != nil {
+			slog.Info("mcp.server.connect_retry_after_evict_race", "server", srv.Name)
+			fresh, ferr := m.store.GetServer(ctx, srv.ID)
+			if ferr == nil && fresh != nil {
+				rs2 := m.resolveServerCredentials(ctx, store.MCPAccessInfo{
+					Server:    *fresh,
+					ToolAllow: rs.info.ToolAllow,
+					ToolDeny:  rs.info.ToolDeny,
+				}, "")
+				if rs2 != nil {
+					err = m.connectViaPool(ctx, tid, fresh.Name, fresh.Transport, fresh.Command,
+						rs2.args, rs2.env, fresh.URL, rs2.headers, fresh.ToolPrefix, fresh.TimeoutSec, fresh.ID)
+				}
+			}
+		}
+		if err != nil {
 			return err
 		}
 	} else {
