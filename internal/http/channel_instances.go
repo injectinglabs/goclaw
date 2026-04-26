@@ -74,13 +74,21 @@ func (h *ChannelInstancesHandler) adminAuth(next http.HandlerFunc) http.HandlerF
 	return requireAuth(permissions.RoleAdmin, next)
 }
 
-func (h *ChannelInstancesHandler) emitCacheInvalidate() {
+// emitCacheInvalidate broadcasts a channel_instances cache invalidation. Pass
+// instanceID="" to trigger a full reload of every tenant's channels (delete or
+// bulk operations); pass a UUID to trigger a targeted RestartInstance (single
+// create/update), which avoids churning unrelated bots and sidesteps any
+// single-channel hang.
+func (h *ChannelInstancesHandler) emitCacheInvalidate(instanceID string) {
 	if h.msgBus == nil {
 		return
 	}
 	h.msgBus.Broadcast(bus.Event{
-		Name:    protocol.EventCacheInvalidate,
-		Payload: bus.CacheInvalidatePayload{Kind: bus.CacheKindChannelInstances},
+		Name: protocol.EventCacheInvalidate,
+		Payload: bus.CacheInvalidatePayload{
+			Kind: bus.CacheKindChannelInstances,
+			Key:  instanceID,
+		},
 	})
 }
 
@@ -183,7 +191,7 @@ func (h *ChannelInstancesHandler) handleCreate(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	h.emitCacheInvalidate()
+	h.emitCacheInvalidate(inst.ID.String())
 	emitAudit(h.msgBus, r, "channel_instance.created", "channel_instance", inst.ID.String())
 	writeJSON(w, http.StatusCreated, maskInstanceHTTP(*inst))
 }
@@ -228,7 +236,7 @@ func (h *ChannelInstancesHandler) handleUpdate(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	h.emitCacheInvalidate()
+	h.emitCacheInvalidate(id.String())
 	emitAudit(h.msgBus, r, "channel_instance.updated", "channel_instance", id.String())
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
@@ -258,7 +266,11 @@ func (h *ChannelInstancesHandler) handleDelete(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	h.emitCacheInvalidate()
+	// Delete: targeted reload would have nothing to load (row is gone), so
+	// fall through to full Reload by passing empty Key. The loader's Reload
+	// will reconcile by stopping every channel and re-loading enabled rows
+	// from DB; the deleted row simply won't reappear.
+	h.emitCacheInvalidate("")
 	emitAudit(h.msgBus, r, "channel_instance.deleted", "channel_instance", id.String())
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

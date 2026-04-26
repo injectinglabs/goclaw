@@ -180,6 +180,10 @@ func wireChannelEventSubscribers(
 	cfg *config.Config,
 ) {
 	// Cache invalidation: reload channel instances on changes.
+	// If payload.Key is a channel_instance UUID, do a targeted RestartInstance —
+	// single-instance create/update doesn't need to churn every tenant's bots,
+	// and a single hung Stop in upstream channel impls won't freeze others.
+	// Empty Key falls back to full Reload (delete or bulk operations).
 	if instanceLoader != nil {
 		msgBus.Subscribe(bus.TopicCacheChannelInstances, func(event bus.Event) {
 			if event.Name != protocol.EventCacheInvalidate {
@@ -188,6 +192,14 @@ func wireChannelEventSubscribers(
 			payload, ok := event.Payload.(bus.CacheInvalidatePayload)
 			if !ok || payload.Kind != bus.CacheKindChannelInstances {
 				return
+			}
+			if payload.Key != "" {
+				if id, err := uuid.Parse(payload.Key); err == nil {
+					go instanceLoader.RestartInstance(context.Background(), id)
+					return
+				}
+				slog.Warn("invalid channel_instance id in cache invalidate, falling back to full reload",
+					"key", payload.Key)
 			}
 			go instanceLoader.Reload(context.Background())
 		})
