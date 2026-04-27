@@ -12,6 +12,7 @@ import (
 
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/secret"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 
@@ -116,6 +117,11 @@ type Manager struct {
 	// LoadForAgent("") for later per-request tool resolution. These servers are NOT
 	// connected at startup — connections are created per-user via pool.AcquireUser().
 	userCredServers []store.MCPAccessInfo
+
+	// Optional SSM resolver. When set, ${ssm:/path} placeholders in
+	// mcp_servers.headers / config.MCPServerConfig.Headers / .Env are
+	// expanded via AWS SSM Parameter Store at connect time. nil = passthrough.
+	ssm *secret.SSMResolver
 }
 
 // ManagerOption configures the Manager.
@@ -151,6 +157,16 @@ func WithGrantChecker(gc GrantChecker) ManagerOption {
 	}
 }
 
+// WithSSMResolver enables ${ssm:/path} expansion for mcp_servers.headers,
+// .env, and config-file headers. When unset, placeholders pass through
+// unchanged (caller responsible — usually the connect attempt would then
+// fail with an obviously-invalid header).
+func WithSSMResolver(r *secret.SSMResolver) ManagerOption {
+	return func(m *Manager) {
+		m.ssm = r
+	}
+}
+
 // NewManager creates a new MCP Manager.
 func NewManager(registry *tools.Registry, opts ...ManagerOption) *Manager {
 	m := &Manager{
@@ -178,7 +194,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 
 		// Config-path servers have no DB ID — pass uuid.Nil
-		headers, err := resolveEnvVars(cfg.Headers)
+		headers, err := m.resolveEnvVars(ctx, cfg.Headers)
 		if err != nil {
 			slog.Warn("security.mcp.env_var_rejected", "server", name, "err", err)
 			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
@@ -227,7 +243,7 @@ func (m *Manager) resolveServerCredentials(ctx context.Context, info store.MCPAc
 
 	args := jsonBytesToStringSlice(srv.Args)
 	env := jsonBytesToStringMap(srv.Env)
-	headers, err := resolveEnvVars(jsonBytesToStringMap(srv.Headers))
+	headers, err := m.resolveEnvVars(ctx, jsonBytesToStringMap(srv.Headers))
 	if err != nil {
 		slog.Warn("security.mcp.env_var_rejected", "server", srv.Name, "err", err)
 		return nil
@@ -592,14 +608,25 @@ func (m *Manager) ServerStatus() []ServerStatus {
 	return statuses
 }
 
-// resolveEnvVars returns a copy of m with "env:VARNAME" values resolved to os.Getenv("VARNAME").
-// Uses fail-closed validation: only allowlisted env vars are permitted.
-func resolveEnvVars(m map[string]string) (map[string]string, error) {
-	out := make(map[string]string, len(m))
-	for k, v := range m {
+// resolveEnvVars returns a copy of m with "env:VARNAME" values resolved to
+// os.Getenv("VARNAME") and any ${ssm:/path} placeholders expanded via the
+// configured SSM resolver. Uses fail-closed validation: only allowlisted
+// env vars are permitted; SSM lookup errors are surfaced to the caller.
+func (m *Manager) resolveEnvVars(ctx context.Context, in map[string]string) (map[string]string, error) {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
 		resolved, err := ValidateAndResolveEnvVar(v)
 		if err != nil {
 			return nil, fmt.Errorf("header %q: %w", k, err)
+		}
+		// SSM placeholder expansion happens after env-var resolution, so an
+		// env value that itself stores "${ssm:/path}" still works.
+		if m.ssm != nil && secret.IsRef(resolved) {
+			expanded, err := m.ssm.Resolve(ctx, resolved)
+			if err != nil {
+				return nil, fmt.Errorf("header %q: %w", k, err)
+			}
+			resolved = expanded
 		}
 		out[k] = resolved
 	}

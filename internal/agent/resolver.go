@@ -21,6 +21,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/providerresolve"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/sandbox"
+	"github.com/nextlevelbuilder/goclaw/internal/secret"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
@@ -82,6 +83,10 @@ type ResolverDeps struct {
 
 	// MCP grant checker — for runtime grant verification at BridgeTool.Execute
 	MCPGrantChecker mcpbridge.GrantChecker
+
+	// MCP SSM resolver — when set, ${ssm:/path} placeholders in
+	// mcp_servers.headers are expanded at connect time. Optional.
+	MCPSSMResolver *secret.SSMResolver
 
 	// Skill access store — for per-agent skill visibility filtering
 	SkillAccessStore store.SkillAccessStore
@@ -318,6 +323,9 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			if deps.MCPGrantChecker != nil {
 				mcpOpts = append(mcpOpts, mcpbridge.WithGrantChecker(deps.MCPGrantChecker))
 			}
+			if deps.MCPSSMResolver != nil {
+				mcpOpts = append(mcpOpts, mcpbridge.WithSSMResolver(deps.MCPSSMResolver))
+			}
 			mcpMgr := mcpbridge.NewManager(toolsReg, mcpOpts...)
 			if err := mcpMgr.LoadForAgent(ctx, ag.ID, ""); err != nil {
 				slog.Warn("failed to load MCP servers for agent", "agent", agentKey, "error", err)
@@ -538,6 +546,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			MCPPool:                deps.MCPPool,
 			MCPUserCredSrvs:        mcpUserCredSrvs,
 			MCPGrantChecker:        deps.MCPGrantChecker,
+			MCPSSMResolver:         deps.MCPSSMResolver,
 			OrchMode:               orchMode,
 			DelegateTargets:        delegateTargets,
 			EvolutionMetricsStore:  evoMetricsStore,
