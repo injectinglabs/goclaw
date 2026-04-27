@@ -53,16 +53,6 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	userID := fmt.Sprintf("%d", user.ID)
 	senderID := userID
 
-	// allowKey is what we feed BaseChannel.IsAllowed: a compound "id|username"
-	// form. Without the username half, an allow_from entry like "@alice" never
-	// matches, because IsAllowed has no way to learn the username from a bare
-	// numeric senderID. Operators legitimately configure allowlists by either
-	// numeric ID or @username (the latter is what users naturally know).
-	allowKey := userID
-	if user.Username != "" {
-		allowKey = userID + "|" + user.Username
-	}
-
 	isGroup := message.Chat.Type == "group" || message.Chat.Type == "supergroup"
 
 	slog.Debug("telegram message received",
@@ -125,11 +115,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		case "allowlist":
 			allowed := false
 			for _, a := range topicCfg.allowFrom {
-				// Match either numeric ID ("123456") or username form
-				// ("@alice" or bare "alice"), mirroring BaseChannel.IsAllowed.
-				trimmed := strings.TrimPrefix(a, "@")
-				if a == userID || a == senderID || trimmed == userID ||
-					(user.Username != "" && trimmed == user.Username) {
+				if a == userID || a == senderID {
 					allowed = true
 					break
 				}
@@ -160,7 +146,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 			// Allow all senders.
 
 		case "allowlist":
-			if !c.IsAllowed(allowKey) {
+			if !c.IsAllowed(userID) && !c.IsAllowed(senderID) {
 				slog.Debug("telegram message rejected by allowlist",
 					"user_id", userID, "username", user.Username,
 				)
@@ -180,7 +166,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 					paired = p1 || p2
 				}
 			}
-			inAllowList := c.HasAllowList() && c.IsAllowed(allowKey)
+			inAllowList := c.HasAllowList() && (c.IsAllowed(userID) || c.IsAllowed(senderID))
 
 			if !paired && !inAllowList {
 				slog.Debug("telegram message rejected: sender not paired",
