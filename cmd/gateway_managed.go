@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 
 	"github.com/google/uuid"
@@ -26,6 +27,7 @@ import (
 	memorypkg "github.com/nextlevelbuilder/goclaw/internal/memory"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/sandbox"
+	"github.com/nextlevelbuilder/goclaw/internal/secret"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/store/pg"
@@ -133,6 +135,20 @@ func wireExtras(
 		mcpGrantChecker = mcpbridge.NewStoreGrantChecker(stores.MCP, msgBus)
 	}
 
+	// 5a. Optional SSM resolver for ${ssm:/path} placeholders in
+	// mcp_servers.headers. Enabled when GOCLAW_MCP_SSM=1 — kept opt-in so
+	// dev/desktop builds without AWS credentials are unaffected.
+	var mcpSSMResolver *secret.SSMResolver
+	if os.Getenv("GOCLAW_MCP_SSM") == "1" {
+		r, err := secret.NewSSMResolver(context.Background())
+		if err != nil {
+			slog.Warn("mcp.ssm.init_failed", "error", err)
+		} else {
+			mcpSSMResolver = r
+			slog.Info("mcp.ssm.enabled")
+		}
+	}
+
 	// 6. Set up agent resolver: lazy-creates Loops from DB
 	var skillAccessStore store.SkillAccessStore
 	if sas, ok := stores.Skills.(store.SkillAccessStore); ok {
@@ -224,6 +240,7 @@ func wireExtras(
 		MCPStore:               stores.MCP,
 		MCPPool:                mcpPool,
 		MCPGrantChecker:        mcpGrantChecker,
+		MCPSSMResolver:         mcpSSMResolver,
 		ConfigPermStore:        stores.ConfigPermissions,
 		MediaStore:             mediaStore,
 		ModelPricing:           appCfg.Telemetry.ModelPricing,

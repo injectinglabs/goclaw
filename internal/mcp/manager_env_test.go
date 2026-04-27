@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"testing"
 )
 
@@ -43,9 +44,10 @@ func TestResolveEnvVars(t *testing.T) {
 			wantErr: true,
 		},
 	}
+	m := &Manager{}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := resolveEnvVars(tt.input)
+			got, err := m.resolveEnvVars(context.Background(), tt.input)
 			if tt.wantErr {
 				if err == nil {
 					t.Error("expected error, got nil")
@@ -62,5 +64,22 @@ func TestResolveEnvVars(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestResolveEnvVars_SSMPassthrough verifies that ${ssm:/path} placeholders
+// pass through unchanged when no resolver is configured. This is the safe
+// default: a misconfigured deploy fails noisily at connect time (header
+// value still reads "${ssm:...}") instead of silently dropping the secret.
+func TestResolveEnvVars_SSMPassthrough(t *testing.T) {
+	m := &Manager{} // no SSM resolver
+	got, err := m.resolveEnvVars(context.Background(), map[string]string{
+		"X-Service-Token": "${ssm:/injecting-ai/staging/mcp/gmail/service-token}",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got["X-Service-Token"] != "${ssm:/injecting-ai/staging/mcp/gmail/service-token}" {
+		t.Errorf("placeholder should pass through without resolver, got %q", got["X-Service-Token"])
 	}
 }
