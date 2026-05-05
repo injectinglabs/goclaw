@@ -78,6 +78,9 @@ func init() {
 		// Tenant backup / restore
 		MsgRestoreNewModeRejectsTenantID: "mode=new 会创建新租户；请传 tenant_slug（而非 tenant_id）作为新租户的 slug",
 
+		// Tenant naming
+		MsgFailedToGenerateName: "无法生成唯一的租户名称，请手动指定",
+
 		// Scheduler
 		MsgQueueFull:    "Session队列已满",
 		MsgShuttingDown: "网关正在关闭，请稍后重试",
