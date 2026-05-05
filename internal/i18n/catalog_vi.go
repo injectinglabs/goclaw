@@ -78,6 +78,9 @@ func init() {
 		// Tenant backup / restore
 		MsgRestoreNewModeRejectsTenantID: "mode=new tạo tenant mới; dùng tenant_slug (không phải tenant_id) làm slug cho tenant mới",
 
+		// Tenant naming
+		MsgFailedToGenerateName: "không thể tạo tên tenant duy nhất; vui lòng chỉ định thủ công",
+
 		// Scheduler
 		MsgQueueFull:    "hàng đợi session đã đầy",
 		MsgShuttingDown: "cổng đang tắt, vui lòng thử lại sau",

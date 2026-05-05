@@ -79,6 +79,9 @@ const (
 	// --- Tenant backup / restore ---
 	MsgRestoreNewModeRejectsTenantID = "error.restore_new_mode_rejects_tenant_id" // "mode=new uses tenant_slug; tenant_id is not accepted"
 
+	// --- Tenant naming ---
+	MsgFailedToGenerateName = "error.failed_to_generate_tenant_name" // "failed to generate a unique tenant name, please specify one explicitly"
+
 	// --- Scheduler ---
 	MsgQueueFull       = "error.queue_full"       // "session queue is full"
 	MsgShuttingDown    = "error.shutting_down"     // "gateway is shutting down, please retry shortly"

@@ -1,6 +1,9 @@
 package http
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,6 +15,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/permissions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/internal/tenantname"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
@@ -34,6 +38,7 @@ func (h *TenantsHandler) RegisterRoutes(mux *http.ServeMux) {
 	}
 	mux.HandleFunc("GET /v1/tenants", admin(h.handleList))
 	mux.HandleFunc("POST /v1/tenants", admin(h.handleCreate))
+	mux.HandleFunc("GET /v1/tenants/suggest-name", admin(h.handleSuggestName))
 	mux.HandleFunc("GET /v1/tenants/{id}", admin(h.handleGet))
 	mux.HandleFunc("PATCH /v1/tenants/{id}", admin(h.handleUpdate))
 	mux.HandleFunc("GET /v1/tenants/{id}/users", admin(h.handleUsersList))
@@ -75,13 +80,21 @@ func (h *TenantsHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if input.Name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgRequired, "name")})
-		return
-	}
+	// When the caller omits both name and slug we synthesise a friendly,
+	// dictionary-based identifier (e.g. "happy-amber-otter"). This keeps
+	// auto-provisioned tenants user-presentable without forcing the caller
+	// to invent one.
 	if input.Slug == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgRequired, "slug")})
-		return
+		generated, gerr := tenantname.GenerateUnique(r.Context(), h.slugTaken, 8)
+		if gerr != nil {
+			slog.Error("tenants.create: name generation failed", "error", gerr)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgFailedToGenerateName)})
+			return
+		}
+		input.Slug = generated
+	}
+	if input.Name == "" {
+		input.Name = tenantname.DisplayName(input.Slug)
 	}
 	if !isValidSlug(input.Slug) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidSlug, "slug")})
@@ -294,6 +307,43 @@ func (h *TenantsHandler) handleUsersRemove(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+}
+
+// handleSuggestName returns a freshly generated, currently-unused tenant
+// name. The frontend calls it before showing the create dialog so the
+// "name" field can be pre-filled with a friendly default the user can
+// accept or regenerate.
+func (h *TenantsHandler) handleSuggestName(w http.ResponseWriter, r *http.Request) {
+	locale := extractLocale(r)
+	if !store.IsOwnerRole(r.Context()) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": i18n.T(locale, i18n.MsgPermissionDenied, "tenants.suggest_name")})
+		return
+	}
+
+	slug, err := tenantname.GenerateUnique(r.Context(), h.slugTaken, 8)
+	if err != nil {
+		slog.Error("tenants.suggest_name failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgFailedToGenerateName)})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"name": tenantname.DisplayName(slug),
+		"slug": slug,
+	})
+}
+
+// slugTaken adapts TenantStore.GetTenantBySlug to tenantname.SlugTakenFunc.
+// sql.ErrNoRows means the slug is free; any other error is propagated so the
+// caller does not silently reuse a slug after a transient lookup failure.
+func (h *TenantsHandler) slugTaken(ctx context.Context, slug string) (bool, error) {
+	_, err := h.tenantStore.GetTenantBySlug(ctx, slug)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return false, err
 }
 
 func (h *TenantsHandler) emitCacheInvalidate(kind, key string) {

@@ -2,7 +2,9 @@ package methods
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/permissions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/internal/tenantname"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
@@ -42,6 +45,7 @@ func (m *TenantsMethods) Register(router *gateway.MethodRouter) {
 	router.Register("tenants.users.add", m.handleUsersAdd)
 	router.Register("tenants.users.remove", m.handleUsersRemove)
 	router.Register("tenants.mine", m.handleMine)
+	router.Register("tenants.suggest_name", m.handleSuggestName)
 }
 
 func (m *TenantsMethods) handleList(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
@@ -113,13 +117,21 @@ func (m *TenantsMethods) handleCreate(ctx context.Context, client *gateway.Clien
 		}
 	}
 
-	if params.Name == "" {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "name")))
-		return
-	}
+	// Auto-generate a friendly slug when the caller omits one. Keeps
+	// programmatic provisioning paths (CLI, scripts) from having to
+	// invent identifiers and guarantees the resulting tenant has a
+	// user-presentable name.
 	if params.Slug == "" {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "slug")))
-		return
+		generated, gerr := tenantname.GenerateUnique(ctx, m.slugTaken, 8)
+		if gerr != nil {
+			slog.Error("tenants.create: name generation failed", "error", gerr)
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, i18n.T(locale, i18n.MsgFailedToGenerateName)))
+			return
+		}
+		params.Slug = generated
+	}
+	if params.Name == "" {
+		params.Name = tenantname.DisplayName(params.Slug)
 	}
 	if !slugRe.MatchString(params.Slug) {
 		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidSlug, "slug")))
@@ -407,6 +419,42 @@ func (m *TenantsMethods) handleMine(ctx context.Context, client *gateway.Client,
 	}
 
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{"tenants": entries}))
+}
+
+// handleSuggestName returns a freshly generated, currently-unused tenant
+// name. The web UI uses it to pre-populate the create dialog with a friendly
+// default the user can accept or refresh.
+func (m *TenantsMethods) handleSuggestName(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
+	if !client.IsOwner() && !client.HasScope(permissions.ScopeProvision) {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrUnauthorized, i18n.T(locale, i18n.MsgPermissionDenied, "tenants.suggest_name")))
+		return
+	}
+
+	slug, err := tenantname.GenerateUnique(ctx, m.slugTaken, 8)
+	if err != nil {
+		slog.Error("tenants.suggest_name failed", "error", err)
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, i18n.T(locale, i18n.MsgFailedToGenerateName)))
+		return
+	}
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]string{
+		"name": tenantname.DisplayName(slug),
+		"slug": slug,
+	}))
+}
+
+// slugTaken adapts TenantStore.GetTenantBySlug to tenantname.SlugTakenFunc.
+// Treats sql.ErrNoRows as "free"; any other error propagates so a transient
+// lookup failure can never silently reuse an in-use slug.
+func (m *TenantsMethods) slugTaken(ctx context.Context, slug string) (bool, error) {
+	_, err := m.tenantStore.GetTenantBySlug(ctx, slug)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return false, err
 }
 
 func (m *TenantsMethods) emitCacheInvalidate(kind, key string) {

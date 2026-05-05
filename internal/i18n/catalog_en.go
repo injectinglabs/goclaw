@@ -78,6 +78,9 @@ func init() {
 		// Tenant backup / restore
 		MsgRestoreNewModeRejectsTenantID: "mode=new creates a fresh tenant; pass tenant_slug (not tenant_id) as the new tenant's target slug",
 
+		// Tenant naming
+		MsgFailedToGenerateName: "could not generate a unique tenant name; please specify one explicitly",
+
 		// Scheduler
 		MsgQueueFull:    "session queue is full",
 		MsgShuttingDown: "gateway is shutting down, please retry shortly",
