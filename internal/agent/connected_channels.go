@@ -29,7 +29,6 @@ func (l *Loop) fetchConnectedChannels(ctx context.Context, callerUserID string) 
 		slog.Debug("connected_channels.list_failed", "agent", l.id, "error", err)
 		return nil
 	}
-	slog.Info("debug.connected_channels", "agent", l.id, "callerUserID", callerUserID, "fetched", len(instances))
 	out := make([]ConnectedChannelSummary, 0, len(instances))
 	for _, inst := range instances {
 		if inst.AgentID != l.agentUUID {
@@ -41,7 +40,6 @@ func (l *Loop) fetchConnectedChannels(ctx context.Context, callerUserID string) 
 		// means we lack identity context (system / batch path) — fall back
 		// to the legacy "show everything for this agent" behaviour rather
 		// than hiding everything.
-		slog.Info("debug.connected_channels.candidate", "name", inst.Name, "created_by", inst.CreatedBy, "caller", callerUserID)
 		if callerUserID != "" && inst.CreatedBy != "" && inst.CreatedBy != callerUserID {
 			continue
 		}
