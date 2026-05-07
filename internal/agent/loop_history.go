@@ -196,7 +196,7 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		}
 	}
 
-	connectedChannels := l.fetchConnectedChannels(ctx)
+	connectedChannels := l.fetchConnectedChannels(ctx, userID)
 
 	systemPrompt := BuildSystemPrompt(SystemPromptConfig{
 		AgentID:                l.id,

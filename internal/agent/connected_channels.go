@@ -14,7 +14,13 @@ import (
 // Failure is non-fatal: on any error we log at DEBUG and return nil so the
 // prompt simply omits the section. Only enabled, non-internal instances are
 // included.
-func (l *Loop) fetchConnectedChannels(ctx context.Context) []ConnectedChannelSummary {
+//
+// callerUserID scopes the snapshot to channels the caller themselves
+// connected — for shared (multi-member) tenants we must not surface another
+// member's bot in the system prompt, otherwise the model will reference it
+// regardless of what list_connected_channels returns. Default-seeded
+// instances (CreatedBy == "") stay visible to everyone.
+func (l *Loop) fetchConnectedChannels(ctx context.Context, callerUserID string) []ConnectedChannelSummary {
 	if l.channelInstanceStore == nil {
 		return nil
 	}
@@ -27,6 +33,15 @@ func (l *Loop) fetchConnectedChannels(ctx context.Context) []ConnectedChannelSum
 	for _, inst := range instances {
 		if inst.AgentID != l.agentUUID {
 			continue // belongs to a different agent in the same tenant
+		}
+		// Per-user isolation in shared tenants: skip instances connected by
+		// someone else. A blank CreatedBy means the row was default-seeded
+		// (no creator) and is global — keep showing it. A blank callerUserID
+		// means we lack identity context (system / batch path) — fall back
+		// to the legacy "show everything for this agent" behaviour rather
+		// than hiding everything.
+		if callerUserID != "" && inst.CreatedBy != "" && inst.CreatedBy != callerUserID {
+			continue
 		}
 		summary := ConnectedChannelSummary{
 			Name:        inst.Name,
