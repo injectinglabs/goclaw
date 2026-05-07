@@ -2,17 +2,30 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"maps"
+	"sync/atomic"
 
+	mcpclient "github.com/mark3labs/mcp-go/client"
 	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
-// getUserMCPTools returns per-user MCP tools for servers requiring user credentials.
-// Tools are cached per-user in mcpUserTools sync.Map and registered in the shared
-// tool registry so ExecuteWithContext can resolve them. On first call for a user,
-// connections are established via pool.AcquireUser() and BridgeTools created.
+// getUserMCPTools returns the per-user MCP tool list for this caller. For
+// servers that mandate per-user credentials we register a single BridgeTool
+// per (server, tool) into the shared registry the first time anyone calls
+// the server in this Loop, and wire it with a per-call resolver that
+// re-acquires the right pool connection by ctx user_id on every Execute.
+// That way two members of the same tenant can run the agent concurrently
+// without racing over a single registry entry — registration freezes only
+// the tool name / schema, while the MCP HTTP connection (and its baked
+// X-Proxy-User header) is looked up fresh per call.
+//
+// Returns the list of tools the caller actually has credentials for, so
+// the chat builder can include them in the LLM tool palette only when the
+// caller is authorized.
 func (l *Loop) getUserMCPTools(ctx context.Context, userID string) []tools.Tool {
 	if len(l.mcpUserCredSrvs) == 0 || l.mcpPool == nil || l.mcpStore == nil || userID == "" {
 		if userID == "" && len(l.mcpUserCredSrvs) > 0 {
@@ -21,49 +34,161 @@ func (l *Loop) getUserMCPTools(ctx context.Context, userID string) []tools.Tool 
 		return nil
 	}
 
-	if cached, ok := l.mcpUserTools.Load(userID); ok {
-		cachedTools := cached.([]tools.Tool)
-		// Check if any cached tool's connection was evicted by pool.
-		// If so, clear cache and re-acquire connections.
-		allConnected := true
-		for _, t := range cachedTools {
-			if bt, ok := t.(interface{ IsConnected() bool }); ok && !bt.IsConnected() {
-				allConnected = false
-				break
-			}
-		}
-		if allConnected {
-			// Re-bind the shared registry to THIS caller's BridgeTools. The
-			// registry entries may currently point at another tenant member's
-			// connection (last writer wins on the cache-miss path below); a
-			// cache hit alone wouldn't refresh them, so without this loop
-			// ExecuteWithContext would still hit the previous user's MCP
-			// connection on the very next tool call.
-			if reg, ok := l.tools.(*tools.Registry); ok && reg != nil {
-				for _, t := range cachedTools {
-					if _, exists := reg.Get(t.Name()); exists {
-						reg.Unregister(t.Name())
-					}
-					reg.Register(t)
-				}
-			}
-			return cachedTools
-		}
-		l.mcpUserTools.Delete(userID)
-		slog.Debug("mcp.user_tools_stale", "user", userID, "reason", "pool_evicted")
-	}
-
 	var userTools []tools.Tool
+	reg, _ := l.tools.(*tools.Registry)
+
 	for _, info := range l.mcpUserCredSrvs {
 		srv := info.Server
 
-		// Check if user has credentials for this server
+		// Authorization gate: this user must have credentials configured for
+		// the server. If not, the tool stays out of their palette entirely.
 		uc, err := l.mcpStore.GetUserCredentials(ctx, srv.ID, userID)
 		if err != nil || uc == nil || (uc.APIKey == "" && len(uc.Headers) == 0 && len(uc.Env) == 0) {
 			continue
 		}
 
-		// Resolve connection params: server defaults merged with user overrides
+		// Bootstrap: ensure tools for this server are in the shared registry.
+		// We need an MCP connection to discover the tool list once; we use the
+		// current caller's credentials for that bootstrap connection — any
+		// authorized user's creds are equally valid for tool discovery and
+		// the resulting tool list is identical regardless of caller.
+		toolsForSrv, _ := l.ensureUserMCPServerTools(ctx, info, userID, uc, reg)
+		userTools = append(userTools, toolsForSrv...)
+	}
+
+	if len(userTools) > 0 {
+		// Update "mcp" tool group so policy expansion via alsoAllow includes
+		// per-user tools. MergeToolGroup is additive — safe across users.
+		var names []string
+		for _, t := range userTools {
+			names = append(names, t.Name())
+		}
+		l.registry.MergeToolGroup("mcp", names)
+		slog.Debug("mcp.user_tools_resolved", "user", userID, "tools", len(userTools))
+	}
+	return userTools
+}
+
+// ensureUserMCPServerTools makes sure the BridgeTools for srv are
+// registered in the shared tool registry (once) and returns them. The
+// resolver attached to each BridgeTool re-acquires the user-scoped pool
+// connection on every Execute so the registered tool is safe for any
+// member of the tenant to invoke — its identity is taken from ctx, not
+// baked at registration time.
+func (l *Loop) ensureUserMCPServerTools(
+	ctx context.Context,
+	info store.MCPAccessInfo,
+	bootstrapUserID string,
+	bootstrapCreds *store.MCPUserCredentials,
+	reg *tools.Registry,
+) ([]tools.Tool, error) {
+	srv := info.Server
+
+	// Fast path: tools already registered for this server in this loop.
+	if cached, ok := l.mcpServerToolNames.Load(srv.ID); ok {
+		names := cached.([]string)
+		out := make([]tools.Tool, 0, len(names))
+		if reg != nil {
+			for _, n := range names {
+				if t, exists := reg.Get(n); exists {
+					out = append(out, t)
+				}
+			}
+		}
+		if len(out) > 0 {
+			return out, nil
+		}
+	}
+
+	// Bootstrap connection — used only to enumerate tools.
+	args := mcpbridge.ParseJSONBytesToStringSlice(srv.Args)
+	env := mcpbridge.ParseJSONBytesToStringMap(srv.Env)
+	if env == nil {
+		env = make(map[string]string)
+	}
+	headers := mcpbridge.ParseJSONBytesToStringMap(srv.Headers)
+	if headers == nil {
+		headers = make(map[string]string)
+	}
+	if srv.APIKey != "" && headers["Authorization"] == "" {
+		headers["Authorization"] = "Bearer " + srv.APIKey
+	}
+	if bootstrapCreds.APIKey != "" {
+		headers["Authorization"] = "Bearer " + bootstrapCreds.APIKey
+	}
+	maps.Copy(headers, bootstrapCreds.Headers)
+	maps.Copy(env, bootstrapCreds.Env)
+
+	entry, err := l.mcpPool.AcquireUser(ctx, l.tenantID, srv.Name, bootstrapUserID,
+		srv.Transport, srv.Command, args, env, srv.URL, headers, srv.TimeoutSec)
+	if err != nil {
+		slog.Warn("mcp.user_pool_acquire_failed", "server", srv.Name, "user", bootstrapUserID, "error", err)
+		return nil, err
+	}
+	// Drop our reference immediately — the pool keeps the connection alive
+	// while it has time-to-live and reuses it for the next AcquireUser call
+	// (including ones from the resolver below).
+	l.mcpPool.ReleaseUser(mcpbridge.UserPoolKey(l.tenantID, srv.Name, bootstrapUserID))
+
+	resolver := l.makeUserMCPResolver(srv)
+
+	registeredNames := make([]string, 0, len(entry.MCPTools()))
+	out := make([]tools.Tool, 0, len(entry.MCPTools()))
+	for _, mcpTool := range entry.MCPTools() {
+		// clientPtr / connected supplied here are only used as a fallback
+		// when resolveClient is unset — for user-scoped tools the resolver
+		// always wins. Pass empty placeholders to keep the constructor
+		// signature stable and not accidentally pin one user's connection.
+		var fallbackClient atomic.Pointer[mcpclient.Client]
+		var fallbackConnected atomic.Bool
+		fallbackConnected.Store(true)
+		bt := mcpbridge.NewBridgeTool(srv.Name, mcpTool, &fallbackClient, srv.ToolPrefix,
+			srv.TimeoutSec, &fallbackConnected, srv.ID, l.mcpGrantChecker).
+			WithResolveClient(resolver)
+
+		if reg != nil {
+			if _, exists := reg.Get(bt.Name()); !exists {
+				reg.Register(bt)
+			}
+			// Already-registered tool with the same name was put there by an
+			// earlier turn of this same Loop — reuse it; the resolver attached
+			// then is functionally identical (closure captures the same srv
+			// metadata + l.mcpStore + l.mcpPool).
+			if existing, exists := reg.Get(bt.Name()); exists {
+				out = append(out, existing)
+			} else {
+				out = append(out, bt)
+			}
+		} else {
+			out = append(out, bt)
+		}
+		registeredNames = append(registeredNames, bt.Name())
+	}
+
+	l.mcpServerToolNames.Store(srv.ID, registeredNames)
+	return out, nil
+}
+
+// makeUserMCPResolver returns a ResolveUserClientFn closure that, on every
+// Execute, looks up the caller's per-user MCP credentials and acquires a
+// pool connection scoped to (tenant, server, callerUserID). The closure
+// captures srv metadata + the Loop's pool / store, so a single registered
+// BridgeTool can serve every member of a shared tenant safely.
+func (l *Loop) makeUserMCPResolver(srv store.MCPServerData) mcpbridge.ResolveUserClientFn {
+	return func(ctx context.Context) (*mcpclient.Client, bool, error) {
+		callerUserID := store.UserIDFromContext(ctx)
+		if callerUserID == "" {
+			return nil, false, fmt.Errorf("missing user context for MCP server %q", srv.Name)
+		}
+
+		uc, err := l.mcpStore.GetUserCredentials(ctx, srv.ID, callerUserID)
+		if err != nil {
+			return nil, false, fmt.Errorf("load user credentials: %w", err)
+		}
+		if uc == nil || (uc.APIKey == "" && len(uc.Headers) == 0 && len(uc.Env) == 0) {
+			return nil, false, fmt.Errorf("no credentials for user on MCP server %q", srv.Name)
+		}
+
 		args := mcpbridge.ParseJSONBytesToStringSlice(srv.Args)
 		env := mcpbridge.ParseJSONBytesToStringMap(srv.Env)
 		if env == nil {
@@ -73,75 +198,27 @@ func (l *Loop) getUserMCPTools(ctx context.Context, userID string) []tools.Tool 
 		if headers == nil {
 			headers = make(map[string]string)
 		}
-
-		// Inject server-level API key into headers if present
 		if srv.APIKey != "" && headers["Authorization"] == "" {
 			headers["Authorization"] = "Bearer " + srv.APIKey
 		}
-
-		// Merge user credentials (user overrides server defaults)
 		if uc.APIKey != "" {
 			headers["Authorization"] = "Bearer " + uc.APIKey
 		}
 		maps.Copy(headers, uc.Headers)
 		maps.Copy(env, uc.Env)
 
-		// Acquire user-keyed pool connection
-		entry, err := l.mcpPool.AcquireUser(ctx, l.tenantID, srv.Name, userID,
+		entry, err := l.mcpPool.AcquireUser(ctx, l.tenantID, srv.Name, callerUserID,
 			srv.Transport, srv.Command, args, env, srv.URL, headers, srv.TimeoutSec)
 		if err != nil {
-			slog.Warn("mcp.user_pool_acquire_failed", "server", srv.Name, "user", userID, "error", err)
-			continue
+			return nil, false, fmt.Errorf("acquire pool entry: %w", err)
 		}
+		// Release immediately — the pool keeps the user connection alive
+		// (TTL + LRU eviction) and the next call from this same user reuses
+		// it. CallTool runs on the client we hand back before any eviction
+		// can race with us.
+		defer l.mcpPool.ReleaseUser(mcpbridge.UserPoolKey(l.tenantID, srv.Name, callerUserID))
 
-		// Release immediately — BridgeTools hold client pointer directly.
-		// This allows pool idle eviction to work (refCount=0 + lastUsed for TTL).
-		// When pool evicts the connection, BridgeTool.Execute detects connected=false.
-		l.mcpPool.ReleaseUser(mcpbridge.UserPoolKey(l.tenantID, srv.Name, userID))
-
-		// Create BridgeTools pointing to user's connection and register in the
-		// shared tool registry so ExecuteWithContext can resolve them by name.
-		//
-		// We MUST re-bind the registry entry to the calling user's BridgeTool on
-		// every fresh acquisition. The previous "skip if exists" check leaked the
-		// first caller's connection: when user1 ran the tool, their BridgeTool
-		// (with X-Proxy-User=user1 baked into the pooled HTTP client headers)
-		// stayed in the shared registry forever. user2's chat completion then
-		// looked the tool up by name, found user1's entry, and hit the MCP
-		// sidecar with user1's identity — verified end-to-end against staging
-		// (`connectors-mcp` debug prints showed `proxyUser` stuck on the first
-		// caller regardless of which user's chat fired the tool).
-		//
-		// Unregister+Register flips the registry to the current caller's
-		// connection. Concurrent chats from two distinct users in the same
-		// tenant would still race here, but in practice the chat loop is
-		// per-session and turns serialize within one user — for the MVP this
-		// is the smallest correct fix. A fully race-free version would either
-		// scope the registry per-request or move the per-user resolution into
-		// BridgeTool.Execute (lazy client lookup against pool by ctx user).
-		reg, _ := l.tools.(*tools.Registry)
-		for _, mcpTool := range entry.MCPTools() {
-			bt := mcpbridge.NewBridgeTool(srv.Name, mcpTool, entry.ClientPtr(), srv.ToolPrefix, srv.TimeoutSec, entry.Connected(), srv.ID, l.mcpGrantChecker)
-			if reg != nil {
-				if _, exists := reg.Get(bt.Name()); exists {
-					reg.Unregister(bt.Name())
-				}
-				reg.Register(bt)
-			}
-			userTools = append(userTools, bt)
-		}
+		client := entry.ClientPtr().Load()
+		return client, entry.Connected().Load(), nil
 	}
-
-	if len(userTools) > 0 {
-		l.mcpUserTools.Store(userID, userTools)
-		// Update "mcp" tool group so policy expansion via alsoAllow includes
-		// per-user tools. MergeToolGroup is additive — safe for concurrent users.
-		var names []string
-		for _, t := range userTools {
-			names = append(names, t.Name())
-		}
-		l.registry.MergeToolGroup("mcp", names)
-		slog.Info("mcp.user_tools_loaded", "user", userID, "tools", len(userTools))
-	}
-	return userTools
 }

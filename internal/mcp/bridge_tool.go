@@ -31,6 +31,30 @@ type BridgeTool struct {
 	timeoutSec     int
 	connected      *atomic.Bool
 	grantChecker   GrantChecker // for runtime grant recheck (nil = skip check)
+	// resolveClient, when non-nil, is called on every Execute with the
+	// current call's user_id and must return the live client + connected
+	// flag for that user. This makes a single registered BridgeTool safe
+	// to share across multiple users in a tenant: registration freezes
+	// only the tool name / schema, while the user-scoped MCP connection
+	// is looked up per call. Used for servers with require_user_credentials.
+	// When nil, Execute falls back to the baked clientPtr / connected
+	// fields above (pool-shared servers, single-user tenants).
+	resolveClient ResolveUserClientFn
+}
+
+// ResolveUserClientFn looks up (or acquires) the per-user MCP client for
+// the caller identified in ctx. Implementations must read the user id from
+// ctx (typically via store.UserIDFromContext) and return the client +
+// connected flag for THAT user. Returning a non-nil error fails the tool
+// call with a user-visible message.
+type ResolveUserClientFn func(ctx context.Context) (client *mcpclient.Client, connected bool, err error)
+
+// WithResolveClient installs a per-call client resolver. Pass nil (default)
+// for pool-shared / single-user tools that already have the right baked
+// clientPtr. Returns the same BridgeTool for chaining.
+func (t *BridgeTool) WithResolveClient(fn ResolveUserClientFn) *BridgeTool {
+	t.resolveClient = fn
+	return t
 }
 
 // NewBridgeTool creates a BridgeTool from an MCP Tool definition.
@@ -102,8 +126,17 @@ func (t *BridgeTool) ServerName() string { return t.serverName }
 // OriginalName returns the original MCP tool name (without prefix).
 func (t *BridgeTool) OriginalName() string { return t.toolName }
 
-// IsConnected returns whether the underlying MCP server connection is healthy.
-func (t *BridgeTool) IsConnected() bool { return t.connected.Load() }
+// IsConnected returns whether the underlying MCP server connection is
+// healthy. For user-scoped tools (resolveClient != nil) we don't track
+// a single static client, the resolver acquires/reconnects the right
+// per-user pool entry at Execute time — report ready so cached tool
+// lists stay in use; the resolver itself surfaces real connect failures.
+func (t *BridgeTool) IsConnected() bool {
+	if t.resolveClient != nil {
+		return true
+	}
+	return t.connected.Load()
+}
 
 func (t *BridgeTool) Execute(ctx context.Context, args map[string]any) *tools.Result {
 	// Recheck grant before execution — defense against revoked grants
@@ -115,13 +148,33 @@ func (t *BridgeTool) Execute(ctx context.Context, args map[string]any) *tools.Re
 		}
 	}
 
-	if !t.connected.Load() {
-		return tools.ErrorResult(fmt.Sprintf("MCP server %q is disconnected", t.serverName))
-	}
-
-	client := t.clientPtr.Load() // atomic load — safe during concurrent reconnect
-	if client == nil {
-		return tools.ErrorResult(fmt.Sprintf("MCP server %q has no active client", t.serverName))
+	// Resolve the client for this specific call. For user-scoped servers
+	// (require_user_credentials=true) the registered BridgeTool is shared
+	// across every tenant member, and the actual MCP connection is looked
+	// up by ctx user_id on every Execute — without this two members of the
+	// same tenant would race over a single registry entry and one would
+	// hit the MCP sidecar with the other's baked headers. When
+	// resolveClient is nil we keep the legacy fast path: the baked
+	// clientPtr from registration time (pool-shared connection or single-
+	// user tenant) is fine.
+	var client *mcpclient.Client
+	if t.resolveClient != nil {
+		c, connected, err := t.resolveClient(ctx)
+		if err != nil {
+			return tools.ErrorResult(fmt.Sprintf("MCP tool %q: %v", t.registeredName, err))
+		}
+		if !connected || c == nil {
+			return tools.ErrorResult(fmt.Sprintf("MCP server %q has no active client for caller", t.serverName))
+		}
+		client = c
+	} else {
+		if !t.connected.Load() {
+			return tools.ErrorResult(fmt.Sprintf("MCP server %q is disconnected", t.serverName))
+		}
+		client = t.clientPtr.Load() // atomic load — safe during concurrent reconnect
+		if client == nil {
+			return tools.ErrorResult(fmt.Sprintf("MCP server %q has no active client", t.serverName))
+		}
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, time.Duration(t.timeoutSec)*time.Second)

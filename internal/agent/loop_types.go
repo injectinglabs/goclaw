@@ -146,8 +146,15 @@ type Loop struct {
 	mcpStore        store.MCPServerStore    // for credential lookup
 	mcpPool         *mcpbridge.Pool         // user-keyed connection pool
 	mcpUserCredSrvs []store.MCPAccessInfo   // servers needing per-user creds
-	mcpUserTools    sync.Map                // userID → []tools.Tool (cached per-user tools)
-	mcpGrantChecker mcpbridge.GrantChecker  // runtime grant verification (nil = skip)
+	mcpUserTools    sync.Map                // userID → []tools.Tool (legacy cache, kept until callers migrate)
+	// mcpServerToolNames maps mcp_server.id → []registeredToolName. Used to
+	// know whether the BridgeTools for a given user-cred server are already
+	// installed in the shared registry, so getUserMCPTools doesn't pay the
+	// bootstrap connect cost on every turn. Tool names themselves are stable
+	// across users — the per-user bit is the underlying HTTP connection,
+	// resolved per-call by BridgeTool.WithResolveClient.
+	mcpServerToolNames sync.Map               // uuid.UUID → []string
+	mcpGrantChecker    mcpbridge.GrantChecker // runtime grant verification (nil = skip)
 
 	// Compaction config (memory flush settings)
 	compactionCfg *config.CompactionConfig
