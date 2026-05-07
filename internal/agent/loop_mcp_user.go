@@ -33,6 +33,20 @@ func (l *Loop) getUserMCPTools(ctx context.Context, userID string) []tools.Tool 
 			}
 		}
 		if allConnected {
+			// Re-bind the shared registry to THIS caller's BridgeTools. The
+			// registry entries may currently point at another tenant member's
+			// connection (last writer wins on the cache-miss path below); a
+			// cache hit alone wouldn't refresh them, so without this loop
+			// ExecuteWithContext would still hit the previous user's MCP
+			// connection on the very next tool call.
+			if reg, ok := l.tools.(*tools.Registry); ok && reg != nil {
+				for _, t := range cachedTools {
+					if _, exists := reg.Get(t.Name()); exists {
+						reg.Unregister(t.Name())
+					}
+					reg.Register(t)
+				}
+			}
 			return cachedTools
 		}
 		l.mcpUserTools.Delete(userID)
@@ -87,15 +101,32 @@ func (l *Loop) getUserMCPTools(ctx context.Context, userID string) []tools.Tool 
 
 		// Create BridgeTools pointing to user's connection and register in the
 		// shared tool registry so ExecuteWithContext can resolve them by name.
+		//
+		// We MUST re-bind the registry entry to the calling user's BridgeTool on
+		// every fresh acquisition. The previous "skip if exists" check leaked the
+		// first caller's connection: when user1 ran the tool, their BridgeTool
+		// (with X-Proxy-User=user1 baked into the pooled HTTP client headers)
+		// stayed in the shared registry forever. user2's chat completion then
+		// looked the tool up by name, found user1's entry, and hit the MCP
+		// sidecar with user1's identity — verified end-to-end against staging
+		// (`connectors-mcp` debug prints showed `proxyUser` stuck on the first
+		// caller regardless of which user's chat fired the tool).
+		//
+		// Unregister+Register flips the registry to the current caller's
+		// connection. Concurrent chats from two distinct users in the same
+		// tenant would still race here, but in practice the chat loop is
+		// per-session and turns serialize within one user — for the MVP this
+		// is the smallest correct fix. A fully race-free version would either
+		// scope the registry per-request or move the per-user resolution into
+		// BridgeTool.Execute (lazy client lookup against pool by ctx user).
 		reg, _ := l.tools.(*tools.Registry)
 		for _, mcpTool := range entry.MCPTools() {
 			bt := mcpbridge.NewBridgeTool(srv.Name, mcpTool, entry.ClientPtr(), srv.ToolPrefix, srv.TimeoutSec, entry.Connected(), srv.ID, l.mcpGrantChecker)
-			// Register in registry so ExecuteWithContext can find them.
-			// Skip if already registered (another user loaded this server with same tool names).
 			if reg != nil {
-				if _, exists := reg.Get(bt.Name()); !exists {
-					reg.Register(bt)
+				if _, exists := reg.Get(bt.Name()); exists {
+					reg.Unregister(bt.Name())
 				}
+				reg.Register(bt)
 			}
 			userTools = append(userTools, bt)
 		}
