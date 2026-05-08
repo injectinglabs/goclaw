@@ -43,7 +43,22 @@ All notable changes to GoClaw are documented here. For full documentation, see [
   resolver is nil, the legacy `clientPtr` fast path is used. See
   `internal/mcp/bridge_tool.go::WithResolveClient` and
   `internal/agent/loop_mcp_user.go::makeUserMCPResolver`.
-- **Per-user filter on the system-prompt Connected Channels block (#48).**
+- **Chat completion disconnect tolerance (#53).** `handleStream` and
+  `handleNonStream` in `internal/http/chat_completions.go` no longer
+  pass `r.Context()` directly into `loop.Run`. The HTTP server cancels
+  `r.Context()` on client disconnect (browser tab close, mobile sleep,
+  network blip) — that cancel propagated into the agent loop and
+  aborted the LLM turn before the assistant message reached
+  `sessions.messages`. New helper `detachAgentRunCtx` wraps the
+  request context through `context.WithoutCancel` (Go 1.21+) before
+  the loop runs. Values from `enrichContext` (tenant, user, role,
+  locale) keep propagating; only the cancellation linkage drops, so
+  the run completes and persists regardless of whether the SSE client
+  is still listening. Pinned by three unit tests on the helper:
+  parent-cancel survival, value preservation, and HTTP-deadline
+  isolation. Pattern name: HTTP request lifecycle decoupling /
+  background task continuation. Resumable streams (SSE replay from a
+  drop point) are not part of this change.
   `internal/agent/connected_channels.go::fetchConnectedChannels` now takes
   a `callerUserID` and skips channel_instances whose `CreatedBy` doesn't
   match. Default-seeded rows (`CreatedBy == ""`) stay global. Without
