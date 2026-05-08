@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -16,6 +17,20 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
+
+// detachAgentRunCtx returns a context that inherits the request's values
+// (tenant, user, role, locale — set by enrichContext) but is no longer
+// cancelled when the HTTP request ends. Used by handleStream /
+// handleNonStream so that closing the browser tab doesn't abort the
+// agent loop mid-turn — which would lose the assistant message before
+// goclaw persists it into sessions.messages and waste tokens that Groq
+// already streamed before the cancel landed.
+//
+// Carved out as a tiny helper so the contract is unit-testable without
+// spinning up the full handler, agent, store and session machinery.
+func detachAgentRunCtx(parent context.Context) context.Context {
+	return context.WithoutCancel(parent)
+}
 
 // ChatCompletionsHandler handles POST /v1/chat/completions (OpenAI-compatible).
 type ChatCompletionsHandler struct {
@@ -180,7 +195,7 @@ func (h *ChatCompletionsHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *ChatCompletionsHandler) handleNonStream(w http.ResponseWriter, r *http.Request, loop agent.Agent, runID, sessionKey, message, model, userID string) {
-	ctx, drainTeamDispatch := tools.InjectTeamDispatch(r.Context(), h.postTurn)
+	ctx, drainTeamDispatch := tools.InjectTeamDispatch(detachAgentRunCtx(r.Context()), h.postTurn)
 	defer drainTeamDispatch()
 
 	result, err := loop.Run(ctx, agent.RunRequest{
@@ -241,7 +256,7 @@ func (h *ChatCompletionsHandler) handleStream(w http.ResponseWriter, r *http.Req
 	// Send initial role chunk
 	writeSSEChunk(w, flusher, completionID, model, &chatMessage{Role: "assistant"}, "")
 
-	ctx, drainTeamDispatch := tools.InjectTeamDispatch(r.Context(), h.postTurn)
+	ctx, drainTeamDispatch := tools.InjectTeamDispatch(detachAgentRunCtx(r.Context()), h.postTurn)
 	defer drainTeamDispatch()
 
 	result, err := loop.Run(ctx, agent.RunRequest{
