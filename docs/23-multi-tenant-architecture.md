@@ -315,6 +315,33 @@ MCP servers support two credential tiers:
 
 When `require_user_credentials` is enabled, users without personal credentials cannot use that MCP server.
 
+### Multi-user tenant safety for `require_user_credentials` servers
+
+A single tenant can host multiple `tenant_users` (e.g. a SaaS team
+account where several Cognito users share one organization). For MCP
+servers with `require_user_credentials = true`, each member must call
+the MCP sidecar with their **own** identity headers — leaking one
+member's `Authorization` / `X-Proxy-User` into another member's tool
+call is a privacy bug.
+
+GoClaw isolates this in two places:
+
+1. `Pool.AcquireUser(tenantID, serverName, userID, ...)` keeps a
+   separate pooled connection per `(tenant, server, user)`, so each
+   member's HTTP transport is wired with their own headers.
+2. `BridgeTool.WithResolveClient(fn)` makes the registered tool
+   per-call user-aware. The closure reads `userID` from
+   `store.UserIDFromContext(ctx)` on every `Execute`, fetches that
+   user's `mcp_user_credentials`, and acquires the right pooled
+   connection. A single registered `BridgeTool` is therefore safe
+   for every member of the tenant — identity is taken from `ctx`,
+   never from baked state at registration time.
+
+The wiring is in `internal/agent/loop_mcp_user.go::makeUserMCPResolver`.
+For pool-shared servers (no `require_user_credentials`) and
+single-user tenants the resolver is left nil and the legacy fast path
+through `clientPtr` is used unchanged.
+
 ---
 
 ## Security

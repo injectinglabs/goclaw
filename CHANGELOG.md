@@ -30,6 +30,41 @@ All notable changes to GoClaw are documented here. For full documentation, see [
   missing a `mode` field get auto-backfilled with `mode: "cache-ttl"` to
   preserve their intent after the opt-in flip. Rows with NULL config stay
   NULL (new opt-in default applies). PG migration 51; SQLite schema v19.
+- **Multi-user tenant safety for MCP servers with `require_user_credentials`
+  (#51).** Per-call user resolution in `BridgeTool` for shared tenants. The
+  registered tool now carries an optional `WithResolveClient(fn)` hook;
+  when set, every `Execute` invocation calls the resolver to look up the
+  per-user MCP client (via `Pool.AcquireUser` keyed by ctx user_id), so a
+  single registered tool serves every member of a shared tenant safely.
+  Replaces the previous "first user's `BridgeTool` baked into the shared
+  registry" design that leaked one member's HTTP headers (incl.
+  `X-Proxy-User`) into every other member's tool calls. Personal /
+  single-user tenants and pool-shared servers are unchanged: when the
+  resolver is nil, the legacy `clientPtr` fast path is used. See
+  `internal/mcp/bridge_tool.go::WithResolveClient` and
+  `internal/agent/loop_mcp_user.go::makeUserMCPResolver`.
+- **Chat completion disconnect tolerance (#53).** `handleStream` and
+  `handleNonStream` in `internal/http/chat_completions.go` no longer
+  pass `r.Context()` directly into `loop.Run`. The HTTP server cancels
+  `r.Context()` on client disconnect (browser tab close, mobile sleep,
+  network blip) — that cancel propagated into the agent loop and
+  aborted the LLM turn before the assistant message reached
+  `sessions.messages`. New helper `detachAgentRunCtx` wraps the
+  request context through `context.WithoutCancel` (Go 1.21+) before
+  the loop runs. Values from `enrichContext` (tenant, user, role,
+  locale) keep propagating; only the cancellation linkage drops, so
+  the run completes and persists regardless of whether the SSE client
+  is still listening. Pinned by three unit tests on the helper:
+  parent-cancel survival, value preservation, and HTTP-deadline
+  isolation. Pattern name: HTTP request lifecycle decoupling /
+  background task continuation. Resumable streams (SSE replay from a
+  drop point) are not part of this change.
+  `internal/agent/connected_channels.go::fetchConnectedChannels` now takes
+  a `callerUserID` and skips channel_instances whose `CreatedBy` doesn't
+  match. Default-seeded rows (`CreatedBy == ""`) stay global. Without
+  this, in shared tenants the model would name another member's bot in
+  chat regardless of what `list_connected_channels` returned, because
+  the system prompt itself listed every tenant member's bot.
 
 ## Project Status
 
