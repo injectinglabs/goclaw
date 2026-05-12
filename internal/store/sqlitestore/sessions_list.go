@@ -31,6 +31,10 @@ func buildSessionFilter(opts store.SessionListOpts, tableAlias string) (string, 
 		conditions = append(conditions, prefix+"session_key LIKE ?")
 		args = append(args, "agent:%:"+opts.Channel+":%")
 	}
+	if opts.ChannelName != "" {
+		conditions = append(conditions, prefix+"channel = ?")
+		args = append(args, opts.ChannelName)
+	}
 	if opts.UserID != "" {
 		conditions = append(conditions, prefix+"user_id = ?")
 		args = append(args, opts.UserID)
