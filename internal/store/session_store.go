@@ -65,7 +65,12 @@ type SessionListOpts struct {
 	// sessions" vs "show me only Telegram bot X" — the column carries the
 	// channel adapter name (e.g. "ws", "telegram-mybot_bot") with no
 	// dependency on session_key shape. Empty string = no filter.
-	ChannelName string    `db:"-"`
+	ChannelName string `db:"-"`
+	// ExcludeCron drops sessions whose key matches `agent:%:cron:%`. These
+	// are scheduler-internal artefacts (one row per cron job run) and
+	// should not surface in any chat-list UI — reminders are delivered
+	// out-of-band via the `reminders` table.
+	ExcludeCron bool      `db:"-"`
 	UserID      string    `db:"-"` // optional: filter by user_id
 	TenantID    uuid.UUID `db:"-"` // optional: filter by tenant (uuid.Nil = no filter)
 	Limit       int       `db:"-"`

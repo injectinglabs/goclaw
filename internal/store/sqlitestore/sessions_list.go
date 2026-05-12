@@ -35,6 +35,10 @@ func buildSessionFilter(opts store.SessionListOpts, tableAlias string) (string, 
 		conditions = append(conditions, prefix+"channel = ?")
 		args = append(args, opts.ChannelName)
 	}
+	if opts.ExcludeCron {
+		conditions = append(conditions, prefix+"session_key NOT LIKE ?")
+		args = append(args, "agent:%:cron:%")
+	}
 	if opts.UserID != "" {
 		conditions = append(conditions, prefix+"user_id = ?")
 		args = append(args, opts.UserID)
