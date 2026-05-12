@@ -53,12 +53,23 @@ type SessionInfo struct {
 
 // SessionListOpts holds pagination options for ListPaged.
 type SessionListOpts struct {
-	AgentID  string    `db:"-"`
-	Channel  string    `db:"-"` // optional: filter by channel prefix ("ws", "telegram", etc.)
-	UserID   string    `db:"-"` // optional: filter by user_id
-	TenantID uuid.UUID `db:"-"` // optional: filter by tenant (uuid.Nil = no filter)
-	Limit    int       `db:"-"`
-	Offset   int       `db:"-"`
+	AgentID string `db:"-"`
+	// Channel matches a session_key segment via LIKE 'agent:%:{Channel}:%'.
+	// Useful for source-type splits that follow the canonical key shape
+	// (e.g. "telegram"). Doesn't match callers whose keys don't have a
+	// channel slot in position 3 (e.g. our web sessions use a flat
+	// "agent:default:<chatId>" — those need ChannelName below).
+	Channel string `db:"-"`
+	// ChannelName matches the `sessions.channel` column directly via
+	// equality. This is the right filter for splitting "show me only web
+	// sessions" vs "show me only Telegram bot X" — the column carries the
+	// channel adapter name (e.g. "ws", "telegram-mybot_bot") with no
+	// dependency on session_key shape. Empty string = no filter.
+	ChannelName string    `db:"-"`
+	UserID      string    `db:"-"` // optional: filter by user_id
+	TenantID    uuid.UUID `db:"-"` // optional: filter by tenant (uuid.Nil = no filter)
+	Limit       int       `db:"-"`
+	Offset      int       `db:"-"`
 }
 
 // SessionListResult is the paginated result of ListPaged.
