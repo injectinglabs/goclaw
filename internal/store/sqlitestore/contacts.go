@@ -339,18 +339,24 @@ func (s *SQLiteContactStore) TryAutoMergeContact(ctx context.Context, channelTyp
 	}
 
 	var createdBy string
+	var ownerSenderID sql.NullString
 	err = s.db.QueryRowContext(ctx,
-		`SELECT created_by
+		`SELECT created_by, json_extract(config, '$.owner_sender_id')
 		   FROM channel_instances
 		  WHERE tenant_id = ? AND channel_type = ? AND name = ?
 		    AND created_by IS NOT NULL AND created_by <> ''
 		  LIMIT 1`,
 		tid, channelType, channelInstance,
-	).Scan(&createdBy)
+	).Scan(&createdBy, &ownerSenderID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
+		return nil
+	}
+	// Identity gate: only the bot's connect-time caller may inherit the
+	// owner's tenant_user. See pg/contact_auto_merge.go for rationale.
+	if !ownerSenderID.Valid || ownerSenderID.String == "" || ownerSenderID.String != senderID {
 		return nil
 	}
 
