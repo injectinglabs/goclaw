@@ -43,6 +43,12 @@ func buildSessionFilter(ctx context.Context, opts store.SessionListOpts, tableAl
 		args = append(args, "agent:%:"+opts.Channel+":%")
 		idx++
 	}
+	if opts.ChannelName != "" {
+		// Direct match on the channel column — see SessionListOpts.ChannelName.
+		conditions = append(conditions, fmt.Sprintf("%schannel = $%d", prefix, idx))
+		args = append(args, opts.ChannelName)
+		idx++
+	}
 	if opts.UserID != "" {
 		conditions = append(conditions, fmt.Sprintf("%suser_id = $%d", prefix, idx))
 		args = append(args, opts.UserID)

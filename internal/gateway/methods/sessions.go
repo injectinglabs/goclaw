@@ -34,9 +34,13 @@ func (m *SessionsMethods) Register(router *gateway.MethodRouter) {
 
 type sessionsListParams struct {
 	AgentID string `json:"agentId"`
-	Channel string `json:"channel"` // optional: filter by channel prefix ("ws", "telegram")
-	Limit   int    `json:"limit"`
-	Offset  int    `json:"offset"`
+	Channel string `json:"channel"` // optional: filter by channel_key segment via LIKE
+	// ChannelName matches the `sessions.channel` column directly. Empty
+	// string means "no filter from the caller"; the handler then applies
+	// the WS-gateway default below.
+	ChannelName string `json:"channelName"`
+	Limit       int    `json:"limit"`
+	Offset      int    `json:"offset"`
 }
 
 func (m *SessionsMethods) handleList(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
@@ -49,12 +53,25 @@ func (m *SessionsMethods) handleList(ctx context.Context, client *gateway.Client
 		params.Limit = 20
 	}
 
+	// Default channel filter for WS callers: the WebSocket gateway is the
+	// web extension's sidebar, which only wants its own conversations —
+	// not Telegram bot DMs that happen to share the same `user_id` after
+	// channel_contacts auto-merge. Admins keep the override path: pass
+	// `channelName: ""` explicitly to opt out (handled below), and any
+	// non-empty `channelName` is respected as-is. The `Channel` legacy
+	// LIKE filter is left alone for callers that use the old shape.
+	channelName := params.ChannelName
+	if channelName == "" && params.Channel == "" {
+		channelName = "ws"
+	}
+
 	opts := store.SessionListOpts{
-		AgentID:  params.AgentID,
-		Channel:  params.Channel,
-		Limit:    params.Limit,
-		Offset:   params.Offset,
-		TenantID: store.TenantIDFromContext(ctx),
+		AgentID:     params.AgentID,
+		Channel:     params.Channel,
+		ChannelName: channelName,
+		Limit:       params.Limit,
+		Offset:      params.Offset,
+		TenantID:    store.TenantIDFromContext(ctx),
 	}
 	// Role-based filtering: admins/owners see all sessions; regular users see only their own.
 	// Tenant scope is always applied above — admin sees all sessions within the tenant.
