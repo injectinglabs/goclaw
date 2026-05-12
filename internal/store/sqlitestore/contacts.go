@@ -306,3 +306,88 @@ func (s *SQLiteContactStore) ResolveTenantUserID(ctx context.Context, channelTyp
 	}
 	return tenantUserID, err
 }
+
+// TryAutoMergeContact mirrors the Postgres implementation
+// (internal/store/pg/contact_auto_merge.go::TryAutoMergeContact). See that
+// file for the rationale and the safety guards. SQLite is the goclaw
+// desktop / single-tenant build target; here it shares the same auto-link
+// logic so unit tests on the SQLite store give the same outcome as prod.
+func (s *SQLiteContactStore) TryAutoMergeContact(ctx context.Context, channelType, channelInstance, senderID string) error {
+	tid := store.TenantIDFromContext(ctx)
+	if channelType == "" || channelInstance == "" || senderID == "" {
+		return nil
+	}
+
+	var contactID string
+	var existing sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, merged_id
+		   FROM channel_contacts
+		  WHERE tenant_id = ? AND channel_type = ? AND sender_id = ?
+		    AND COALESCE(thread_id, '') = ''
+		  LIMIT 1`,
+		tid, channelType, senderID,
+	).Scan(&contactID, &existing)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return nil
+	}
+	if existing.Valid && existing.String != "" {
+		return nil
+	}
+
+	var createdBy string
+	err = s.db.QueryRowContext(ctx,
+		`SELECT created_by
+		   FROM channel_instances
+		  WHERE tenant_id = ? AND channel_type = ? AND name = ?
+		    AND created_by IS NOT NULL AND created_by <> ''
+		  LIMIT 1`,
+		tid, channelType, channelInstance,
+	).Scan(&createdBy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return nil
+	}
+
+	var otherMerged int
+	err = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM channel_contacts
+		  WHERE tenant_id = ? AND channel_type = ? AND channel_instance = ?
+		    AND merged_id IS NOT NULL AND id <> ?`,
+		tid, channelType, channelInstance, contactID,
+	).Scan(&otherMerged)
+	if err != nil || otherMerged > 0 {
+		return nil
+	}
+
+	var tenantUserID string
+	err = s.db.QueryRowContext(ctx,
+		`SELECT id FROM tenant_users WHERE tenant_id = ? AND user_id = ? LIMIT 1`,
+		tid, createdBy,
+	).Scan(&tenantUserID)
+	if errors.Is(err, sql.ErrNoRows) {
+		tenantUserID = store.GenNewID().String()
+		_, err = s.db.ExecContext(ctx,
+			`INSERT INTO tenant_users (id, tenant_id, user_id, role, created_at, updated_at)
+			 VALUES (?, ?, ?, 'member', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			 ON CONFLICT (tenant_id, user_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP`,
+			tenantUserID, tid, createdBy,
+		)
+		if err != nil {
+			return nil
+		}
+	} else if err != nil {
+		return nil
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE channel_contacts SET merged_id = ? WHERE id = ? AND merged_id IS NULL`,
+		tenantUserID, contactID,
+	)
+	return err
+}

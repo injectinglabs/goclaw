@@ -53,6 +53,10 @@ func (m *mockContactStore) ResolveTenantUserID(_ context.Context, _, _ string) (
 	return "", nil
 }
 
+func (m *mockContactStore) TryAutoMergeContact(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
 // Stub methods to satisfy ContactStore interface (not used in these tests).
 func (m *mockContactStore) ListContacts(_ context.Context, _ ContactListOpts) ([]ChannelContact, error) {
 	return nil, nil

@@ -53,6 +53,25 @@ func (c *ContactCollector) EnsureContact(ctx context.Context, channelType, chann
 		return
 	}
 	c.seen.Set(ctx, key, true, contactSeenTTL)
+
+	// Try to auto-link the contact to the channel_instance owner's
+	// tenant_user. Restricted to direct-message user contacts: groups and
+	// forum topics don't represent a single human identity and the
+	// `created_by` shortcut doesn't apply. See
+	// internal/store/pg/contact_auto_merge.go for the full rationale and
+	// safety guards. Non-fatal: TryAutoMergeContact swallows errors so a
+	// transient failure here never blocks message delivery.
+	if peerKind == "direct" && contactType == "user" && threadID == "" {
+		if err := c.store.TryAutoMergeContact(ctx, channelType, channelInstance, senderID); err != nil {
+			slog.Warn("contact_collector.auto_merge_failed",
+				"error", err,
+				"tenant_id", tid,
+				"channel", channelType,
+				"instance", channelInstance,
+				"sender", senderID,
+			)
+		}
+	}
 }
 
 // ResolveTenantUserID delegates to the underlying ContactStore.

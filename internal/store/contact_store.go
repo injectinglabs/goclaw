@@ -76,4 +76,13 @@ type ContactStore interface {
 	// the contact has been merged, returns the linked tenant_user's user_id.
 	// Returns ("", nil) when the contact is not found or not merged.
 	ResolveTenantUserID(ctx context.Context, channelType, senderID string) (string, error)
+
+	// TryAutoMergeContact links a freshly-upserted channel_contact to the
+	// channel_instance owner's tenant_user when conditions are safe (no merge
+	// yet, owner is known, no other merged contacts in this channel_instance).
+	// This is what makes "connect bot in web → write to bot → everything works"
+	// zero-click for the owner. Idempotent — no-op when the contact is already
+	// linked or when the safety guards block auto-promotion. Non-fatal: returns
+	// nil even when the caller can't (or shouldn't) be auto-linked.
+	TryAutoMergeContact(ctx context.Context, channelType, channelInstance, senderID string) error
 }
