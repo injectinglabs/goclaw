@@ -38,14 +38,20 @@ import (
 //      senders — a stranger who finds the bot link must go through an
 //      explicit link flow rather than impersonate the owner.
 //
-// Isolation note: each user connects their own bot via `connect_telegram`,
-// which sets `config.allow_from = [their_telegram_user]` (DM policy
-// "allowlist"). Telegram messages from any other Telegram account are
-// rejected upstream in `internal/channels/telegram/handlers.go::handleMessage`
-// before they ever reach `ContactCollector.EnsureContact`. That means by
-// the time we get here, the sender has already been verified as the
-// `created_by` owner of this specific bot. We don't need to re-check
-// `allow_from` — the absence of cross-user pollution is structural.
+// Isolation note: `config.allow_from` is a security gate (who can talk to
+// the bot), NOT an identity mapping (who IS the bot's owner). An owner
+// can extend `allow_from` to include teammates — those teammates pass the
+// upstream allowlist check, reach `EnsureContact`, but they are NOT the
+// owner. Auto-merging their Telegram sender to the owner's tenant_user
+// would let a teammate's Gmail/Sheets/etc operate from the owner's
+// identity — exactly the cross-user leak we're trying to prevent.
+//
+// Connectors-MCP `connect_telegram` records the canonical owner ID at
+// connect time in `channel_instances.config.owner_sender_id` (the
+// caller's own Telegram numeric ID). Auto-merge only fires when the
+// inbound `sender_id` equals that owner sender ID. Other allowlisted
+// senders stay unmerged — their Gmail tools through this bot will return
+// "not connected" (correct, isolated) until they connect their own bot.
 //
 // The merge target is the tenant_user matching (tenant_id, user_id =
 // created_by). We create the tenant_user row on the fly (idempotent UPSERT)
@@ -86,10 +92,13 @@ func (s *PGContactStore) TryAutoMergeContact(ctx context.Context, channelType, c
 		return nil // Already linked.
 	}
 
-	// 2. Look up the channel_instance owner. No owner → no auto-merge target.
+	// 2. Look up the channel_instance owner AND the owner's canonical
+	// sender id (from connect-time config). Both fields are required —
+	// missing either means we can't safely promote this sender.
 	var createdBy string
+	var ownerSenderID sql.NullString
 	err = s.db.QueryRowContext(ctx, `
-		SELECT created_by
+		SELECT created_by, config->>'owner_sender_id' AS owner_sender_id
 		  FROM channel_instances
 		 WHERE tenant_id = $1
 		   AND channel_type = $2
@@ -97,13 +106,25 @@ func (s *PGContactStore) TryAutoMergeContact(ctx context.Context, channelType, c
 		   AND created_by IS NOT NULL
 		   AND created_by != ''
 		 LIMIT 1
-	`, tenantID, channelType, channelInstance).Scan(&createdBy)
+	`, tenantID, channelType, channelInstance).Scan(&createdBy, &ownerSenderID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		slog.Warn("contacts.auto_merge.find_instance_failed", "error", err,
 			"tenant_id", tenantID, "channel_type", channelType, "channel_instance", channelInstance)
+		return nil
+	}
+	// Identity gate: only the same Telegram account that ran
+	// `connect_telegram` may inherit the owner's tenant_user identity.
+	// Allowlisted teammates stay unmerged — see the "Isolation note" in
+	// the doc comment above for the rationale.
+	if !ownerSenderID.Valid || ownerSenderID.String == "" || ownerSenderID.String != senderID {
+		slog.Debug("contacts.auto_merge.skipped_not_owner_sender",
+			"tenant_id", tenantID,
+			"channel_instance", channelInstance,
+			"sender_id", senderID,
+			"owner_sender_id_set", ownerSenderID.Valid)
 		return nil
 	}
 
