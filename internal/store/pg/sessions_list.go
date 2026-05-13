@@ -49,6 +49,16 @@ func buildSessionFilter(ctx context.Context, opts store.SessionListOpts, tableAl
 		args = append(args, opts.ChannelName)
 		idx++
 	}
+	if opts.ExcludeCron {
+		// Cron jobs run inside their own internal session with key shape
+		// `agent:<id>:cron:<job_id>`. Those rows are scheduler bookkeeping —
+		// users shouldn't see them in any chat-list UI alongside their real
+		// conversations. The reminder is delivered separately to the
+		// `reminders` table + cron.delivered event.
+		conditions = append(conditions, fmt.Sprintf("%ssession_key NOT LIKE $%d", prefix, idx))
+		args = append(args, "agent:%:cron:%")
+		idx++
+	}
 	if opts.UserID != "" {
 		conditions = append(conditions, fmt.Sprintf("%suser_id = $%d", prefix, idx))
 		args = append(args, opts.UserID)

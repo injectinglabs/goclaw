@@ -69,6 +69,11 @@ func (m *SessionsMethods) handleList(ctx context.Context, client *gateway.Client
 		AgentID:     params.AgentID,
 		Channel:     params.Channel,
 		ChannelName: channelName,
+		// WS gateway is the web sidebar — cron job sessions are scheduler
+		// bookkeeping, never user-facing. Drop them unconditionally; the
+		// reminder content surfaces via the reminders table + cron.delivered
+		// event so the user still gets the notification.
+		ExcludeCron: true,
 		Limit:       params.Limit,
 		Offset:      params.Offset,
 		TenantID:    store.TenantIDFromContext(ctx),
