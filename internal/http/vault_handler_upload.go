@@ -30,6 +30,11 @@ var allowedUploadExts = map[string]bool{
 func (h *VaultHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 	tenantID := store.TenantIDFromContext(r.Context())
 	tenantIDStr := tenantID.String()
+	// Caller userID — populated by the auth middleware on every authenticated
+	// HTTP route (see internal/http/auth.go). Carried into the
+	// VaultDocUpsertedPayload so the enrich worker can attribute its outbound
+	// LLM call to the user who uploaded the document.
+	uploaderUserID := store.UserIDFromContext(r.Context())
 
 	// 32 MB in-memory; remainder spills to disk.
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -221,11 +226,13 @@ func (h *VaultHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 				SourceID:  doc.ID + ":" + hash,
 				TenantID:  tenantIDStr,
 				AgentID:   agentForEvent,
+				UserID:    uploaderUserID,
 				Timestamp: time.Now(),
 				Payload: eventbus.VaultDocUpsertedPayload{
 					DocID:       doc.ID,
 					TenantID:    tenantIDStr,
 					AgentID:     agentForEvent,
+					UserID:      uploaderUserID,
 					Path:        relPath,
 					ContentHash: hash,
 					Workspace:   wsPath,

@@ -46,6 +46,7 @@ type InstanceLoader struct {
 	agentStore        store.AgentStore
 	providerReg       *providers.Registry
 	pendingCompactCfg *config.PendingCompactionConfig
+	tenantStore       store.TenantStore // for outbound actor-header attribution on pending compaction
 	factories         map[string]ChannelFactory
 	manager           *Manager
 	msgBus            *bus.MessageBus
@@ -83,6 +84,14 @@ func (l *InstanceLoader) SetProviderRegistry(reg *providers.Registry) {
 // Must be called before LoadAll/Reload.
 func (l *InstanceLoader) SetPendingCompactionConfig(cfg *config.PendingCompactionConfig) {
 	l.pendingCompactCfg = cfg
+}
+
+// SetTenantStore wires the tenant store so per-channel compaction can
+// resolve X-Actor-Org-ID for outbound LLM calls. Optional — when nil
+// the compaction call lands without actor headers and 400's at the
+// receiver, surfacing as a clear "this channel isn't wired" signal.
+func (l *InstanceLoader) SetTenantStore(ts store.TenantStore) {
+	l.tenantStore = ts
 }
 
 // RegisterFactory registers a factory for a channel type (e.g., "telegram", "discord").
@@ -384,8 +393,10 @@ func (l *InstanceLoader) loadInstance(ctx context.Context, inst store.ChannelIns
 
 		if p != nil && model != "" {
 			cc := &CompactionConfig{
-				Provider: p,
-				Model:    model,
+				Provider:             p,
+				Model:                model,
+				TenantStore:          l.tenantStore,
+				ChannelInstanceStore: l.store,
 			}
 			if l.pendingCompactCfg != nil {
 				cc.Threshold = l.pendingCompactCfg.Threshold

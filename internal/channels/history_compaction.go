@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/actorheaders"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -20,6 +21,15 @@ type CompactionConfig struct {
 	MaxTokens  int                // max output tokens for summarization (default 4096)
 	Provider   providers.Provider // LLM provider for summarization
 	Model      string             // model to use for summarization
+	// Attribution dependencies — needed to stamp X-Actor-* headers onto
+	// the outbound provider.Chat call (web-agent-api rejects the
+	// service-token path without them). Both optional: when either is
+	// nil, runCompaction skips the header attachment and the receiver
+	// 400's — that surfaces as a clear signal "this channel's
+	// compaction isn't wired up" instead of silent inflation of the
+	// sessions table.
+	TenantStore          store.TenantStore
+	ChannelInstanceStore store.ChannelInstanceStore
 }
 
 // MaybeCompact checks if compaction is needed for a history key and triggers it in background.
@@ -183,6 +193,19 @@ func (ph *PendingHistory) runCompaction(historyKey string, cfg *CompactionConfig
 	}
 	if len(entries) <= threshold {
 		return
+	}
+
+	// Attribution: charge the compaction LLM call to whoever set up this
+	// channel — `channel_instances.created_by_user_id`. Compaction is a
+	// per-channel cleanup so the channel owner is the natural target.
+	// Empty CreatedBy (legacy rows before task #64) leaves ctx unchanged
+	// and the call 400's — by design, surfaces as a signal "this old
+	// channel needs a CreatedBy backfill" rather than silently
+	// inflating sessions.
+	if cfg.ChannelInstanceStore != nil && cfg.TenantStore != nil && ph.tenantID != uuid.Nil {
+		if inst, lookupErr := cfg.ChannelInstanceStore.GetByName(ctx, ph.channelName); lookupErr == nil && inst != nil {
+			ctx = actorheaders.Attach(ctx, cfg.TenantStore, ph.tenantID, inst.CreatedBy)
+		}
 	}
 
 	_, err = CompactGroup(ctx, ph.store, ph.channelName, historyKey, cfg.Provider, cfg.Model, cfg.KeepRecent, cfg.MaxTokens)

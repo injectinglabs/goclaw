@@ -132,6 +132,11 @@ type VaultDocUpsertedPayload struct {
 	DocID       string // vault_documents.id (UUID)
 	TenantID    string // tenant context (per-item for batch safety)
 	AgentID     string // agent that wrote the file
+	UserID      string // user who uploaded/wrote the file; attribution target for the
+	                  // enrichment LLM call. Empty for legacy events without a caller
+	                  // (e.g. unattributed rescan rows); the enricher then skips
+	                  // attribution headers and the receiver will reject the call —
+	                  // intentional, so silent attribution gaps surface as 400s.
 	Path        string // workspace-relative file path
 	ContentHash string // SHA-256 of content at write time
 	Workspace   string // absolute workspace path for file reading
