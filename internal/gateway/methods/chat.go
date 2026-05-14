@@ -354,11 +354,26 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 			// only Authorization=service-token and no X-Actor-* headers —
 			// web-agent-api 400'd with "requires X-Actor-User-ID and
 			// X-Actor-Org-ID" on every new-chat first message.
-			if slug := store.TenantSlugFromContext(runCtxBase); slug != "" && userID != "" {
-				titleCtx = providers.WithActorHeaders(titleCtx, map[string]string{
-					"X-Actor-User-ID": userID,
-					"X-Actor-Org-ID":  slug,
-				})
+			if userID != "" {
+				// Prefer the web-backend org UUID stamped onto the
+				// tenant by auth-proxy (see resolveTenantSlugAndExternalOrgID
+				// + tenants.settings.external_org_id) — keeps title-gen
+				// in sync with the regular run path in injectContext.
+				// Falls back to the goclaw slug for tenants the
+				// auth-proxy hasn't stamped yet during rollout.
+				orgID := loop.ExternalOrgID()
+				if orgID == "" {
+					orgID = store.TenantSlugFromContext(runCtxBase)
+				}
+				if orgID == "" {
+					orgID = loop.TenantSlug()
+				}
+				if orgID != "" {
+					titleCtx = providers.WithActorHeaders(titleCtx, map[string]string{
+						"X-Actor-User-ID": userID,
+						"X-Actor-Org-ID":  orgID,
+					})
+				}
 			}
 			go func() {
 				title := agent.GenerateTitle(titleCtx, agentProvider, agentModel, userMsg)

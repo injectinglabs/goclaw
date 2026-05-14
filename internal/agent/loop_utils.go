@@ -165,6 +165,17 @@ func (l *Loop) InvalidateUserWorkspace(userID string) {
 // Used by intent classifier to make lightweight LLM calls with the agent's own provider.
 func (l *Loop) Provider() providers.Provider { return l.provider }
 
+// ExternalOrgID returns the web-backend organizations.id (UUID) stamped on
+// this tenant's settings.external_org_id, or empty string if not yet
+// stamped (rollout window). Callers should prefer this over TenantSlug
+// for outbound X-Actor-Org-ID and fall back to the slug when empty.
+func (l *Loop) ExternalOrgID() string { return l.externalOrgID }
+
+// TenantSlug returns the goclaw tenant slug ("org-<type>-<web_slug>").
+// Used as a fallback for outbound actor identity when ExternalOrgID is
+// empty during rollout.
+func (l *Loop) TenantSlug() string { return l.tenantSlug }
+
 // ProviderName returns the name of this agent's LLM provider (e.g. "anthropic", "openai").
 func (l *Loop) ProviderName() string {
 	if l.provider == nil {
