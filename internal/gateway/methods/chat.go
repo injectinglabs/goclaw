@@ -346,6 +346,20 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 			userMsg := params.Message
 			// Use runCtxBase (WithoutCancel + tenant-aware) so title save uses correct tenant.
 			titleCtx := runCtxBase
+			// Attach actor headers for the outbound /v1/chat/completions
+			// call so the downstream service-token endpoint can attribute
+			// this background turn to the right user/org. Without this,
+			// GenerateTitle bypassed Loop.injectContext (which is where the
+			// regular run path sets these), and the outbound arrived with
+			// only Authorization=service-token and no X-Actor-* headers —
+			// web-agent-api 400'd with "requires X-Actor-User-ID and
+			// X-Actor-Org-ID" on every new-chat first message.
+			if slug := store.TenantSlugFromContext(runCtxBase); slug != "" && userID != "" {
+				titleCtx = providers.WithActorHeaders(titleCtx, map[string]string{
+					"X-Actor-User-ID": userID,
+					"X-Actor-Org-ID":  slug,
+				})
+			}
 			go func() {
 				title := agent.GenerateTitle(titleCtx, agentProvider, agentModel, userMsg)
 				if title == "" {
