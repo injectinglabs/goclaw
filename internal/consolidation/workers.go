@@ -30,6 +30,12 @@ type ConsolidationDeps struct {
 	// per-agent overrides from MemoryConfig.Dreaming. If nil, the worker
 	// uses its built-in defaults for every agent.
 	AgentStore store.AgentCRUDStore
+	// TenantStore is optional but required for correct multi-tenant
+	// attribution on outbound provider.Chat calls — see
+	// attachBackgroundActorHeaders. Workers gracefully degrade to the
+	// pre-service-token behaviour when nil, which means web-agent-api
+	// 400's the call. Always wire it in production.
+	TenantStore store.TenantStore
 }
 
 // Register wires all consolidation workers to the event bus.
@@ -42,12 +48,14 @@ func Register(deps ConsolidationDeps) func() {
 		registry:      deps.Registry,
 		eventBus:      deps.EventBus,
 		alertDeps:     deps.AlertDeps,
+		tenantStore:   deps.TenantStore,
 	}
 	semantic := &semanticWorker{
-		kgStore:   deps.KGStore,
-		extractor: deps.Extractor,
-		eventBus:  deps.EventBus,
-		alertDeps: deps.AlertDeps,
+		kgStore:     deps.KGStore,
+		extractor:   deps.Extractor,
+		eventBus:    deps.EventBus,
+		alertDeps:   deps.AlertDeps,
+		tenantStore: deps.TenantStore,
 	}
 	dedup := &dedupWorker{
 		kgStore: deps.KGStore,
@@ -62,6 +70,7 @@ func Register(deps ConsolidationDeps) func() {
 		threshold:     dreamingDefaultThreshold,
 		debounce:      dreamingDefaultDebounce,
 		resolveConfig: newAgentStoreResolver(deps.AgentStore),
+		tenantStore:   deps.TenantStore,
 	}
 
 	unsub1 := deps.EventBus.Subscribe(eventbus.EventSessionCompleted, episodic.Handle)

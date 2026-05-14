@@ -31,6 +31,7 @@ type dreamingWorker struct {
 	systemConfigs store.SystemConfigStore // per-tenant provider config
 	registry      *providers.Registry     // provider resolution
 	alertDeps     bgalert.AlertDeps
+	tenantStore   store.TenantStore // for outbound actor-header attribution
 
 	// threshold/debounce are the global defaults. Per-agent overrides come
 	// from resolveConfig which reads the agent's MemoryConfig.Dreaming JSONB.
@@ -159,8 +160,10 @@ func (w *dreamingWorker) Handle(ctx context.Context, event eventbus.DomainEvent)
 		return nil
 	}
 
-	// Build LLM prompt and call provider.
-	synthesis, err := w.synthesize(ctx, provider, model, entries)
+	// Build LLM prompt and call provider. Attribution headers required for
+	// the service-token path on web-agent-api (see attachBackgroundActorHeaders).
+	synthCtx := attachBackgroundActorHeaders(ctx, w.tenantStore, tenantUUID, userID)
+	synthesis, err := w.synthesize(synthCtx, provider, model, entries)
 	if err != nil {
 		bgalert.ReportProviderError(ctx, w.alertDeps, "dreaming", err)
 		slog.Warn("dreaming: LLM synthesis failed", "err", err, "agent", agentID)
