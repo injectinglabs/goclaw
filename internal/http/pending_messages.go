@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/nextlevelbuilder/goclaw/internal/actorheaders"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/providerresolve"
@@ -15,17 +16,25 @@ import (
 
 // PendingMessagesHandler handles pending message HTTP endpoints.
 type PendingMessagesHandler struct {
-	store       store.PendingMessageStore
-	agentStore  store.AgentStore
-	providerReg *providers.Registry
-	keepRecent  int    // global keepRecent from config (0 = use default 15)
-	maxTokens   int    // max output tokens for LLM summarization (0 = use default)
-	cfgProvider string // config-level provider override (empty = resolve from agent)
-	cfgModel    string // config-level model override (empty = resolve from agent)
+	store        store.PendingMessageStore
+	agentStore   store.AgentStore
+	providerReg  *providers.Registry
+	tenantStore  store.TenantStore // for outbound actor-header attribution on POST /compact
+	keepRecent   int               // global keepRecent from config (0 = use default 15)
+	maxTokens    int               // max output tokens for LLM summarization (0 = use default)
+	cfgProvider  string            // config-level provider override (empty = resolve from agent)
+	cfgModel     string            // config-level model override (empty = resolve from agent)
 }
 
 func NewPendingMessagesHandler(s store.PendingMessageStore, agentStore store.AgentStore, providerReg *providers.Registry) *PendingMessagesHandler {
 	return &PendingMessagesHandler{store: s, agentStore: agentStore, providerReg: providerReg}
+}
+
+// SetTenantStore wires the tenant store so POST /compact can resolve
+// the X-Actor-Org-ID for the outbound LLM call. Optional — when nil,
+// the compaction request 400's at the receiver (loud signal).
+func (h *PendingMessagesHandler) SetTenantStore(ts store.TenantStore) {
+	h.tenantStore = ts
 }
 
 // SetKeepRecent sets the global keepRecent value from config.
@@ -145,9 +154,20 @@ func (h *PendingMessagesHandler) handleCompact(w http.ResponseWriter, r *http.Re
 		keepRecent = 15
 	}
 	tenantID := store.TenantIDFromContext(r.Context())
+	// Capture caller userID from the HTTP request context so the
+	// detached goroutine can attribute the outbound LLM call back to
+	// them. authMiddleware populates UserIDFromContext on every
+	// authenticated route.
+	userID := store.UserIDFromContext(r.Context())
 	go func() {
 		ctx, cancel := context.WithTimeout(store.WithTenantID(context.Background(), tenantID), 180*time.Second)
 		defer cancel()
+		// Wrap with actor headers before CompactGroup. nil TenantStore
+		// or empty UserID short-circuit to no-op — the call then 400's
+		// at the receiver, which is the intentional loud-signal for
+		// "this HTTP entry point isn't yet wired into the actor flow"
+		// rather than a silent attribution gap.
+		ctx = actorheaders.Attach(ctx, h.tenantStore, tenantID, userID)
 		remaining, err := channels.CompactGroup(ctx, h.store, req.ChannelName, req.HistoryKey, provider, model, keepRecent, h.maxTokens)
 		if err != nil {
 			slog.Warn("compact.failed", "channel", req.ChannelName, "key", req.HistoryKey, "error", err)
