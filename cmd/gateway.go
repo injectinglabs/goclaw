@@ -205,6 +205,7 @@ func runGateway() {
 				Extractor:     kgExtractor,
 				AlertDeps:     bgalert.AlertDeps{SystemConfigs: pgStores.SystemConfigs, MsgBus: msgBus},
 				AgentStore:    pgStores.Agents,
+				TenantStore:   pgStores.Tenants,
 			})
 			defer cleanupConsolidation()
 			slog.Info("consolidation pipeline registered", "provider", bgProvider.Name(), "model", bgModel)
