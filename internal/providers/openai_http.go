@@ -44,6 +44,16 @@ func (p *OpenAIProvider) doRequest(ctx context.Context, body any) (io.ReadCloser
 		httpReq.Header.Set("X-Title", p.siteTitle)
 	}
 
+	// Per-call actor headers attached via providers.WithActorHeaders.
+	// Used by the agent loop to tell trusted downstream services
+	// (e.g. web-agent-api) which user this turn is for, without leaking
+	// the actor's own credentials. Headers are added AFTER Authorization
+	// so a stray actor entry can't shadow auth, and only by the agent
+	// runtime — the provider's static field set stays unchanged.
+	for k, v := range actorHeadersFromCtx(ctx) {
+		httpReq.Header.Set(k, v)
+	}
+
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("%s: request failed: %w", p.name, err)

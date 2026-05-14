@@ -12,6 +12,7 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 	"github.com/nextlevelbuilder/goclaw/internal/workspace"
@@ -41,6 +42,25 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	// Inject user ID into context for per-user scoping (memory, context files, etc.)
 	if req.UserID != "" {
 		ctx = store.WithUserID(ctx, req.UserID)
+	}
+	// Attach actor identity for the OpenAI-compatible outbound HTTP
+	// client. Trusted downstream services (currently web-agent-api at
+	// stg-web-agent-api.injecting.ai / web-agent-api.injecting.ai) use
+	// these to attribute the call to the right user/org instead of
+	// trusting the provider's cached api_key — which previously caused
+	// multi-tenant attribution to flip between members of the same
+	// team-org based on who last synced the auth-proxy cache.
+	// Tenant slug here is the goclaw slug ("org-<web_slug>");
+	// resolve_actor_payload on web-agent-api strips the "org-" prefix
+	// and joins on organizations.slug.
+	if req.UserID != "" {
+		actor := map[string]string{
+			"X-Actor-User-ID": req.UserID,
+		}
+		if slug := store.TenantSlugFromContext(ctx); slug != "" {
+			actor["X-Actor-Org-ID"] = slug
+		}
+		ctx = providers.WithActorHeaders(ctx, actor)
 	}
 	// Resolve merged tenant user identity for credential lookups.
 	// Keeps UserID unchanged (session/workspace scoping) but sets a separate
