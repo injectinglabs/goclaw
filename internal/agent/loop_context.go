@@ -65,19 +65,30 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	// trusting the provider's cached api_key — which previously caused
 	// multi-tenant attribution to flip between members of the same
 	// team-org based on who last synced the auth-proxy cache.
-	// Tenant slug here is the goclaw slug ("org-<type>-<web_slug>");
-	// resolve_actor_payload on web-agent-api strips the prefix family
-	// and joins on organizations.slug.
+	//
+	// X-Actor-Org-ID preference order:
+	//   1. l.externalOrgID — web-backend organizations.id (UUID),
+	//      stamped on tenants.settings.external_org_id by auth-proxy.
+	//      Canonical; resolve_actor_payload on web-agent-api takes
+	//      this path directly (`_looks_like_uuid`).
+	//   2. tenant slug from context / l.tenantSlug — goclaw slug
+	//      ("org-<type>-<web_slug>"). Backward-compat fallback for
+	//      tenants the auth-proxy hasn't stamped yet during rollout;
+	//      receiver inverts the prefix family and joins on
+	//      organizations.slug.
 	if req.UserID != "" {
 		actor := map[string]string{
 			"X-Actor-User-ID": req.UserID,
 		}
-		slug := store.TenantSlugFromContext(ctx)
-		if slug == "" {
-			slug = l.tenantSlug
+		orgID := l.externalOrgID
+		if orgID == "" {
+			orgID = store.TenantSlugFromContext(ctx)
+			if orgID == "" {
+				orgID = l.tenantSlug
+			}
 		}
-		if slug != "" {
-			actor["X-Actor-Org-ID"] = slug
+		if orgID != "" {
+			actor["X-Actor-Org-ID"] = orgID
 		}
 		ctx = providers.WithActorHeaders(ctx, actor)
 	}

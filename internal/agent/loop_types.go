@@ -89,6 +89,13 @@ type Loop struct {
 	agentUUID        uuid.UUID
 	tenantID         uuid.UUID // agent's owning tenant
 	tenantSlug       string    // canonical tenant slug — see Config.TenantSlug
+	// externalOrgID is the web-backend organizations.id (UUID) for this
+	// tenant, sourced from tenants.settings.external_org_id. When non-empty
+	// it overrides tenantSlug in outbound X-Actor-Org-ID headers, removing
+	// the slug-format coupling between goclaw and downstream attribution.
+	// Empty during rollout for tenants the auth-proxy hasn't stamped yet —
+	// loop_context.go falls back to the slug in that case.
+	externalOrgID    string
 	// agentOtherConfig is a defensive byte copy of agents.other_config JSONB.
 	// Copied once at Loop construction; used to build AgentAudioSnapshot at tool dispatch.
 	agentOtherConfig json.RawMessage
@@ -361,6 +368,7 @@ type LoopConfig struct {
 	AgentUUID        uuid.UUID
 	TenantID         uuid.UUID        // agent's owning tenant — injected into execution context
 	TenantSlug       string           // canonical tenant slug, e.g. "org-team-acme"; pre-resolved at construction so the loop has a stable identifier for downstream service-token calls when the per-request context doesn't carry one (Telegram path).
+	ExternalOrgID    string           // web-backend organizations.id (UUID), stamped onto tenants.settings.external_org_id by auth-proxy. Preferred over TenantSlug for outbound X-Actor-Org-ID; empty until first login after the stamp lands.
 	AgentOtherConfig json.RawMessage  // raw other_config JSONB — copied defensively in NewLoop
 	AgentType        string           // "open" or "predefined"
 	DisplayName string    // human-readable agent display name (for runtime section)
@@ -497,6 +505,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		agentUUID:              cfg.AgentUUID,
 		tenantID:               cfg.TenantID,
 		tenantSlug:             cfg.TenantSlug,
+		externalOrgID:          cfg.ExternalOrgID,
 		agentOtherConfig:       append([]byte(nil), cfg.AgentOtherConfig...), // defensive copy
 		agentType:              cfg.AgentType,
 		provider:               cfg.Provider,
