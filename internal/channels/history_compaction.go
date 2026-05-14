@@ -195,16 +195,24 @@ func (ph *PendingHistory) runCompaction(historyKey string, cfg *CompactionConfig
 		return
 	}
 
-	// Attribution: charge the compaction LLM call to whoever set up this
-	// channel — `channel_instances.created_by_user_id`. Compaction is a
-	// per-channel cleanup so the channel owner is the natural target.
-	// Empty CreatedBy (legacy rows before task #64) leaves ctx unchanged
-	// and the call 400's — by design, surfaces as a signal "this old
-	// channel needs a CreatedBy backfill" rather than silently
-	// inflating sessions.
-	if cfg.ChannelInstanceStore != nil && cfg.TenantStore != nil && ph.tenantID != uuid.Nil {
-		if inst, lookupErr := cfg.ChannelInstanceStore.GetByName(ctx, ph.channelName); lookupErr == nil && inst != nil {
-			ctx = actorheaders.Attach(ctx, cfg.TenantStore, ph.tenantID, inst.CreatedBy)
+	// Attribution: compaction is per-channel cleanup. When the channel
+	// row carries `created_by_user_id` (task #64), attribute to that
+	// user; the row sits in their workspace's billing. When it's empty
+	// (legacy rows from before task #64 shipped, or system-seeded
+	// channels with no human owner), switch to the infra path so the
+	// org pays the cost in a separate `source='infra'` bucket and no
+	// single user's quota gets hit by other people's compaction.
+	if cfg.TenantStore != nil && ph.tenantID != uuid.Nil {
+		creatorUserID := ""
+		if cfg.ChannelInstanceStore != nil {
+			if inst, lookupErr := cfg.ChannelInstanceStore.GetByName(ctx, ph.channelName); lookupErr == nil && inst != nil {
+				creatorUserID = inst.CreatedBy
+			}
+		}
+		if creatorUserID != "" {
+			ctx = actorheaders.Attach(ctx, cfg.TenantStore, ph.tenantID, creatorUserID)
+		} else {
+			ctx = actorheaders.AttachInfra(ctx, cfg.TenantStore, ph.tenantID)
 		}
 	}
 

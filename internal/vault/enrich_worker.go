@@ -308,16 +308,21 @@ func (w *EnrichWorker) processChunk(ctx context.Context, items []eventbus.VaultD
 
 	// Attach X-Actor-* headers for the upcoming provider.Chat calls.
 	// All items in a chunk share the same tenant; we attribute the
-	// outbound LLM call(s) to the first item's uploader. This is a
-	// pragmatic compromise — mixed-user batches (multiple users
-	// uploading in the same tenant inside a single tick) attribute
-	// the call to whoever fired first. Strict per-item attribution
-	// would force one-LLM-call-per-doc and lose the batch efficiency.
-	// Empty UserID (rescan / EnqueueUnenriched paths) leaves ctx
-	// unchanged and the receiver 400s — loud signal that those
-	// triggers still need attribution work (task #65 source=infra).
+	// outbound LLM call(s) to the first item's uploader. Mixed-user
+	// batches (multiple uploaders in the same tenant inside one tick)
+	// attribute to whoever fired first — documented compromise so we
+	// don't lose batching.
+	// When the chunk has no user attribution at all (bulk paths like
+	// RescanWorkspace and EnqueueUnenriched, neither of which is tied
+	// to a single human), switch to the infra path: the receiver
+	// charges the org without touching any user's quota and writes the
+	// ai_tasks row with source='infra'. See migration 050 + auth.py.
 	if tid, parseErr := uuid.Parse(tenantID); parseErr == nil {
-		ctx = actorheaders.Attach(ctx, w.tenantStore, tid, pending[0].UserID)
+		if pending[0].UserID != "" {
+			ctx = actorheaders.Attach(ctx, w.tenantStore, tid, pending[0].UserID)
+		} else {
+			ctx = actorheaders.AttachInfra(ctx, w.tenantStore, tid)
+		}
 	}
 
 	// Resolve provider once per chunk (all items share tenantID)
