@@ -39,6 +39,21 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	if l.tenantID != uuid.Nil {
 		ctx = store.WithTenantID(ctx, l.tenantID)
 	}
+	// Ensure tenant slug is in context too. The HTTP/WS gateway sets it
+	// at request entry (internal/gateway/router.go:92,
+	// internal/http/auth.go:347), but other inbound paths — Telegram,
+	// channel webhooks, scheduled jobs — go through cmd/gateway_consumer_*
+	// which only stamps WithTenantID. Without a slug in context the
+	// service-token outbound (web-agent-api X-Actor-Org-ID) arrives empty
+	// and downstream attribution falls back to active_org_id, which is
+	// wrong for users who switched workspace in the dashboard while a
+	// Telegram channel was still attached to the previous tenant. The
+	// loop's own tenantSlug is the authoritative value here — it's
+	// resolved once at construction in resolver.go from the agent's
+	// TenantID via deps.TenantStore.
+	if l.tenantSlug != "" && store.TenantSlugFromContext(ctx) == "" {
+		ctx = store.WithTenantSlug(ctx, l.tenantSlug)
+	}
 	// Inject user ID into context for per-user scoping (memory, context files, etc.)
 	if req.UserID != "" {
 		ctx = store.WithUserID(ctx, req.UserID)
@@ -50,14 +65,18 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	// trusting the provider's cached api_key — which previously caused
 	// multi-tenant attribution to flip between members of the same
 	// team-org based on who last synced the auth-proxy cache.
-	// Tenant slug here is the goclaw slug ("org-<web_slug>");
-	// resolve_actor_payload on web-agent-api strips the "org-" prefix
+	// Tenant slug here is the goclaw slug ("org-<type>-<web_slug>");
+	// resolve_actor_payload on web-agent-api strips the prefix family
 	// and joins on organizations.slug.
 	if req.UserID != "" {
 		actor := map[string]string{
 			"X-Actor-User-ID": req.UserID,
 		}
-		if slug := store.TenantSlugFromContext(ctx); slug != "" {
+		slug := store.TenantSlugFromContext(ctx)
+		if slug == "" {
+			slug = l.tenantSlug
+		}
+		if slug != "" {
 			actor["X-Actor-Org-ID"] = slug
 		}
 		ctx = providers.WithActorHeaders(ctx, actor)
