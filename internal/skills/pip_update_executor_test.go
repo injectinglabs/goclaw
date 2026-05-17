@@ -20,6 +20,9 @@ func setupFixturePipForExecutor(t *testing.T) {
 		t.Fatal("runtime.Caller failed")
 	}
 	fixturePath := filepath.Join(filepath.Dir(file), "testdata", "pip", "bin", "pip3")
+	if runtime.GOOS == "windows" {
+		fixturePath += ".cmd"
+	}
 
 	origBinary := pipBinary
 	origLookPath := pipLookPath
@@ -121,6 +124,15 @@ func TestPipExecutor_PreReleaseFlag(t *testing.T) {
 		"  exit 0\n" +
 		"fi\n" +
 		"exit 2\n"
+	if runtime.GOOS == "windows" {
+		scriptPath += ".cmd"
+		script = "@echo off\r\n" +
+			"if \"%~1\"==\"install\" (\r\n" +
+			"  echo %* >> \"" + argsFile + "\"\r\n" +
+			"  exit /b 0\r\n" +
+			")\r\n" +
+			"exit /b 2\r\n"
+	}
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write arg-capture script: %v", err)
 	}
@@ -171,6 +183,15 @@ func TestPipExecutor_CtxCancel(t *testing.T) {
 	script := "#!/bin/sh\n" +
 		"if [ \"$1\" = \"install\" ]; then sleep 60; exit 0; fi\n" +
 		"exit 2\n"
+	if runtime.GOOS == "windows" {
+		scriptPath += ".cmd"
+		script = "@echo off\r\n" +
+			"if \"%~1\"==\"install\" (\r\n" +
+			"  powershell -NoProfile -Command \"Start-Sleep -Seconds 60\"\r\n" +
+			"  exit /b 0\r\n" +
+			")\r\n" +
+			"exit /b 2\r\n"
+	}
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write sleep script: %v", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -31,6 +32,9 @@ func useFixtureNpm(t *testing.T) {
 	restoreNpmBinary(t)
 	restoreNpmLookPath(t)
 	npmBinary = filepath.Join("testdata", "npm", "bin", "npm")
+	if runtime.GOOS == "windows" {
+		npmBinary += ".cmd"
+	}
 	npmLookPath = func(string) (string, error) { return npmBinary, nil }
 }
 

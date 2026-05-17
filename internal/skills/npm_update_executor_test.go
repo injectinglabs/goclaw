@@ -4,8 +4,18 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"runtime"
+	"strings"
 	"testing"
 )
+
+func setFixtureNpmStderr(t *testing.T, stderr string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		stderr = strings.ReplaceAll(stderr, "\n", " ")
+	}
+	t.Setenv("FIXTURE_NPM_STDERR", stderr)
+}
 
 // TestNpmExecutor_SourceName verifies the Source() method returns "npm".
 func TestNpmExecutor_SourceName(t *testing.T) {
@@ -53,7 +63,7 @@ func TestNpmExecutor_Success(t *testing.T) {
 func TestNpmExecutor_ERESOLVE(t *testing.T) {
 	useFixtureNpm(t)
 	t.Setenv("FIXTURE_NPM_EXIT", "1")
-	t.Setenv("FIXTURE_NPM_STDERR", "npm ERR! code ERESOLVE\nnpm ERR! peer dep conflict")
+	setFixtureNpmStderr(t, "npm ERR! code ERESOLVE\nnpm ERR! peer dep conflict")
 
 	err := NewNpmUpdateExecutor().Update(context.Background(), "typescript", "5.5.0", nil)
 	if err == nil {
@@ -69,7 +79,7 @@ func TestNpmExecutor_ERESOLVE(t *testing.T) {
 func TestNpmExecutor_EACCES(t *testing.T) {
 	useFixtureNpm(t)
 	t.Setenv("FIXTURE_NPM_EXIT", "1")
-	t.Setenv("FIXTURE_NPM_STDERR", "npm ERR! code EACCES\nnpm ERR! permission denied")
+	setFixtureNpmStderr(t, "npm ERR! code EACCES\nnpm ERR! permission denied")
 
 	err := NewNpmUpdateExecutor().Update(context.Background(), "typescript", "5.5.0", nil)
 	if err == nil {
@@ -85,7 +95,7 @@ func TestNpmExecutor_EACCES(t *testing.T) {
 func TestNpmExecutor_404(t *testing.T) {
 	useFixtureNpm(t)
 	t.Setenv("FIXTURE_NPM_EXIT", "1")
-	t.Setenv("FIXTURE_NPM_STDERR", "npm ERR! code E404\nnpm ERR! 404 Not Found - GET https://registry.npmjs.org/nonexistent")
+	setFixtureNpmStderr(t, "npm ERR! code E404\nnpm ERR! 404 Not Found - GET https://registry.npmjs.org/nonexistent")
 
 	err := NewNpmUpdateExecutor().Update(context.Background(), "nonexistent", "1.0.0", nil)
 	if err == nil {
@@ -132,6 +142,9 @@ func TestNpmExecutor_ExactVersionArgv(t *testing.T) {
 // to the subprocess (exec.CommandContext contract). We set npmBinary to a
 // long-running command and cancel immediately.
 func TestNpmExecutor_ContextCancel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sleep fixture is Unix-specific")
+	}
 	restoreNpmBinary(t)
 	restoreNpmLookPath(t)
 

@@ -1,3 +1,5 @@
+//go:build !windows
+
 package main
 
 import (
@@ -120,24 +122,24 @@ func TestValidPkgName(t *testing.T) {
 		{"pkg_with_underscores", true},
 		{"pkg.with.dots", true},
 		// Invalid package names
-		{"-invalid", false},           // starts with hyphen
-		{"--flag", false},             // starts with hyphen
-		{"pkg name", false},           // contains space
-		{"pkg;cmd", false},            // contains semicolon
-		{"pkg|cmd", false},            // contains pipe
-		{"pkg&cmd", false},            // contains ampersand
-		{"pkg`cmd`", false},           // contains backtick
-		{"pkg$var", false},            // contains dollar sign
-		{"pkg<file", false},           // contains angle bracket
-		{"pkg>file", false},           // contains angle bracket
-		{"pkg'quote", false},          // contains quote
-		{"pkg\"quote", false},         // contains quote
-		{"pkg(paren)", false},         // contains parens
-		{"", false},                   // empty
-		{" curl", false},              // starts with space
-		{"curl ", false},              // ends with space
-		{"--index-url=evil", false},   // flag pattern
-		{"-u", false},                 // short flag
+		{"-invalid", false},         // starts with hyphen
+		{"--flag", false},           // starts with hyphen
+		{"pkg name", false},         // contains space
+		{"pkg;cmd", false},          // contains semicolon
+		{"pkg|cmd", false},          // contains pipe
+		{"pkg&cmd", false},          // contains ampersand
+		{"pkg`cmd`", false},         // contains backtick
+		{"pkg$var", false},          // contains dollar sign
+		{"pkg<file", false},         // contains angle bracket
+		{"pkg>file", false},         // contains angle bracket
+		{"pkg'quote", false},        // contains quote
+		{"pkg\"quote", false},       // contains quote
+		{"pkg(paren)", false},       // contains parens
+		{"", false},                 // empty
+		{" curl", false},            // starts with space
+		{"curl ", false},            // ends with space
+		{"--index-url=evil", false}, // flag pattern
+		{"-u", false},               // short flag
 	}
 
 	for _, tt := range tests {
@@ -461,10 +463,10 @@ func TestHandleRequest_UpgradeValidation(t *testing.T) {
 // TestHandleRequest_UpgradeInjectionPatterns verifies 5 injection patterns are rejected.
 func TestHandleRequest_UpgradeInjectionPatterns(t *testing.T) {
 	injections := []string{
-		"-malicious",   // leading hyphen
-		"pkg;evil",     // semicolon
-		"pkg evil",     // space
-		"@edge/curl",   // @ prefix (legacy npm compat — rejected by validApkName)
+		"-malicious",    // leading hyphen
+		"pkg;evil",      // semicolon
+		"pkg evil",      // space
+		"@edge/curl",    // @ prefix (legacy npm compat — rejected by validApkName)
 		"UPPERCASE_PKG", // uppercase rejected by validApkName
 	}
 	for _, pkg := range injections {
@@ -485,8 +487,8 @@ func TestHandleRequest_UpgradeInjectionPatterns(t *testing.T) {
 // via the stricter validApkName.
 func TestHandleRequest_UpgradeRejectsLegacySymbols(t *testing.T) {
 	legacySymbols := []string{
-		"pkg@edge",    // @ accepted by validPkgName, rejected by validApkName
-		"@scope/pkg",  // npm scoped — rejected by validApkName
+		"pkg@edge",   // @ accepted by validPkgName, rejected by validApkName
+		"@scope/pkg", // npm scoped — rejected by validApkName
 	}
 	for _, pkg := range legacySymbols {
 		t.Run(pkg, func(t *testing.T) {
@@ -716,7 +718,7 @@ func TestValidApkName(t *testing.T) {
 		{"gtk+3.0", true},
 		{"ca-certificates", true},
 		{"py3-pip", true},
-		{"0launch", true},  // starts with digit — valid per apk grammar
+		{"0launch", true}, // starts with digit — valid per apk grammar
 
 		// Invalid: uppercase
 		{"CURL", false},

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -17,7 +18,11 @@ func fixturePip3Path(t *testing.T) string {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	return filepath.Join(filepath.Dir(file), "testdata", "pip", "bin", "pip3")
+	p := filepath.Join(filepath.Dir(file), "testdata", "pip", "bin", "pip3")
+	if runtime.GOOS == "windows" {
+		p += ".cmd"
+	}
+	return p
 }
 
 // setupFixturePip overrides pipBinary and pipLookPath to use the bundled fixture script.
@@ -36,6 +41,13 @@ func setupFixturePip(t *testing.T) {
 // writeExecScript writes a shell script to path and makes it executable.
 func writeExecScript(t *testing.T, path, content string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		if strings.Contains(content, "internal error") {
+			content = "@echo off\r\necho internal error 1>&2\r\nexit /b 1\r\n"
+		} else {
+			content = "@echo off\r\necho []\r\nexit /b 0\r\n"
+		}
+	}
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("writeExecScript: %v", err)
 	}
@@ -140,6 +152,9 @@ func TestPipChecker_EmptyResult(t *testing.T) {
 	origLookPath := pipLookPath
 
 	script := filepath.Join(t.TempDir(), "pip3")
+	if runtime.GOOS == "windows" {
+		script += ".cmd"
+	}
 	writeExecScript(t, script, "#!/bin/sh\necho '[]'\n")
 	pipBinary = script
 	pipLookPath = func(string) (string, error) { return script, nil }
@@ -169,6 +184,9 @@ func TestPipChecker_ExecError(t *testing.T) {
 	origLookPath := pipLookPath
 
 	script := filepath.Join(t.TempDir(), "pip3")
+	if runtime.GOOS == "windows" {
+		script += ".cmd"
+	}
 	writeExecScript(t, script, "#!/bin/sh\necho 'internal error' >&2\nexit 1\n")
 	pipBinary = script
 	pipLookPath = func(string) (string, error) { return script, nil }

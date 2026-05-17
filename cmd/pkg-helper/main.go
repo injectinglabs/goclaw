@@ -1,3 +1,5 @@
+//go:build !windows
+
 // pkg-helper is a root-privileged helper that listens on a Unix socket
 // and executes apk add/del commands on behalf of the non-root app process.
 // It is started by docker-entrypoint.sh before dropping privileges.
