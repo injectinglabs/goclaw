@@ -168,6 +168,7 @@ export const Methods = {
 
   // Config permissions
   CONFIG_PERMISSIONS_LIST: "config.permissions.list",
+  CONFIG_PERMISSIONS_CHECK: "config.permissions.check",
   CONFIG_PERMISSIONS_GRANT: "config.permissions.grant",
   CONFIG_PERMISSIONS_REVOKE: "config.permissions.revoke",
 

@@ -101,6 +101,7 @@ const (
 // Config permissions
 const (
 	MethodConfigPermissionsList   = "config.permissions.list"
+	MethodConfigPermissionsCheck  = "config.permissions.check"
 	MethodConfigPermissionsGrant  = "config.permissions.grant"
 	MethodConfigPermissionsRevoke = "config.permissions.revoke"
 )

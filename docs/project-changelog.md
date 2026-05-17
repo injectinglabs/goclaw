@@ -4,6 +4,28 @@ Significant changes, features, and fixes in reverse chronological order.
 
 ---
 
+## 2026-05-17
+
+### Agent Permissions: channel and workspace matrix
+
+**Features**
+
+- Added `config.permissions.check` so the UI can preview the effective allow/deny decision for an agent, scope, config type, and user.
+- Added Permissions UI support for `userId="*"` to grant all members in a selected group scope.
+- Documented the cross-channel agent permission matrix, including Zalo group context writes and workspace/context file boundaries.
+
+**Security**
+
+- Protected group context file writes now require a real sender with `context_files` or legacy `file_writer` permission.
+- Group file/context/cron permission-store errors now fail closed instead of silently allowing mutation.
+- Backend config permission RPCs validate config types and permission values before storing rules.
+
+**Tests**
+
+- Added focused store and context interceptor coverage for permission preview and protected group context writes.
+
+---
+
 <<<<<<< HEAD
 ## v3.11.3 — 2026-04-26
 

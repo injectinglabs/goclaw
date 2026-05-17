@@ -212,6 +212,7 @@ func isAdminMethod(method string) bool {
 		protocol.MethodConfigSchema,
 		protocol.MethodConfigDefaults,
 		protocol.MethodConfigPermissionsList,
+		protocol.MethodConfigPermissionsCheck,
 		protocol.MethodConfigPermissionsGrant,
 		protocol.MethodConfigPermissionsRevoke,
 
