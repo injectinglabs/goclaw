@@ -84,7 +84,7 @@ type pipelineCallbackSet struct {
 	checkReadOnly      func(state *pipeline.RunState) (*providers.Message, bool)
 	sanitizeContent    func(string) string
 	flushMessages      func(ctx context.Context, sessionKey string, msgs []providers.Message) error
-	updateMetadata     func(ctx context.Context, sessionKey string, usage providers.Usage) error
+	updateMetadata     func(ctx context.Context, sessionKey string, usage providers.Usage, lastPromptTokens, msgCount int) error
 	bootstrapCleanup   func(ctx context.Context, state *pipeline.RunState) error
 	maybeSummarize     func(ctx context.Context, sessionKey string)
 }
@@ -401,10 +401,17 @@ func (l *Loop) makeFlushMessages(req *RunRequest) func(ctx context.Context, sess
 	}
 }
 
-func (l *Loop) makeUpdateMetadata(req *RunRequest) func(ctx context.Context, sessionKey string, usage providers.Usage) error {
-	return func(ctx context.Context, sessionKey string, usage providers.Usage) error {
+func (l *Loop) makeUpdateMetadata(req *RunRequest) func(ctx context.Context, sessionKey string, usage providers.Usage, lastPromptTokens, msgCount int) error {
+	return func(ctx context.Context, sessionKey string, usage providers.Usage, lastPromptTokens, msgCount int) error {
 		l.sessions.UpdateMetadata(ctx, sessionKey, l.model, l.provider.Name(), req.Channel)
 		l.sessions.AccumulateTokens(ctx, sessionKey, int64(usage.PromptTokens), int64(usage.CompletionTokens))
+		// Snapshot of the FINAL iteration's prompt_tokens — what the
+		// context-usage indicator reads from sessions.last_prompt_tokens.
+		// Skip when zero (provider didn't report usage on this run) so we
+		// don't clobber a previously-good value with a meaningless 0.
+		if lastPromptTokens > 0 {
+			l.sessions.SetLastPromptTokens(ctx, sessionKey, lastPromptTokens, msgCount)
+		}
 		// Persist session to DB (matching v2 finalizeRun behavior).
 		// FlushMessages already ran, so all pending messages are in the cache.
 		l.sessions.Save(ctx, sessionKey)
