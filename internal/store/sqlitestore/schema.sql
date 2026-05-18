@@ -278,6 +278,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     spawned_by                    VARCHAR(200),
     spawn_depth                   INT NOT NULL DEFAULT 0,
     metadata                      TEXT DEFAULT '{}',
+    last_prompt_tokens            BIGINT,
+    last_message_count            INT,
     tenant_id                     TEXT NOT NULL REFERENCES tenants(id),
     team_id                       TEXT REFERENCES agent_teams(id) ON DELETE SET NULL,
     created_at                    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
