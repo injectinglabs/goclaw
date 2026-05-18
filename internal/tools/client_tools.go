@@ -115,9 +115,107 @@ func NewExecuteJSTool() Tool {
 	}
 }
 
-// RegisterClientTools adds the browser-extension client tools (refresh_page_content,
-// execute_action, execute_js) to the registry with IsClient=true. Safe to call
-// multiple times (overwrites prior registration).
+// NewNavigateTool returns the navigate client tool.
+// The extension calls chrome.tabs.update to navigate the active tab to the given URL.
+func NewNavigateTool() Tool {
+	return &clientTool{
+		name: "navigate",
+		desc: "Navigates the user's active browser tab to a new URL. Use this to open a job listing, " +
+			"follow an 'Apply' link that opens a new page, or move to a company's external careers site. " +
+			"Navigation starts immediately and returns before the page finishes loading — always follow " +
+			"with wait_for_element or refresh_page_content to confirm the new page is ready.",
+		params: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"url": map[string]any{
+					"type":        "string",
+					"description": "Absolute URL to navigate to (must start with https://)",
+				},
+			},
+			"required": []string{"url"},
+		},
+	}
+}
+
+// NewScrollTool returns the scroll client tool.
+// The extension scrolls the page so lazy-loaded content and off-screen elements become visible.
+func NewScrollTool() Tool {
+	return &clientTool{
+		name: "scroll",
+		desc: "Scrolls the user's active browser tab to reveal more content. Use when the target element " +
+			"is not yet in the viewport, the page uses infinite scroll, or content loads lazily on scroll. " +
+			"After scrolling call refresh_page_content to capture newly visible elements.",
+		params: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"direction": map[string]any{
+					"type":        "string",
+					"enum":        []string{"down", "up", "top", "bottom"},
+					"description": "'down'/'up' scroll by amount px; 'top'/'bottom' jump to page start/end",
+				},
+				"amount": map[string]any{
+					"type":        "integer",
+					"description": "Pixels to scroll for 'down'/'up'. Ignored for 'top'/'bottom'. Default 600.",
+				},
+			},
+			"required": []string{"direction"},
+		},
+	}
+}
+
+// NewWaitForElementTool returns the wait_for_element client tool.
+// Polls the DOM until a CSS selector matches or the timeout expires.
+func NewWaitForElementTool() Tool {
+	return &clientTool{
+		name: "wait_for_element",
+		desc: "Waits for an element to appear in the DOM — use after clicking a button that opens a modal, " +
+			"submitting a form that triggers an AJAX response, or navigating to a new page. " +
+			"Polls every 200 ms up to timeout_ms (max 10 000). Returns success when found, error on timeout.",
+		params: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"selector": map[string]any{
+					"type":        "string",
+					"description": "CSS selector to wait for",
+				},
+				"timeout_ms": map[string]any{
+					"type":        "integer",
+					"description": "Max wait in milliseconds (default 5000, capped at 10000)",
+				},
+			},
+			"required": []string{"selector"},
+		},
+	}
+}
+
+// NewUploadFileTool returns the upload_file client tool.
+// The extension reads the file from its local storage by key and assigns it to a file input.
+func NewUploadFileTool() Tool {
+	return &clientTool{
+		name: "upload_file",
+		desc: "Attaches a file stored in the extension (e.g. the user's resume) to a file input on the page. " +
+			"The user must have saved the file in extension settings first. " +
+			"Use file_key 'resume' for CV/resume uploads. " +
+			"Dispatches a change event so the page's upload handler fires normally.",
+		params: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"selector": map[string]any{
+					"type":        "string",
+					"description": "CSS selector of the <input type=\"file\"> element",
+				},
+				"file_key": map[string]any{
+					"type":        "string",
+					"description": "Key of the stored file to upload, e.g. 'resume' or 'cover_letter'",
+				},
+			},
+			"required": []string{"selector", "file_key"},
+		},
+	}
+}
+
+// RegisterClientTools adds the browser-extension client tools to the registry with
+// IsClient=true. Safe to call multiple times (overwrites prior registration).
 func RegisterClientTools(r *Registry) {
 	r.RegisterWithMetadata(NewRefreshPageContentTool(), ToolMetadata{
 		Group:        "browser",
@@ -131,7 +229,27 @@ func RegisterClientTools(r *Registry) {
 	})
 	r.RegisterWithMetadata(NewExecuteJSTool(), ToolMetadata{
 		Group:        "browser",
-		Capabilities: []ToolCapability{CapMutating}, // conservative — code may mutate
+		Capabilities: []ToolCapability{CapMutating},
+		IsClient:     true,
+	})
+	r.RegisterWithMetadata(NewNavigateTool(), ToolMetadata{
+		Group:        "browser",
+		Capabilities: []ToolCapability{CapMutating},
+		IsClient:     true,
+	})
+	r.RegisterWithMetadata(NewScrollTool(), ToolMetadata{
+		Group:        "browser",
+		Capabilities: []ToolCapability{CapMutating},
+		IsClient:     true,
+	})
+	r.RegisterWithMetadata(NewWaitForElementTool(), ToolMetadata{
+		Group:        "browser",
+		Capabilities: []ToolCapability{CapReadOnly},
+		IsClient:     true,
+	})
+	r.RegisterWithMetadata(NewUploadFileTool(), ToolMetadata{
+		Group:        "browser",
+		Capabilities: []ToolCapability{CapMutating},
 		IsClient:     true,
 	})
 }
