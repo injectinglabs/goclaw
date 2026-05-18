@@ -677,10 +677,15 @@ type MediaResult struct {
 // on *runState without passing 20+ individual variables.
 type runState struct {
 	// Loop control
-	loopDetector   toolLoopState
-	totalUsage     providers.Usage
-	iteration      int
-	totalToolCalls int
+	loopDetector toolLoopState
+	totalUsage   providers.Usage
+	// lastPromptTokens is the prompt_tokens from the FINAL LLM iteration
+	// of this run (last-write-wins as iterations progress). Used to set
+	// sessions.last_prompt_tokens without the per-iteration over-counting
+	// that totalUsage.PromptTokens introduces in tool loops.
+	lastPromptTokens int
+	iteration        int
+	totalToolCalls   int
 
 	// Output accumulators
 	finalContent   string

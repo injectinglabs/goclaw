@@ -67,6 +67,12 @@ func (s *ThinkStage) Execute(ctx context.Context, state *RunState) error {
 		state.Think.TotalUsage.CompletionTokens += resp.Usage.CompletionTokens
 		state.Think.TotalUsage.TotalTokens += resp.Usage.TotalTokens
 		state.Think.TotalUsage.ThinkingTokens += resp.Usage.ThinkingTokens
+		// LastPromptTokens tracks only the last iteration's prompt size —
+		// that's the physical context the model just received, which is
+		// what we'll re-send on the next turn (plus one new user message).
+		// TotalUsage.PromptTokens would over-count across tool-loop
+		// iterations and produce a misleading context-fill indicator.
+		state.Think.LastPromptTokens = resp.Usage.PromptTokens
 	}
 
 	// 6. Handle truncation: retry when tool call args are truncated or malformed.

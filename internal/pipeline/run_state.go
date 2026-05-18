@@ -54,18 +54,19 @@ func NewRunState(input *RunInput, ws *workspace.WorkspaceContext, model string, 
 // BuildResult converts final RunState into a RunResult.
 func (rs *RunState) BuildResult() *RunResult {
 	return &RunResult{
-		RunID:          rs.RunID,
-		Content:        rs.Observe.FinalContent,
-		Thinking:       rs.Observe.FinalThinking,
-		TotalUsage:     rs.Think.TotalUsage,
-		Iterations:     rs.Iteration,
-		ToolCalls:      rs.Tool.TotalToolCalls,
-		LoopKilled:     rs.Tool.LoopKilled,
-		AsyncToolCalls: rs.Tool.AsyncToolCalls,
-		MediaResults:   rs.Tool.MediaResults,
-		Deliverables:   rs.Tool.Deliverables,
-		BlockReplies:   rs.Observe.BlockReplies,
-		LastBlockReply: rs.Observe.LastBlockReply,
+		RunID:            rs.RunID,
+		Content:          rs.Observe.FinalContent,
+		Thinking:         rs.Observe.FinalThinking,
+		TotalUsage:       rs.Think.TotalUsage,
+		LastPromptTokens: rs.Think.LastPromptTokens,
+		Iterations:       rs.Iteration,
+		ToolCalls:        rs.Tool.TotalToolCalls,
+		LoopKilled:       rs.Tool.LoopKilled,
+		AsyncToolCalls:   rs.Tool.AsyncToolCalls,
+		MediaResults:     rs.Tool.MediaResults,
+		Deliverables:     rs.Tool.Deliverables,
+		BlockReplies:     rs.Observe.BlockReplies,
+		LastBlockReply:   rs.Observe.LastBlockReply,
 	}
 }
 

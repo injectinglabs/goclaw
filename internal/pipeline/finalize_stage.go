@@ -111,7 +111,7 @@ func (s *FinalizeStage) Execute(ctx context.Context, state *RunState) error {
 
 	// 5. Update session metadata (token usage)
 	if s.deps.UpdateMetadata != nil {
-		if err := s.deps.UpdateMetadata(ctx, state.Input.SessionKey, state.Think.TotalUsage); err != nil {
+		if err := s.deps.UpdateMetadata(ctx, state.Input.SessionKey, state.Think.TotalUsage, state.Think.LastPromptTokens, state.Messages.TotalLen()); err != nil {
 			slog.Warn("finalize metadata update failed", "err", err)
 		}
 	}
