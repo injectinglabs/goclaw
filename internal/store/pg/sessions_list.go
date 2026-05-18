@@ -176,11 +176,17 @@ func (s *PGSessionStore) ListPagedRich(ctx context.Context, opts store.SessionLi
 	}
 
 	// Fetch page with agent name via LEFT JOIN
+	// estimated_tokens prefers the persisted prompt-token count written by
+	// SetLastPromptTokens after run.completed (the exact tokenizer figure
+	// the upstream provider reports). It falls back to the byte-based
+	// heuristic only when a session has never produced a completion yet,
+	// so a freshly-created chat still gets a non-zero indicator while the
+	// older sessions stop drifting between refreshes.
 	const richCols = `s.session_key, jsonb_array_length(s.messages) AS message_count, s.created_at, s.updated_at,
 		s.label, s.channel, s.user_id, COALESCE(s.metadata, '{}') AS metadata,
 		s.model, s.provider, s.input_tokens, s.output_tokens,
 		COALESCE(a.display_name, '') AS agent_name,
-		octet_length(s.messages::text) / 4 + 12000 AS estimated_tokens,
+		COALESCE(s.last_prompt_tokens, octet_length(s.messages::text) / 4 + 12000) AS estimated_tokens,
 		COALESCE(a.context_window, 200000) AS context_window,
 		s.compaction_count`
 

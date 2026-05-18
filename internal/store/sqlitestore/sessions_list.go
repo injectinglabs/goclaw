@@ -186,12 +186,15 @@ func (s *SQLiteSessionStore) ListPagedRich(ctx context.Context, opts store.Sessi
 		return store.SessionListRichResult{Sessions: []store.SessionInfoRich{}, Total: 0}
 	}
 
-	// Use json_array_length and length() instead of PG-specific functions.
+	// estimated_tokens prefers s.last_prompt_tokens (the exact figure from
+	// the upstream provider, persisted by SetLastPromptTokens) and falls
+	// back to the byte-based heuristic only for sessions that have no
+	// completed runs yet. Matches the Postgres path in pg/sessions_list.go.
 	const richCols = `s.session_key, json_array_length(s.messages), s.created_at, s.updated_at,
 		s.label, s.channel, s.user_id, COALESCE(s.metadata, '{}'),
 		s.model, s.provider, s.input_tokens, s.output_tokens,
 		COALESCE(a.display_name, ''),
-		length(s.messages) / 4 + 12000,
+		COALESCE(s.last_prompt_tokens, length(s.messages) / 4 + 12000),
 		COALESCE(a.context_window, 200000),
 		s.compaction_count`
 

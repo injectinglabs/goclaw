@@ -4,6 +4,7 @@ package sqlitestore
 
 import (
 	"context"
+	"log/slog"
 	"time"
 )
 
@@ -79,10 +80,26 @@ func (s *SQLiteSessionStore) GetContextWindow(ctx context.Context, key string) i
 
 func (s *SQLiteSessionStore) SetLastPromptTokens(ctx context.Context, key string, tokens, msgCount int) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if data, ok := s.cache[sessionCacheKey(ctx, key)]; ok {
 		data.LastPromptTokens = tokens
 		data.LastMessageCount = msgCount
+	}
+	s.mu.Unlock()
+
+	// Mirror of the Postgres path: persist immediately so the SELECT in
+	// sessions_list.go picks up the value across goclaw restarts. SQLite
+	// only matters in tests + local dev, but keeping the two stores in
+	// sync avoids surprises when someone runs the same migration scenario
+	// against an SQLite fixture.
+	tid := tenantIDForInsert(ctx)
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE sessions
+		    SET last_prompt_tokens = ?, last_message_count = ?
+		  WHERE session_key = ? AND tenant_id = ?`,
+		tokens, msgCount, key, tid,
+	); err != nil {
+		slog.Warn("sessions: persist last_prompt_tokens failed (sqlite)",
+			"session_key", key, "tenant_id", tid, "err", err)
 	}
 }
 
