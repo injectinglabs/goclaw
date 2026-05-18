@@ -47,9 +47,16 @@ func (m *CronMethods) handleList(ctx context.Context, client *gateway.Client, re
 		json.Unmarshal(req.Params, &params)
 	}
 
-	userID := ""
-	if !canSeeAll(client.Role(), m.cfg.Gateway.OwnerIDs, client.UserID()) {
-		userID = client.UserID()
+	// Cron jobs are personal reminders, not team artefacts — always filter
+	// by the caller's UserID. The auth-proxy gateway-token path in
+	// router.go gives every browser client RoleAdmin regardless of their
+	// org-role (owner vs member), so canSeeAll() would leak every team
+	// member's reminders to every other team member. Only a real
+	// cross-tenant owner (IsOwner = membership in cfg.Gateway.OwnerIDs)
+	// gets the unscoped view, which is the path used by admin tooling.
+	userID := client.UserID()
+	if client.IsOwner() {
+		userID = ""
 	}
 	jobs := m.service.ListJobs(ctx, params.IncludeDisabled, "", userID)
 
@@ -131,7 +138,10 @@ func (m *CronMethods) handleDelete(ctx context.Context, client *gateway.Client, 
 		return
 	}
 
-	if !canSeeAll(client.Role(), m.cfg.Gateway.OwnerIDs, client.UserID()) {
+	// Personal reminders — only a real cross-tenant owner bypasses the
+	// ownership check. Tenant-level admin (the auth-proxy gateway token
+	// path) doesn't qualify; see handleList for the rationale.
+	if !client.IsOwner() {
 		job, ok := m.service.GetJob(ctx, params.JobID)
 		if !ok || job.UserID != client.UserID() {
 			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrUnauthorized, i18n.T(locale, i18n.MsgPermissionDenied, "cron job")))
@@ -165,7 +175,10 @@ func (m *CronMethods) handleToggle(ctx context.Context, client *gateway.Client, 
 		return
 	}
 
-	if !canSeeAll(client.Role(), m.cfg.Gateway.OwnerIDs, client.UserID()) {
+	// Personal reminders — only a real cross-tenant owner bypasses the
+	// ownership check. Tenant-level admin (the auth-proxy gateway token
+	// path) doesn't qualify; see handleList for the rationale.
+	if !client.IsOwner() {
 		job, ok := m.service.GetJob(ctx, params.JobID)
 		if !ok || job.UserID != client.UserID() {
 			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrUnauthorized, i18n.T(locale, i18n.MsgPermissionDenied, "cron job")))
@@ -213,7 +226,10 @@ func (m *CronMethods) handleUpdate(ctx context.Context, client *gateway.Client, 
 		return
 	}
 
-	if !canSeeAll(client.Role(), m.cfg.Gateway.OwnerIDs, client.UserID()) {
+	// Personal reminders — only a real cross-tenant owner bypasses the
+	// ownership check. Tenant-level admin (the auth-proxy gateway token
+	// path) doesn't qualify; see handleList for the rationale.
+	if !client.IsOwner() {
 		existing, ok := m.service.GetJob(ctx, jobID)
 		if !ok || existing.UserID != client.UserID() {
 			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrUnauthorized, i18n.T(locale, i18n.MsgPermissionDenied, "cron job")))
@@ -266,7 +282,10 @@ func (m *CronMethods) handleRun(ctx context.Context, client *gateway.Client, req
 		return
 	}
 
-	if !canSeeAll(client.Role(), m.cfg.Gateway.OwnerIDs, client.UserID()) {
+	// Personal reminders — only a real cross-tenant owner bypasses the
+	// ownership check. Tenant-level admin (the auth-proxy gateway token
+	// path) doesn't qualify; see handleList for the rationale.
+	if !client.IsOwner() {
 		if job.UserID != client.UserID() {
 			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrUnauthorized, i18n.T(locale, i18n.MsgPermissionDenied, "cron job")))
 			return
