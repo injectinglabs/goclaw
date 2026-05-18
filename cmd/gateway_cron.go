@@ -185,6 +185,12 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 						"agent_id":         agentID,
 						"job_id":           job.ID,
 						"job_name":         job.Name,
+						// user_id is the owner of the cron — event_filter.go
+						// uses it to deliver this event only to that user's WS
+						// sessions, so team-org members don't see another
+						// member's reminder pop up live (reminders.list already
+						// SQL-filters by user_id; this aligns the runtime path).
+						"user_id":          job.UserID,
 					})
 			} else {
 				outMsg := bus.OutboundMessage{

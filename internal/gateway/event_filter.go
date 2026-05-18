@@ -74,6 +74,20 @@ func clientCanReceiveEvent(c *Client, event bus.Event) bool {
 		return true
 	}
 
+	// Cron-delivered (runtime reminder fired): scope to the job owner so
+	// other team-org members don't see another user's reminder pop up live.
+	// gateway_cron.go puts the owner in `user_id` (snake_case); the
+	// `reminders` table path is already SQL-filtered the same way, so a
+	// page refresh hides the row from non-owners — this aligns the live
+	// WS path with that behaviour.
+	if event.Name == protocol.EventCronDelivered {
+		if uid := extractMapField(event.Payload, "user_id"); uid != "" {
+			return uid == c.userID
+		}
+		// No user_id in payload → fail-closed (don't leak across users).
+		return false
+	}
+
 	// Trace events: filter by UserID.
 	if event.Name == protocol.EventTraceUpdated {
 		if uid := extractMapField(event.Payload, "userId"); uid != "" {
