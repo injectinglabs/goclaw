@@ -1,0 +1,45 @@
+name: Notify Downstream Deploy
+
+# Pings the injecting-ai-goclaw repo (our private deploy chain) whenever
+# something lands on this fork's `dev` branch. Without this, downstream
+# only rebuilds when someone pushes there directly — so changes merged
+# here (e.g. by another fork maintainer) sit in ECR-unpushed limbo
+# until the next unrelated commit lands downstream.
+#
+# Downstream's `Deploy to Staging` workflow listens to:
+#   repository_dispatch:
+#     types: [upstream-pushed]
+# and runs the full ECR build + SSM redeploy on the EC2 stage instance.
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger downstream deploy
+        env:
+          # PAT with `actions: write` on injectinglabs/injecting-ai-goclaw.
+          # Rotate by re-running `gh secret set DOWNSTREAM_DISPATCH_PAT`
+          # on this repo with a fresh token.
+          GH_TOKEN: ${{ secrets.DOWNSTREAM_DISPATCH_PAT }}
+        run: |
+          set -e
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::DOWNSTREAM_DISPATCH_PAT secret is not set on this repo."
+            echo "Generate a PAT with actions:write on injectinglabs/injecting-ai-goclaw"
+            echo "and store it via 'gh secret set DOWNSTREAM_DISPATCH_PAT' here."
+            exit 1
+          fi
+          gh api repos/injectinglabs/injecting-ai-goclaw/dispatches \
+            --method POST \
+            --field event_type=upstream-pushed \
+            --field client_payload[sha]=${{ github.sha }} \
+            --field client_payload[ref]=${{ github.ref }} \
+            --field client_payload[actor]=${{ github.actor }}
+          echo "Dispatched upstream-pushed event to injecting-ai-goclaw (sha=${{ github.sha }})"
