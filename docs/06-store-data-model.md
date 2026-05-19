@@ -537,7 +537,7 @@ flowchart TD
 | `team_tasks` | Shared task board | `subject`, `status`, `owner_agent_id`, `blocked_by` (UUID[]), `tsv` (FTS) |
 | `team_messages` | Peer-to-peer mailbox | `from_agent_id`, `to_agent_id`, `message_type`, `read` |
 | `delegation_history` | Persisted delegation records | `source_agent_id`, `target_agent_id`, `mode`, `status`, `result`, `trace_id` |
-| `sessions` | Conversation history | `session_key` (UNIQUE), `messages` (JSONB), `summary`, token counts |
+| `sessions` | Conversation history | `session_key` (UNIQUE), `messages` (JSONB), `summary`, token counts, `last_prompt_tokens` (real `prompt_tokens` from the most recent successful LLM call — context-window snapshot for clients, set last-write-wins by the pipeline so the value reflects the FINAL iteration's call, not cumulative across tool-loop iterations) |
 | `memory_documents` | Memory docs | UNIQUE(agent_id, COALESCE(user_id, ''), path) |
 | `memory_chunks` | Chunked + embedded text | `embedding` (VECTOR), `tsv` (TSVECTOR) |
 | `llm_providers` | Provider configuration | `api_key` (AES-256-GCM encrypted) |
