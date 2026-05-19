@@ -116,6 +116,7 @@ type chatSendParams struct {
 	Stream     bool            `json:"stream"`
 	Media      json.RawMessage `json:"media,omitempty"` // []string (legacy) or []chatMediaItem
 	PageHint   *pageHint       `json:"pageHint,omitempty"`
+	Model      string          `json:"model,omitempty"`
 }
 
 // pageHint carries the URL+title of the user's currently active browser tab.
@@ -310,15 +311,16 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 		}
 
 		result, err := loop.Run(runCtx, agent.RunRequest{
-			SessionKey: sessionKey,
-			Message:    message,
-			Media:      mediaFiles,
-			Channel:    "ws",
-			ChatID:     userID, // use stable userID for team/workspace isolation (not ephemeral client.ID())
-			RunID:      runID,
-			UserID:     userID,
-			Stream:     params.Stream,
-			InjectCh:   injectCh,
+			SessionKey:    sessionKey,
+			Message:       message,
+			Media:         mediaFiles,
+			Channel:       "ws",
+			ChatID:        userID, // use stable userID for team/workspace isolation (not ephemeral client.ID())
+			RunID:         runID,
+			UserID:        userID,
+			Stream:        params.Stream,
+			InjectCh:      injectCh,
+			ModelOverride: params.Model,
 			// Wire trace ID back to the active run so force-abort can mark the
 			// correct trace as cancelled if the goroutine does not exit within 3s.
 			OnTraceCreated: func(traceID uuid.UUID) {
