@@ -35,6 +35,12 @@ func (l *Loop) pipelineCallbacks(req *RunRequest, bridgeRS *runState) pipelineCa
 		event.TenantID = l.tenantID
 		l.emit(event)
 	}
+	// Shared state between enrichMedia (which persists the upload and
+	// computes MediaRefs) and flushMessages (which writes the user row).
+	// Without this, MediaRefs land nowhere and the frontend's reload
+	// path sees `media_refs: []` after a refresh — attachments disappear
+	// from the UI even though the bytes were saved to .uploads/.
+	var currentMediaRefs []providers.MediaRef
 	return pipelineCallbackSet{
 		emitRun:            emitRun,
 		injectContext:      l.makeInjectContext(req),
@@ -42,7 +48,7 @@ func (l *Loop) pipelineCallbacks(req *RunRequest, bridgeRS *runState) pipelineCa
 		resolveWorkspace:   l.makeResolveWorkspace(req),
 		loadContextFiles:   l.makeLoadContextFiles(),
 		buildMessages:      l.makeBuildMessages(),
-		enrichMedia:        l.makeEnrichMedia(req),
+		enrichMedia:        l.makeEnrichMedia(req, &currentMediaRefs),
 		injectReminders:    l.makeInjectReminders(req),
 		buildFilteredTools: l.makeBuildFilteredTools(req),
 		callLLM:            l.makeCallLLM(req, emitRun),
@@ -55,7 +61,7 @@ func (l *Loop) pipelineCallbacks(req *RunRequest, bridgeRS *runState) pipelineCa
 		processToolResult:  l.makeProcessToolResult(req, bridgeRS),
 		checkReadOnly:      l.makeCheckReadOnly(req, bridgeRS),
 		sanitizeContent:    SanitizeAssistantContent,
-		flushMessages:      l.makeFlushMessages(req),
+		flushMessages:      l.makeFlushMessages(req, &currentMediaRefs),
 		updateMetadata:     l.makeUpdateMetadata(req),
 		bootstrapCleanup:   l.makeBootstrapCleanup(),
 		maybeSummarize:     l.maybeSummarize,
@@ -162,7 +168,7 @@ func (l *Loop) makeLoadSessionHistory() func(ctx context.Context, sessionKey str
 	}
 }
 
-func (l *Loop) makeEnrichMedia(req *RunRequest) func(ctx context.Context, state *pipeline.RunState) error {
+func (l *Loop) makeEnrichMedia(req *RunRequest, capturedRefs *[]providers.MediaRef) func(ctx context.Context, state *pipeline.RunState) error {
 	return func(ctx context.Context, state *pipeline.RunState) error {
 		// enrichInputMedia enriches messages in-place: attaches inline images,
 		// reloads historical media, enriches <media:*> tags, populates context
@@ -172,7 +178,13 @@ func (l *Loop) makeEnrichMedia(req *RunRequest) func(ctx context.Context, state 
 		if len(msgs) == 0 {
 			return nil
 		}
-		enrichedCtx, enrichedMsgs, _ := l.enrichInputMedia(ctx, req, msgs)
+		enrichedCtx, enrichedMsgs, mediaRefs := l.enrichInputMedia(ctx, req, msgs)
+		// Hand the current-turn MediaRefs to makeFlushMessages so the user
+		// row written to sessions.messages carries them — required for the
+		// frontend to restore attachments after a page reload.
+		if capturedRefs != nil {
+			*capturedRefs = mediaRefs
+		}
 		// Propagate enriched context (media images/docs/audio/video refs for tools).
 		state.Ctx = enrichedCtx
 		// Update history with enriched messages (media tags, inline images).
@@ -380,7 +392,7 @@ func (l *Loop) makeRunMemoryFlush() func(ctx context.Context, state *pipeline.Ru
 	}
 }
 
-func (l *Loop) makeFlushMessages(req *RunRequest) func(ctx context.Context, sessionKey string, msgs []providers.Message) error {
+func (l *Loop) makeFlushMessages(req *RunRequest, capturedRefs *[]providers.MediaRef) func(ctx context.Context, sessionKey string, msgs []providers.Message) error {
 	// Track whether user message has been persisted (first flush only).
 	// v2 adds user message to pendingMsgs explicitly; v3 keeps it in history
 	// (via BuildMessages) so it never reaches FlushPending. This closure
@@ -389,10 +401,19 @@ func (l *Loop) makeFlushMessages(req *RunRequest) func(ctx context.Context, sess
 	return func(ctx context.Context, sessionKey string, msgs []providers.Message) error {
 		if !userMsgFlushed && !req.HideInput && req.Message != "" {
 			userMsgFlushed = true
-			l.sessions.AddMessage(ctx, sessionKey, providers.Message{
+			userMsg := providers.Message{
 				Role:    "user",
 				Content: req.Message,
-			})
+			}
+			// Attach current-turn MediaRefs (populated by makeEnrichMedia
+			// after persistMedia ran). Without this the upload bytes live
+			// in .uploads/ but the message row has no pointer to them, so
+			// sessions.preview returns media_refs:[] and the UI can't
+			// restore the attachment chip on reload.
+			if capturedRefs != nil && len(*capturedRefs) > 0 {
+				userMsg.MediaRefs = *capturedRefs
+			}
+			l.sessions.AddMessage(ctx, sessionKey, userMsg)
 		}
 		for _, msg := range msgs {
 			l.sessions.AddMessage(ctx, sessionKey, msg)
