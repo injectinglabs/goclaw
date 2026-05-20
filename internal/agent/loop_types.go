@@ -625,6 +625,13 @@ type RunRequest struct {
 	HideInput     bool   // don't persist input message in session history (announce runs)
 	ContentSuffix string // appended to assistant response before saving (e.g. image markdown for WS)
 
+	// ClientKind identifies the WS caller for tool-palette tailoring.
+	// "extension" keeps browser page-tools (execute_action, execute_js, navigate, …);
+	// "website" or any other non-extension value strips them so the LLM doesn't
+	// waste turns invoking client tools the website cannot service. Empty =
+	// legacy behavior (no filtering) for non-WS channels and pre-flag callers.
+	ClientKind string
+
 	// Mid-run message injection channel (nil = disabled).
 	// When set, the loop drains this channel at turn boundaries to inject
 	// user follow-up messages into the running conversation.
