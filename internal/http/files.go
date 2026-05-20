@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -245,9 +246,18 @@ func (h *FilesHandler) handleServe(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", ct)
 	}
 
-	// Trigger browser download with original filename when ?download=true
+	// Trigger browser download with original filename when ?download=true.
+	// Optional ?name=foo.txt overrides the on-disk basename (used by the chat
+	// UI to deliver "bananas.txt" instead of the cache UUID). Sanitised to a
+	// single path-component to block header-injection and traversal attempts.
 	if r.URL.Query().Get("download") == "true" {
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(absPath)))
+		dlName := filepath.Base(absPath)
+		if override := r.URL.Query().Get("name"); override != "" {
+			if safe := sanitizeDownloadName(override); safe != "" {
+				dlName = safe
+			}
+		}
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, dlName, urlEncodePath(dlName)))
 	}
 
 	http.ServeFile(w, r, absPath)
@@ -329,6 +339,38 @@ func fuzzyMatchInDir(absPath string) string {
 		}
 	}
 	return ""
+}
+
+// sanitizeDownloadName collapses a caller-supplied filename to a single
+// path component, strips control characters and quotes, and caps the
+// length so it can safely sit in a Content-Disposition header. Returns
+// "" when nothing usable remains; the caller falls back to filepath.Base.
+func sanitizeDownloadName(name string) string {
+	name = filepath.Base(name) // drop any "../" or directory parts
+	if name == "." || name == "/" || name == `\` {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range name {
+		// Drop ASCII control chars + the quote/backslash chars that would
+		// break the quoted "filename=..." token. UTF-8 letters pass through
+		// — the encoded `filename*=UTF-8''…` form carries the canonical name.
+		if r < 0x20 || r == 0x7f || r == '"' || r == '\\' {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	out := b.String()
+	if len(out) > 200 {
+		out = out[:200]
+	}
+	return out
+}
+
+// urlEncodePath percent-encodes a filename for RFC 5987 `filename*=UTF-8''`.
+// Uses net/url's PathEscape so spaces become %20 (not '+').
+func urlEncodePath(s string) string {
+	return url.PathEscape(s)
 }
 
 func isNumeric(s string) bool {
