@@ -1,0 +1,179 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: prod-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  GOCLAW_REPO: goclaw-custom
+  ASG_NAME: goclaw-prod-asg
+  ROLE_ARN: arn:aws:iam::707600960562:role/github-actions-goclaw
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # required for OIDC → AWS STS
+      contents: read
+    outputs:
+      image: ${{ steps.emit.outputs.image }}
+      sha: ${{ steps.meta.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Short SHA
+        id: meta
+        run: echo "sha=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push GoClaw image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            ENABLE_FULL_SKILLS=true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.GOCLAW_REPO }}:prod
+            ${{ steps.ecr.outputs.registry }}/${{ env.GOCLAW_REPO }}:${{ steps.meta.outputs.sha }}
+          cache-from: type=registry,ref=${{ steps.ecr.outputs.registry }}/${{ env.GOCLAW_REPO }}:buildcache
+          cache-to: type=registry,ref=${{ steps.ecr.outputs.registry }}/${{ env.GOCLAW_REPO }}:buildcache,mode=max
+
+      - name: Emit image ref
+        id: emit
+        run: echo "image=${{ steps.ecr.outputs.registry }}/${{ env.GOCLAW_REPO }}:prod" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Notify Telegram — production deploy started
+        env:
+          # Pipe through env so commit messages with parens/quotes/dashes
+          # don't break bash interpolation (e.g. "(#32)" → "command not found").
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          COMMIT_SHA="${{ needs.build.outputs.sha }}"
+          SUBJECT=$(printf '%s' "$COMMIT_MSG" | head -n 1)
+          TEXT="🟡 <b>GOCLAW — PRODUCTION DEPLOY STARTED</b>
+
+          <b>Commit:</b> <code>${COMMIT_SHA}</code> ${SUBJECT}
+          <b>By:</b> ${ACTOR}"
+
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\": \"${{ secrets.TELEGRAM_CHAT_ID }}\", \"text\": $(echo "$TEXT" | jq -Rs .), \"parse_mode\": \"HTML\", \"disable_web_page_preview\": true}" \
+            > /dev/null
+
+      - name: Check ASG desired capacity
+        id: asg
+        run: |
+          DESIRED=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names ${{ env.ASG_NAME }} \
+            --query 'AutoScalingGroups[0].DesiredCapacity' --output text)
+          echo "desired=$DESIRED" >> $GITHUB_OUTPUT
+          echo "ASG desired capacity: $DESIRED"
+
+      - name: Start & watch instance refresh
+        if: steps.asg.outputs.desired != '0'
+        run: |
+          # SkipMatching MUST be false: the :prod image tag is mutable.
+          # With SkipMatching:true AWS skips in-service instances because the
+          # launch template version hasn't changed, so the new ECR image is
+          # published but never pulled. False forces a rolling rotation so
+          # user-data.sh runs `docker compose pull` on each fresh instance.
+          REFRESH_ID=$(aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name ${{ env.ASG_NAME }} \
+            --preferences '{"MinHealthyPercentage":50,"SkipMatching":false,"InstanceWarmup":240}' \
+            --region ${{ env.AWS_REGION }} --query 'InstanceRefreshId' --output text)
+          echo "Refresh: $REFRESH_ID"
+
+          while true; do
+            STATUS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name ${{ env.ASG_NAME }} \
+              --instance-refresh-ids $REFRESH_ID \
+              --query 'InstanceRefreshes[0].Status' --output text)
+            PROGRESS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name ${{ env.ASG_NAME }} \
+              --instance-refresh-ids $REFRESH_ID \
+              --query 'InstanceRefreshes[0].PercentageComplete' --output text)
+            echo "Status: $STATUS  Progress: ${PROGRESS}%"
+            case "$STATUS" in
+              Successful) exit 0 ;;
+              Failed|Cancelled|RollbackSuccessful|RollbackFailed)
+                echo "Refresh terminal state: $STATUS"
+                aws autoscaling describe-instance-refreshes \
+                  --auto-scaling-group-name ${{ env.ASG_NAME }} \
+                  --instance-refresh-ids $REFRESH_ID \
+                  --query 'InstanceRefreshes[0].StatusReason' --output text
+                exit 1
+                ;;
+            esac
+            sleep 30
+          done
+
+      - name: Skipped — ASG is at desired=0 (images published only)
+        if: steps.asg.outputs.desired == '0'
+        run: |
+          echo "Prod ASG is paused at desired=0."
+          echo "New image (:prod, :${{ needs.build.outputs.sha }}) is in ECR."
+          echo "To launch: aws autoscaling update-auto-scaling-group --auto-scaling-group-name ${{ env.ASG_NAME }} --min-size 2 --desired-capacity 2"
+
+      - name: Notify Telegram — production deploy succeeded
+        if: success()
+        run: |
+          COMMIT_SHA="${{ needs.build.outputs.sha }}"
+          STATE_NOTE=""
+          if [ "${{ steps.asg.outputs.desired }}" = "0" ]; then
+            STATE_NOTE=" (images published; ASG paused at 0)"
+          fi
+          TEXT="🟢 <b>GOCLAW — PRODUCTION DEPLOY SUCCEEDED</b>${STATE_NOTE}
+
+          <b>Commit:</b> <code>${COMMIT_SHA}</code>"
+
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\": \"${{ secrets.TELEGRAM_CHAT_ID }}\", \"text\": $(echo "$TEXT" | jq -Rs .), \"parse_mode\": \"HTML\", \"disable_web_page_preview\": true}" \
+            > /dev/null
+
+      - name: Notify Telegram — production deploy failed
+        if: failure()
+        run: |
+          COMMIT_SHA="${{ needs.build.outputs.sha }}"
+          TEXT="🔴 <b>GOCLAW — PRODUCTION DEPLOY FAILED</b>
+
+          <b>Commit:</b> <code>${COMMIT_SHA}</code>
+          Check GitHub Actions logs."
+
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\": \"${{ secrets.TELEGRAM_CHAT_ID }}\", \"text\": $(echo "$TEXT" | jq -Rs .), \"parse_mode\": \"HTML\", \"disable_web_page_preview\": true}" \
+            > /dev/null
