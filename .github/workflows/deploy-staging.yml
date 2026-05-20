@@ -80,7 +80,9 @@ jobs:
   # secrets and compose template are. We fire a repository_dispatch to
   # kick off its `Deploy to Staging` workflow once the new goclaw image
   # is in ECR. Avoids two workflows racing each other on the same SSM
-  # agent / docker-compose host.
+  # agent / docker-compose host. Telegram notifications are intentionally
+  # left to injecting-ai-goclaw — it has start/end pairs that cover the
+  # full deploy. Two extra "image pushed" pings from here just add noise.
   dispatch:
     needs: [build]
     runs-on: ubuntu-latest
@@ -94,13 +96,3 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/injectinglabs/injecting-ai-goclaw/dispatches \
             -d "{\"event_type\":\"goclaw-image-updated\",\"client_payload\":{\"sha\":\"${{ needs.build.outputs.sha }}\",\"image\":\"${{ needs.build.outputs.image }}\"}}"
-
-      - name: Notify Telegram — image pushed, deploy dispatched
-        if: always()
-        run: |
-          STATUS="${{ job.status }}"
-          EMOJI="🟢"
-          [ "$STATUS" != "success" ] && EMOJI="🔴"
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "{\"chat_id\": \"${{ secrets.TELEGRAM_CHAT_ID }}\", \"text\": \"$EMOJI GoClaw image ${{ needs.build.outputs.sha }} → dispatch $STATUS\"}" > /dev/null
