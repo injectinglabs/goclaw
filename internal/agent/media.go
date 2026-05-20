@@ -107,6 +107,10 @@ func (l *Loop) persistMedia(sessionKey string, files []bus.MediaFile, workspace 
 			MimeType: mime,
 			Kind:     kind,
 			Path:     dstPath,
+			// f.Filename comes from the channel adapter (Telegram, /v1/media/upload).
+			// Keep it so the chat UI can show "Report Q4.pdf" instead of the
+			// uuid the storage layer assigned.
+			Filename: f.Filename,
 		})
 		slog.Debug("media: persisted file", "id", id, "kind", kind, "path", dstPath, "agent", l.id)
 	}
