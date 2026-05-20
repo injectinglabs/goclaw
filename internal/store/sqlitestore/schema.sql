@@ -674,14 +674,19 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     settings     TEXT NOT NULL DEFAULT '{}',
     enabled      BOOLEAN NOT NULL DEFAULT 1,
     created_by   VARCHAR(255) NOT NULL,
-    tenant_id    TEXT NOT NULL REFERENCES tenants(id),
+    -- tenant_id is nullable: NULL = global row visible to all tenants.
+    tenant_id    TEXT REFERENCES tenants(id),
     created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
--- tenant-scoped unique name (migration 27 Phase I)
-CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_servers_tenant_name ON mcp_servers(tenant_id, name);
-CREATE INDEX IF NOT EXISTS idx_mcp_servers_tenant ON mcp_servers(tenant_id);
+-- Partial unique indexes (schema v25):
+--   tenant-scoped rows: unique name within a tenant.
+--   global rows: unique name across the whole table.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_servers_tenant_name ON mcp_servers(tenant_id, name) WHERE tenant_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_servers_global_name ON mcp_servers(name) WHERE tenant_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_mcp_servers_tenant ON mcp_servers(tenant_id) WHERE tenant_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_mcp_servers_global ON mcp_servers(name) WHERE tenant_id IS NULL;
 
 -- ============================================================
 -- Table: mcp_agent_grants

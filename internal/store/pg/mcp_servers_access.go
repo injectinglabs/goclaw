@@ -148,20 +148,42 @@ func (s *PGMCPServerStore) RevokeFromUser(ctx context.Context, serverID uuid.UUI
 // --- Resolution ---
 
 func (s *PGMCPServerStore) ListAccessible(ctx context.Context, agentID uuid.UUID, userID string) ([]store.MCPAccessInfo, error) {
-	tClause, tArgs, _, err := scopeClauseAlias(ctx, 3, "ms")
+	// Build the tenant scope clause for the grants table (mag) — grants are always
+	// per-tenant. The server table (ms) uses an OR-IS-NULL clause so that global
+	// servers (tenant_id IS NULL) are included as long as there is an explicit
+	// mcp_agent_grants row for the caller's tenant+agent.
+	tClause, tArgs, nextParam, err := scopeClauseAlias(ctx, 3, "mag")
 	if err != nil {
 		return nil, err
 	}
+
+	// Build the server-scope filter: tenant-owned OR global.
+	var serverScopeClause string
+	var serverScopeArgs []any
+	if store.IsCrossTenant(ctx) {
+		// Cross-tenant context: no restriction on ms.tenant_id.
+		serverScopeClause = ""
+	} else {
+		tenantID := store.TenantIDFromContext(ctx)
+		if tenantID == uuid.Nil {
+			return []store.MCPAccessInfo{}, nil
+		}
+		serverScopeClause = fmt.Sprintf(` AND (ms.tenant_id = $%d OR ms.tenant_id IS NULL)`, nextParam)
+		serverScopeArgs = append(serverScopeArgs, tenantID)
+	}
+
+	allArgs := append(append([]any{agentID, userID}, tArgs...), serverScopeArgs...)
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT ms.id, ms.name, ms.display_name, ms.transport, ms.command, ms.args, ms.url, ms.headers, ms.env,
 		 ms.api_key, ms.tool_prefix, ms.timeout_sec, ms.settings, ms.enabled, ms.created_by, ms.created_at, ms.updated_at,
+		 ms.tenant_id,
 		 mag.tool_allow, mag.tool_deny
 		 FROM mcp_servers ms
 		 INNER JOIN mcp_agent_grants mag ON ms.id = mag.server_id AND mag.agent_id = $1 AND mag.enabled = true
 		 LEFT JOIN mcp_user_grants mug ON ms.id = mug.server_id AND mug.user_id = $2
 		 WHERE ms.enabled = true
-		   AND (mug.id IS NULL OR mug.enabled = true)`+tClause,
-		append([]any{agentID, userID}, tArgs...)...)
+		   AND (mug.id IS NULL OR mug.enabled = true)`+tClause+serverScopeClause,
+		allArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +194,7 @@ func (s *PGMCPServerStore) ListAccessible(ctx context.Context, agentID uuid.UUID
 		var srv store.MCPServerData
 		var displayName, command, url, apiKey, toolPrefix *string
 		var args, headers, env *[]byte
+		var tenantID *uuid.UUID
 		var toolAllowJSON, toolDenyJSON *[]byte
 
 		if err := rows.Scan(
@@ -179,10 +202,12 @@ func (s *PGMCPServerStore) ListAccessible(ctx context.Context, agentID uuid.UUID
 			&args, &url, &headers, &env,
 			&apiKey, &toolPrefix, &srv.TimeoutSec,
 			&srv.Settings, &srv.Enabled, &srv.CreatedBy, &srv.CreatedAt, &srv.UpdatedAt,
+			&tenantID,
 			&toolAllowJSON, &toolDenyJSON,
 		); err != nil {
 			continue
 		}
+		srv.IsGlobal = tenantID == nil
 		srv.DisplayName = derefStr(displayName)
 		srv.Command = derefStr(command)
 		srv.URL = derefStr(url)

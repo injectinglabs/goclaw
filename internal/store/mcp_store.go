@@ -25,6 +25,10 @@ type MCPServerData struct {
 	Settings    json.RawMessage `json:"settings,omitempty" db:"settings"`
 	Enabled     bool            `json:"enabled" db:"enabled"`
 	CreatedBy   string          `json:"created_by" db:"created_by"`
+	// IsGlobal is true when this server has no tenant scope (tenant_id IS NULL in DB).
+	// Global servers are visible to all tenants but mutable only by platform admin
+	// (master scope). Populated after scan; not stored directly in this field.
+	IsGlobal bool `json:"is_global,omitempty" db:"-"`
 }
 
 // MCPAgentGrant represents an MCP server grant to an agent.
