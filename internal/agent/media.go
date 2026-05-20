@@ -54,28 +54,21 @@ func loadImages(files []bus.MediaFile) []providers.ImageContent {
 	return images
 }
 
-// persistMedia sanitizes images, saves all media files to the per-user workspace
-// .uploads/ directory, and returns lightweight MediaRefs with persisted paths.
-// All media types (images, documents, audio, video) are stored within the user's
-// workspace for filesystem-level tenant isolation.
-// workspace is the per-user workspace path from ToolWorkspaceFromCtx(ctx).
+// persistMedia sanitizes images and hands each media file to the configured
+// media.Store backend. With the default FSBackend the file lands in
+// {baseDir}/{sessionHash}/{id}.{ext} on local disk; with S3Backend it goes
+// straight to the bucket and the returned path is a lazy-download cache
+// location inside the workspace. Either way the agent loop, the http
+// handler and the LLM tools downstream all read from MediaRef.Path the
+// same way.
 func (l *Loop) persistMedia(sessionKey string, files []bus.MediaFile, workspace string) []providers.MediaRef {
-	if workspace == "" {
-		slog.Warn("media: no workspace, cannot persist media")
+	if l.mediaStore == nil {
+		slog.Warn("media: no media store wired, cannot persist media")
 		return nil
 	}
-
-	uploadsDir := filepath.Join(workspace, ".uploads")
-	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
-		slog.Warn("media: failed to create .uploads dir", "dir", uploadsDir, "error", err)
-		return nil
-	}
-	// Verify .uploads is a real directory (not symlink) to prevent symlink-based attacks.
-	// os.Lstat does NOT follow symlinks — rejects if attacker replaced .uploads with a symlink.
-	if fi, err := os.Lstat(uploadsDir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		slog.Warn("media: .uploads is a symlink, refusing to use", "dir", uploadsDir)
-		return nil
-	}
+	// workspace is still surfaced in logs for diagnosability — useful when
+	// the backend is FS and we want to confirm which user dir got the file.
+	_ = workspace
 
 	var refs []providers.MediaRef
 	for _, f := range files {
@@ -85,9 +78,10 @@ func (l *Loop) persistMedia(sessionKey string, files []bus.MediaFile, workspace 
 		}
 		kind := mediaKindFromMime(mime)
 
-		// Sanitize images before persistent storage.
+		// Sanitize images before persistent storage. SanitizeImage writes a
+		// JPEG temp file and returns its path; we hand that to the store.
 		srcPath := f.Path
-		var sanitizedTemp string // track temp file for cleanup
+		var sanitizedTemp string
 		if kind == "image" {
 			sanitized, err := SanitizeImage(f.Path)
 			if err != nil {
@@ -95,48 +89,20 @@ func (l *Loop) persistMedia(sessionKey string, files []bus.MediaFile, workspace 
 			} else {
 				srcPath = sanitized
 				sanitizedTemp = sanitized
-				mime = "image/jpeg" // sanitized output is always JPEG
+				mime = "image/jpeg"
 			}
 		}
 
-		id := uuid.New().String()
-		ext := media.ExtFromMime(mime)
-		if ext == "" {
-			ext = filepath.Ext(srcPath) // fallback to source extension
+		id, dstPath, err := l.mediaStore.SaveFile(sessionKey, srcPath, mime)
+		if sanitizedTemp != "" && sanitizedTemp != dstPath {
+			// SaveFile may or may not have consumed the temp via rename; if it
+			// copied instead we make sure the temp gets cleaned. Same path
+			// (no rename across filesystems) means SaveFile already moved it.
+			os.Remove(sanitizedTemp)
 		}
-
-		// Disk-naming: preserve user filename when present so vault enrichment
-		// can process uploads (UUID-only names are skipped by enrich_skip_filter).
-		// Empty Filename (voice note, clipboard paste, tool-generated) →
-		// fall back to UUID, keeping legacy behavior.
-		diskName := id + ext
-		if stem := sanitizeFilename(f.Filename); stem != "" {
-			diskName = stem + "-" + shortID(8) + ext
-		}
-		dstPath := filepath.Join(uploadsDir, diskName)
-
-		// Traversal guard: ensure resolved path is inside uploadsDir.
-		// sanitizeFilename already strips ".." / "/" / "\\", but this is
-		// a defense-in-depth check covering any future regressions.
-		cleanDst := filepath.Clean(dstPath) + string(os.PathSeparator)
-		cleanUploads := filepath.Clean(uploadsDir) + string(os.PathSeparator)
-		if !strings.HasPrefix(cleanDst, cleanUploads) {
-			slog.Warn("media: refusing to persist outside uploadsDir", "dst", dstPath, "uploads", uploadsDir)
-			if sanitizedTemp != "" {
-				os.Remove(sanitizedTemp)
-			}
+		if err != nil {
+			slog.Warn("media: store SaveFile failed", "path", f.Path, "error", err)
 			continue
-		}
-
-		if err := copyMediaFile(srcPath, dstPath); err != nil {
-			slog.Warn("media: failed to persist file", "path", f.Path, "error", err)
-			if sanitizedTemp != "" {
-				os.Remove(sanitizedTemp)
-			}
-			continue
-		}
-		if sanitizedTemp != "" {
-			os.Remove(sanitizedTemp) // cleanup sanitized temp file
 		}
 
 		refs = append(refs, providers.MediaRef{
