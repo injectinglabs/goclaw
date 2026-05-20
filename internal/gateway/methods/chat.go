@@ -117,6 +117,11 @@ type chatSendParams struct {
 	Media      json.RawMessage `json:"media,omitempty"` // []string (legacy) or []chatMediaItem
 	PageHint   *pageHint       `json:"pageHint,omitempty"`
 	Model      string          `json:"model,omitempty"`
+	// ClientKind identifies the WS caller so the tool palette can be tailored:
+	// "extension" exposes browser page-tools (execute_action, execute_js, etc.),
+	// any other value (e.g. "website") strips them. Empty = legacy/extension
+	// behavior — backward compatible until all clients tag themselves.
+	ClientKind string `json:"clientKind,omitempty"`
 }
 
 // pageHint carries the URL+title of the user's currently active browser tab.
@@ -321,6 +326,7 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 			Stream:        params.Stream,
 			InjectCh:      injectCh,
 			ModelOverride: params.Model,
+			ClientKind:    params.ClientKind,
 			// Wire trace ID back to the active run so force-abort can mark the
 			// correct trace as cancelled if the goroutine does not exit within 3s.
 			OnTraceCreated: func(traceID uuid.UUID) {

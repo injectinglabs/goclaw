@@ -79,6 +79,27 @@ func (l *Loop) buildFilteredTools(req *RunRequest, hadBootstrap bool, iteration,
 		toolDefs = filtered
 	}
 
+	// Strip browser-extension client tools when the caller cannot service them.
+	// Client tools (execute_action, execute_js, refresh_page_content, navigate, …)
+	// are registered once in the global registry and would otherwise leak into
+	// every WS palette — including the website chat, which has no tabs/DOM and
+	// would only return stub errors, burning the model's tool-call budget on
+	// dead-end calls. ClientKind="extension" keeps them; "website" (or any
+	// other non-empty non-"extension" value) strips them. Empty preserves
+	// pre-flag behavior so non-WS channels and pre-rollout extension builds
+	// keep working unchanged.
+	if req.ClientKind != "" && req.ClientKind != "extension" {
+		filtered := toolDefs[:0:0]
+		for _, td := range toolDefs {
+			if l.registry.GetMetadata(td.Function.Name).IsClient {
+				delete(allowedTools, td.Function.Name)
+				continue
+			}
+			filtered = append(filtered, td)
+		}
+		toolDefs = filtered
+	}
+
 	// Hide channel-specific tools when channel type doesn't match.
 	if req.ChannelType != "" {
 		filtered := toolDefs[:0:0]
