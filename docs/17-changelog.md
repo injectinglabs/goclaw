@@ -361,6 +361,23 @@ Filenames provided by users for chat media uploads now survive the channel adapt
 
 **Impact**: Existing flows with empty `Filename` are unaffected (UUID-named as before). New flows with filenames produce human-readable, enrichable disk names. Zero breaking changes.
 
+#### Fork-local Media Refactor: media.Store + S3 Backend (2026-05-20)
+
+This is an `injectinglabs/goclaw` fork-local refactor (not yet in upstream). The slug-based disk naming above (`{sanitized-stem}-{8hex}{ext}`) was REPLACED by a UUID-only naming scheme inside the new `media.Store` façade. Filenames now live on `MediaRef.Filename` as a separate display field — they are no longer encoded in the on-disk path.
+
+**Why**: chat uploads need durable storage that survives EC2 instance refresh and per-session host-volume cleanup. Local-disk-only persistence was orphaning files after the workspace cleanup-cron ran, and there was no way to share files between agent loops on different hosts.
+
+**What changed**:
+- **`internal/media/store.go`** wraps a `Backend` interface — `FSBackend` for dev (local disk), `S3Backend` for stage/prod (`MEDIA_S3_BUCKET`, prefix configurable). Saves return a media ID + a local cache path the agent can read immediately.
+- **`persistMedia`** (chat uploads) routes through `mediaStore.SaveFile(sessionKey, srcPath, mime)` — no more direct workspace writes for inbound media.
+- **`write_file`** with `deliver=true` mirrors the just-written file into the media store via a `MediaUploadFunc` callback, so deliverables also survive the workspace cron.
+- **Session teardown**: `PGSessionStore.OnDelete` calls `mediaStore.DeleteSession`, and `S3Backend.Delete` wipes both the bucket prefix and the matching local cache directory so nothing accumulates after a session disappears.
+- **Filenames**: `bus.MediaFile.Filename` propagates through `bridgeRS.mediaResults` → `state.Tool.MediaResults` → `MediaRef.Filename` and is preserved on history rows. The `{slug}-{8hex}` filesystem layer is gone — sanitization now lives in the consumer (chat UI, vault enrichment), not the storage layer.
+- **`/v1/files` downloads**: handler accepts `?download=true&name=<filename>` to emit `Content-Disposition: attachment; filename="…"; filename*=UTF-8''…`, so browsers save files with the friendly name. The `?ft=` signed token covers only the URL path so the extra query params don't invalidate it; the `name` parameter is sanitised to a single path component before going into the header.
+- **`TestPersistMedia_NamingScheme` test was deleted** — it guarded the now-removed slug logic and would always fail against the new UUID-only backend.
+
+**Impact**: vault enrichment that skipped UUID-named files still does so (the changelog entry above still describes the gating), but now nearly every media path is UUID-named, so vault enrichment leans on `MediaRef.Filename` instead of the disk name when deciding whether to process. This is a behavioural change for the enrich filter — see `internal/vault/enrich_skip_filter.go`.
+
 ### Security
 
 #### Tenant-Scope Hotfix (2026-04-12)
