@@ -112,4 +112,5 @@ type MediaResult struct {
 	ContentType string
 	Size        int64
 	AsVoice     bool
+	Filename    string // display name for chat UI (uuids look ugly)
 }
