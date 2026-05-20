@@ -91,8 +91,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.INJECTING_AI_GOCLAW_DISPATCH_TOKEN }}
         run: |
-          curl -sS -X POST \
+          # workflow_dispatch (not repository_dispatch) so we can target
+          # `ref: dev` — injecting-ai-goclaw's default branch is `main`
+          # and it's 86 commits behind dev; repository_dispatch always
+          # runs against the default branch, which would land on a
+          # workflow file that doesn't yet have a listener. The
+          # workflow_dispatch endpoint takes an explicit ref so the
+          # listener on dev catches the call.
+          curl -sS -X POST -f \
             -H "Authorization: token $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/injectinglabs/injecting-ai-goclaw/dispatches \
-            -d "{\"event_type\":\"goclaw-image-updated\",\"client_payload\":{\"sha\":\"${{ needs.build.outputs.sha }}\",\"image\":\"${{ needs.build.outputs.image }}\"}}"
+            https://api.github.com/repos/injectinglabs/injecting-ai-goclaw/actions/workflows/deploy-staging.yml/dispatches \
+            -d "{\"ref\":\"dev\",\"inputs\":{\"goclaw_sha\":\"${{ needs.build.outputs.sha }}\",\"goclaw_image\":\"${{ needs.build.outputs.image }}\"}}"
