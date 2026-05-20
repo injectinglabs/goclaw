@@ -730,3 +730,26 @@ func TenantAllowedPathsFromCtx(ctx context.Context) []string {
 	}
 	return nil
 }
+
+// --- Read-only allowed paths (read/list-only access beyond workspace) ---
+
+const ctxReadOnlyAllowedPaths toolContextKey = "tool_readonly_allowed_paths"
+
+// WithReadOnlyAllowedPaths injects path prefixes that filesystem READ tools
+// (read_file, list_files, read_image, …) accept in addition to the workspace
+// and tenant-allowed-paths. Write tools intentionally do NOT consult this
+// list — used today for the media.Store cache root so the agent can read
+// chat uploads (which now land in the cache after the S3 migration) without
+// gaining permission to dump soul.md / USER.md / arbitrary writes into the
+// shared cache directory.
+func WithReadOnlyAllowedPaths(ctx context.Context, paths []string) context.Context {
+	return context.WithValue(ctx, ctxReadOnlyAllowedPaths, paths)
+}
+
+// ReadOnlyAllowedPathsFromCtx returns read-only path prefixes from context.
+// Returns nil when none are set; callers should treat that as "no extra
+// roots beyond workspace + tenant paths".
+func ReadOnlyAllowedPathsFromCtx(ctx context.Context) []string {
+	v, _ := ctx.Value(ctxReadOnlyAllowedPaths).([]string)
+	return v
+}

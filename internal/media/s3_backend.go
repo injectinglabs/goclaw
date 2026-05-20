@@ -340,5 +340,13 @@ func isS3NoSuchKey(err error) bool {
 	return errors.As(err, &nf)
 }
 
+// CacheRoot exposes the local cache directory so the agent loop can
+// add it to the read-only allowed-paths list for filesystem tools.
+// LocalPath downloads into this dir on demand; reading from here is
+// safe (process-local cache, paths keyed by sessionHash). Writes must
+// stay confined to the agent workspace — the caller is expected to
+// inject this via WithReadOnlyAllowedPaths, NOT WithTenantAllowedPaths.
+func (b *S3Backend) CacheRoot() string { return b.cacheDir }
+
 // Ensure S3Backend satisfies Backend at compile time.
 var _ Backend = (*S3Backend)(nil)

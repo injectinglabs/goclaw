@@ -186,7 +186,7 @@ func (t *ReadImageTool) loadImageFromPath(ctx context.Context, path string) ([]p
 
 	// Resolve path within workspace (respect workspace restriction).
 	workspace := ToolWorkspaceFromCtx(ctx)
-	resolved, err := resolvePathWithAllowed(path, workspace, effectiveRestrict(ctx, true), allowedWithTeamWorkspace(ctx, nil))
+	resolved, err := resolvePathWithAllowed(path, workspace, effectiveRestrict(ctx, true), allowedWithTeamWorkspaceRead(ctx, nil))
 	if err != nil {
 		return nil, fmt.Errorf("invalid image path: %w", err)
 	}
