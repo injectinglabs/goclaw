@@ -431,7 +431,19 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 		if ttsAudio != nil {
 			mediaResults = append([]agent.MediaResult{*ttsAudio}, mediaResults...)
 		}
+		// Sign every media path before delivery, mirroring sessions.preview.
+		// Without this the frontend got a raw /app/workspace/... path on the
+		// real-time chat.send response and only saw the signed /v1/files/…?ft=
+		// form after a manual page reload. Tts already pre-signed itself, so
+		// skip it to avoid double-signing.
 		if len(mediaResults) > 0 {
+			secret := httpapi.FileSigningKey()
+			for i := range mediaResults {
+				if ttsAudio != nil && i == 0 {
+					continue
+				}
+				mediaResults[i].Path = httpapi.SignMediaPath(mediaResults[i].Path, secret)
+			}
 			resp["media"] = mediaResults
 		}
 		client.SendResponse(protocol.NewOKResponse(req.ID, resp))
