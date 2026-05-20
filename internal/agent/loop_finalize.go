@@ -130,6 +130,7 @@ func (l *Loop) finalizeRun(
 			MimeType: mr.ContentType,
 			Kind:     kind,
 			Path:     mr.Path,
+			Filename: mr.Filename,
 		})
 	}
 	rs.pendingMsgs = append(rs.pendingMsgs, assistantMsg)

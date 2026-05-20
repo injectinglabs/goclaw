@@ -677,6 +677,7 @@ type MediaResult struct {
 	ContentType string `json:"content_type,omitempty"` // MIME type
 	Size        int64  `json:"size,omitempty"`         // file size in bytes
 	AsVoice     bool   `json:"as_voice,omitempty"`     // send as voice message (Telegram OGG)
+	Filename    string `json:"filename,omitempty"`     // display name for chat UI (uuids look ugly)
 }
 
 // runState encapsulates all mutable state for a single agent run.
