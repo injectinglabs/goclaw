@@ -99,9 +99,17 @@ jobs:
           REGISTRY="$ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
           GOCLAW_IMAGE="$REGISTRY/${{ env.GOCLAW_REPO }}:staging"
 
+          # Resolve instance ID by tag — more reliable than tag-based SSM targeting
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${{ env.STAGING_EC2_TAG }}" \
+                      "Name=instance-state-name,Values=running" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Reservations[0].Instances[0].InstanceId' --output text)
+          echo "Target instance: $INSTANCE_ID"
+
           CMD_ID=$(aws ssm send-command \
             --region ${{ env.AWS_REGION }} \
-            --targets "Key=tag:Name,Values=${{ env.STAGING_EC2_TAG }}" \
+            --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
             --parameters "commands=[
               \"set -e\",
