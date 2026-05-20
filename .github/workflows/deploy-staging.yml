@@ -74,85 +74,25 @@ jobs:
         id: emit
         run: echo "image=${{ steps.ecr.outputs.registry }}/${{ env.GOCLAW_REPO }}:staging" >> $GITHUB_OUTPUT
 
-  deploy:
+  # The fork's job stops at the built+pushed image. Deployment itself
+  # (.env regen, docker-compose write, sidecar restart, MCP tenant-sync)
+  # lives in the injecting-ai-goclaw repo because that's where the
+  # secrets and compose template are. We fire a repository_dispatch to
+  # kick off its `Deploy to Staging` workflow once the new goclaw image
+  # is in ECR. Avoids two workflows racing each other on the same SSM
+  # agent / docker-compose host. Telegram notifications are intentionally
+  # left to injecting-ai-goclaw — it has start/end pairs that cover the
+  # full deploy. Two extra "image pushed" pings from here just add noise.
+  dispatch:
     needs: [build]
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
     steps:
-      - name: Notify Telegram — deploy started
+      - name: Trigger injecting-ai-goclaw deploy
+        env:
+          GH_TOKEN: ${{ secrets.INJECTING_AI_GOCLAW_DISPATCH_TOKEN }}
         run: |
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "{\"chat_id\": \"${{ secrets.TELEGRAM_CHAT_ID }}\", \"text\": \"🟡 GOCLAW STAGING DEPLOY\\nCommit: ${{ needs.build.outputs.sha }}\"}" > /dev/null
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Deploy goclaw container via SSM
-        run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          REGISTRY="$ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
-          GOCLAW_IMAGE="$REGISTRY/${{ env.GOCLAW_REPO }}:staging"
-
-          # Resolve instance ID by tag — more reliable than tag-based SSM targeting
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=${{ env.STAGING_EC2_TAG }}" \
-                      "Name=instance-state-name,Values=running" \
-            --region ${{ env.AWS_REGION }} \
-            --query 'Reservations[0].Instances[0].InstanceId' --output text)
-          echo "Target instance: $INSTANCE_ID"
-
-          CMD_ID=$(aws ssm send-command \
-            --region ${{ env.AWS_REGION }} \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --parameters "commands=[
-              \"set -e\",
-              \"aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin $REGISTRY\",
-              \"docker pull $GOCLAW_IMAGE\",
-              \"export AUTH_PROXY_IMAGE=$REGISTRY/goclaw-auth-proxy:staging\",
-              \"export CONNECTORS_MCP_IMAGE=$REGISTRY/goclaw-connectors-mcp:staging\",
-              \"export DOCUMENT_MCP_IMAGE=$REGISTRY/goclaw-document-mcp:staging\",
-              \"export GOCLAW_IMAGE=$GOCLAW_IMAGE\",
-              \"cd /opt/goclaw-service && docker compose up -d --no-deps goclaw\",
-              \"for i in \$(seq 1 20); do docker exec goclaw-service-goclaw-1 wget -qO- http://localhost:9001/health 2>/dev/null | grep -q ok && echo GoClaw healthy && exit 0; sleep 2; done\",
-              \"echo ERROR: health check timed out && exit 1\"
-            ]" \
-            --query "Command.CommandId" --output text)
-
-          echo "SSM command: $CMD_ID"
-
-          # Poll until the command finishes
-          for i in $(seq 1 60); do
-            STATUS=$(aws ssm list-command-invocations \
-              --command-id "$CMD_ID" \
-              --region ${{ env.AWS_REGION }} \
-              --details \
-              --query 'CommandInvocations[0].Status' --output text 2>/dev/null || echo Pending)
-            echo "[$i] $STATUS"
-            case "$STATUS" in
-              Success) echo "Deploy succeeded"; exit 0 ;;
-              Failed|Cancelled|TimedOut|DeliveryTimedOut|ExecutionTimedOut)
-                aws ssm list-command-invocations \
-                  --command-id "$CMD_ID" --region ${{ env.AWS_REGION }} --details \
-                  --query 'CommandInvocations[0].CommandPlugins[0].Output' --output text
-                exit 1 ;;
-            esac
-            sleep 5
-          done
-          echo "ERROR: SSM command polling timed out" && exit 1
-
-      - name: Notify Telegram — deploy result
-        if: always()
-        run: |
-          STATUS="${{ job.status }}"
-          EMOJI="🟢"
-          [ "$STATUS" != "success" ] && EMOJI="🔴"
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "{\"chat_id\": \"${{ secrets.TELEGRAM_CHAT_ID }}\", \"text\": \"$EMOJI GOCLAW STAGING $STATUS\\nCommit: ${{ needs.build.outputs.sha }}\"}" > /dev/null
+          curl -sS -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/injectinglabs/injecting-ai-goclaw/dispatches \
+            -d "{\"event_type\":\"goclaw-image-updated\",\"client_payload\":{\"sha\":\"${{ needs.build.outputs.sha }}\",\"image\":\"${{ needs.build.outputs.image }}\"}}"
