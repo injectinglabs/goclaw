@@ -137,6 +137,18 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	if len(l.tenantAllowedPaths) > 0 {
 		ctx = tools.WithTenantAllowedPaths(ctx, l.tenantAllowedPaths)
 	}
+	// Inject read-only roots for filesystem tools. media.Store's S3 backend
+	// downloads uploaded files into a process-local cache under a separate
+	// directory; without this hint read_file / list_files / read_image
+	// reject those paths as "outside workspace" and the agent can't see
+	// the files the user just attached to chat. write tools intentionally
+	// do NOT consult this list — the cache must stay read-only so the LLM
+	// can't write `soul.md`/`MEMORY.md`/arbitrary payloads into it.
+	if l.mediaStore != nil {
+		if cache := l.mediaStore.CacheRoot(); cache != "" {
+			ctx = tools.WithReadOnlyAllowedPaths(ctx, []string{cache})
+		}
+	}
 	// Inject channel type into context for tools (e.g. message tool needs it for Zalo group routing)
 	if req.ChannelType != "" {
 		ctx = tools.WithToolChannelType(ctx, req.ChannelType)

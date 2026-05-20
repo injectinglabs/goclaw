@@ -161,7 +161,7 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *Result
 	if workspace == "" {
 		workspace = t.workspace
 	}
-	allowed := allowedWithTeamWorkspace(ctx, t.allowedPrefixes)
+	allowed := allowedWithTeamWorkspaceRead(ctx, t.allowedPrefixes)
 	resolved, err := resolvePathWithAllowed(path, workspace, effectiveRestrict(ctx, t.restrict), allowed)
 	if err != nil {
 		return ErrorResult(err.Error())
@@ -327,6 +327,26 @@ func allowedWithTeamWorkspace(ctx context.Context, base []string) []string {
 	if teamWs != "" {
 		out = append(out, teamWs)
 	}
+	return out
+}
+
+// allowedWithTeamWorkspaceRead is the read-side variant: same as
+// allowedWithTeamWorkspace plus ReadOnlyAllowedPathsFromCtx. Callers that
+// perform read-only filesystem operations (read_file, list_files,
+// read_image, …) use this so the agent can reach the media.Store S3
+// cache for chat uploads without gaining write access to it. Write-side
+// tools (write_file, edit_file, shell exec) must keep calling the
+// regular allowedWithTeamWorkspace so the agent can't pollute the cache
+// with soul.md / USER.md / arbitrary persisted memory.
+func allowedWithTeamWorkspaceRead(ctx context.Context, base []string) []string {
+	readOnly := ReadOnlyAllowedPathsFromCtx(ctx)
+	merged := allowedWithTeamWorkspace(ctx, base)
+	if len(readOnly) == 0 {
+		return merged
+	}
+	out := make([]string, 0, len(merged)+len(readOnly))
+	out = append(out, merged...)
+	out = append(out, readOnly...)
 	return out
 }
 

@@ -341,6 +341,15 @@ func wireExtras(
 				ia.SetMemoryInterceptor(writeMemIntc)
 			}
 		}
+		// Mirror `deliver=true` writes into the media store so chat
+		// attachments survive the host workspace-cleanup cron (`-mtime
+		// +7 -delete`). mediaStore.SaveFile is signature-compatible with
+		// tools.MediaUploadFunc.
+		if mediaStore != nil {
+			if wf, ok := writeTool.(*tools.WriteFileTool); ok {
+				wf.SetMediaUploadFunc(mediaStore.SaveFile)
+			}
+		}
 	}
 	if editTool, ok := toolsReg.Get("edit"); ok {
 		if ia, ok := editTool.(tools.InterceptorAware); ok {

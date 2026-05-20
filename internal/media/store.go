@@ -32,6 +32,18 @@ func NewStoreWithBackend(b Backend) *Store { return &Store{b: b} }
 // breaking the pre-refactor API.
 func (s *Store) Backend() Backend { return s.b }
 
+// CacheRoot returns the local directory remote backends (currently
+// S3Backend) download fetched objects into so callers can hand it to
+// path-validating tools (filesystem read_file, list_files, …) as an
+// additional allowed root. Backends without a separate cache (FS, in-
+// memory test fakes) return "" so the caller can skip the injection.
+func (s *Store) CacheRoot() string {
+	if c, ok := s.b.(interface{ CacheRoot() string }); ok {
+		return c.CacheRoot()
+	}
+	return ""
+}
+
 // SaveFile mirrors the pre-refactor signature: returns the media ID and
 // the local filesystem path the caller can read immediately.
 func (s *Store) SaveFile(sessionKey, srcPath, mime string) (id string, dstPath string, err error) {
