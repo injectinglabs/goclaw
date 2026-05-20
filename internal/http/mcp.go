@@ -143,6 +143,11 @@ func (h *MCPHandler) handleCreateServer(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Global rows (is_global: true) are platform-wide and require master scope.
+	if srv.IsGlobal && !requireMasterScope(w, r) {
+		return
+	}
+
 	// Security validation: command+args for stdio, URL for HTTP transports
 	var args []string
 	if len(srv.Args) > 0 {
@@ -232,6 +237,11 @@ func (h *MCPHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request) 
 	// Security validation: validate updated fields
 	// For updates, we need to consider the existing server + updated fields
 	existingSrv, _ := h.store.GetServer(r.Context(), id)
+
+	// Global servers are platform-owned; only master scope may mutate them.
+	if existingSrv != nil && existingSrv.IsGlobal && !requireMasterScope(w, r) {
+		return
+	}
 	if existingSrv != nil {
 		// Determine effective values (update or existing)
 		transport := existingSrv.Transport
@@ -309,9 +319,13 @@ func (h *MCPHandler) handleDeleteServer(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Capture name before delete so we can drop the pool entry.
+	// Also guard global rows — only master scope may delete them.
 	var serverName string
 	if existing, _ := h.store.GetServer(r.Context(), id); existing != nil {
 		serverName = existing.Name
+		if existing.IsGlobal && !requireMasterScope(w, r) {
+			return
+		}
 	}
 
 	if err := h.store.DeleteServer(r.Context(), id); err != nil {

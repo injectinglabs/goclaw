@@ -26,6 +26,20 @@ func NewPGMCPServerStore(db *sql.DB, encryptionKey string) *PGMCPServerStore {
 
 // --- Server CRUD ---
 
+// mcpScanRow wraps MCPServerData with the nullable tenant_id column that is
+// not stored in the domain struct. Used internally for sqlx scans.
+type mcpScanRow struct {
+	store.MCPServerData
+	TenantID *uuid.UUID `db:"tenant_id"`
+}
+
+// toMCPServerData converts the scan row into a domain struct, setting IsGlobal.
+func (r *mcpScanRow) toMCPServerData() store.MCPServerData {
+	srv := r.MCPServerData
+	srv.IsGlobal = r.TenantID == nil
+	return srv
+}
+
 func (s *PGMCPServerStore) CreateServer(ctx context.Context, srv *store.MCPServerData) error {
 	if err := store.ValidateUserID(srv.CreatedBy); err != nil {
 		return err
@@ -49,9 +63,17 @@ func (s *PGMCPServerStore) CreateServer(ctx context.Context, srv *store.MCPServe
 	encHeaders := s.encryptJSONB(jsonOrEmpty(srv.Headers))
 	encEnv := s.encryptJSONB(jsonOrEmpty(srv.Env))
 
-	tenantID := store.TenantIDFromContext(ctx)
-	if tenantID == uuid.Nil {
-		tenantID = store.MasterTenantID
+	// Global servers (IsGlobal=true) store NULL for tenant_id.
+	// Regular servers fall back to MasterTenantID when context has no tenant.
+	var tenantIDVal any
+	if srv.IsGlobal {
+		tenantIDVal = nil
+	} else {
+		tenantID := store.TenantIDFromContext(ctx)
+		if tenantID == uuid.Nil {
+			tenantID = store.MasterTenantID
+		}
+		tenantIDVal = tenantID
 	}
 
 	_, err := s.db.ExecContext(ctx,
@@ -61,15 +83,16 @@ func (s *PGMCPServerStore) CreateServer(ctx context.Context, srv *store.MCPServe
 		srv.ID, srv.Name, nilStr(srv.DisplayName), srv.Transport, nilStr(srv.Command),
 		jsonOrEmpty(srv.Args), nilStr(srv.URL), encHeaders, encEnv,
 		nilStr(apiKey), nilStr(srv.ToolPrefix), srv.TimeoutSec,
-		jsonOrEmpty(srv.Settings), srv.Enabled, srv.CreatedBy, now, now, tenantID,
+		jsonOrEmpty(srv.Settings), srv.Enabled, srv.CreatedBy, now, now, tenantIDVal,
 	)
 	return err
 }
 
+// mcpServerSelectCols includes tenant_id so that scans can populate IsGlobal.
 const mcpServerSelectCols = `id, name, COALESCE(display_name, '') AS display_name, transport,
 		 COALESCE(command, '') AS command, args, COALESCE(url, '') AS url, headers, env,
 		 COALESCE(api_key, '') AS api_key, COALESCE(tool_prefix, '') AS tool_prefix,
-		 timeout_sec, settings, enabled, created_by, created_at, updated_at`
+		 timeout_sec, settings, enabled, created_by, created_at, updated_at, tenant_id`
 
 func (s *PGMCPServerStore) GetServer(ctx context.Context, id uuid.UUID) (*store.MCPServerData, error) {
 	q := `SELECT ` + mcpServerSelectCols + ` FROM mcp_servers WHERE id = $1`
@@ -79,13 +102,15 @@ func (s *PGMCPServerStore) GetServer(ctx context.Context, id uuid.UUID) (*store.
 		if tenantID == uuid.Nil {
 			return nil, sql.ErrNoRows
 		}
-		q += ` AND tenant_id = $2`
+		// Include global rows (tenant_id IS NULL) alongside tenant-owned rows.
+		q += ` AND (tenant_id = $2 OR tenant_id IS NULL)`
 		qArgs = append(qArgs, tenantID)
 	}
-	var srv store.MCPServerData
-	if err := pkgSqlxDB.GetContext(ctx, &srv, q, qArgs...); err != nil {
+	var row mcpScanRow
+	if err := pkgSqlxDB.GetContext(ctx, &row, q, qArgs...); err != nil {
 		return nil, err
 	}
+	srv := row.toMCPServerData()
 	s.decryptServerFields(&srv)
 	return &srv, nil
 }
@@ -98,13 +123,15 @@ func (s *PGMCPServerStore) GetServerByName(ctx context.Context, name string) (*s
 		if tenantID == uuid.Nil {
 			return nil, sql.ErrNoRows
 		}
-		q += ` AND tenant_id = $2`
+		// Include global rows alongside tenant-owned rows.
+		q += ` AND (tenant_id = $2 OR tenant_id IS NULL)`
 		qArgs = append(qArgs, tenantID)
 	}
-	var srv store.MCPServerData
-	if err := pkgSqlxDB.GetContext(ctx, &srv, q, qArgs...); err != nil {
+	var row mcpScanRow
+	if err := pkgSqlxDB.GetContext(ctx, &row, q, qArgs...); err != nil {
 		return nil, err
 	}
+	srv := row.toMCPServerData()
 	s.decryptServerFields(&srv)
 	return &srv, nil
 }
@@ -130,17 +157,21 @@ func (s *PGMCPServerStore) ListServers(ctx context.Context) ([]store.MCPServerDa
 		if tenantID == uuid.Nil {
 			return []store.MCPServerData{}, nil
 		}
-		q += ` WHERE tenant_id = $1`
+		// Return both tenant-owned and global rows.
+		q += ` WHERE (tenant_id = $1 OR tenant_id IS NULL)`
 		qArgs = append(qArgs, tenantID)
 	}
 	q += ` ORDER BY name`
 
-	var result []store.MCPServerData
-	if err := pkgSqlxDB.SelectContext(ctx, &result, q, qArgs...); err != nil {
+	var rows []mcpScanRow
+	if err := pkgSqlxDB.SelectContext(ctx, &rows, q, qArgs...); err != nil {
 		return nil, err
 	}
-	for i := range result {
-		s.decryptServerFields(&result[i])
+	result := make([]store.MCPServerData, 0, len(rows))
+	for i := range rows {
+		srv := rows[i].toMCPServerData()
+		s.decryptServerFields(&srv)
+		result = append(result, srv)
 	}
 	return result, nil
 }

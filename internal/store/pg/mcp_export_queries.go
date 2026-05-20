@@ -168,7 +168,7 @@ func ExportMCPPreview(ctx context.Context, db *sql.DB) (*MCPExportPreview, error
 func ImportMCPServer(ctx context.Context, db *sql.DB, srv MCPServerExport, createdBy string) (uuid.UUID, bool, error) {
 	tid := tenantIDForInsert(ctx)
 
-	// Check if server with same name already exists
+	// Check for an existing tenant-scoped server with this name.
 	var existing uuid.UUID
 	err := db.QueryRowContext(ctx,
 		"SELECT id FROM mcp_servers WHERE name = $1 AND tenant_id = $2",
@@ -176,6 +176,20 @@ func ImportMCPServer(ctx context.Context, db *sql.DB, srv MCPServerExport, creat
 	).Scan(&existing)
 	if err == nil {
 		return existing, false, nil // already exists — return existing ID
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return uuid.Nil, false, err
+	}
+
+	// Also check for a global row with this name. If one exists, return it so
+	// callers do not create a redundant per-tenant copy.
+	var globalID uuid.UUID
+	err = db.QueryRowContext(ctx,
+		"SELECT id FROM mcp_servers WHERE name = $1 AND tenant_id IS NULL",
+		srv.Name,
+	).Scan(&globalID)
+	if err == nil {
+		return globalID, false, nil // global row covers this server — no import needed
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return uuid.Nil, false, err
