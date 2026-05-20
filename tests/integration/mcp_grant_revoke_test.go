@@ -45,15 +45,12 @@ func TestBridgeTool_Execute_RevokeAgentGrant_ReturnsError(t *testing.T) {
 		t.Fatal("expected at least 1 accessible server after grant")
 	}
 
-	// Create a fake MCP client that returns a stub result
-	fakeClient := &fakeMCPClient{result: &mcpgo.CallToolResult{
-		Content: []mcpgo.Content{mcpgo.TextContent{Text: "success"}},
-	}}
-
-	// Create BridgeTool with the fake client
+	// We intentionally pass a nil mcpclient.Client — Execute() will short-circuit
+	// on "no active client" pre-grant, but the assertion below only cares about
+	// the post-revoke path (grant checker rejecting before the client is touched).
+	// The struct-vs-interface mismatch in mcp-go meant we can't inject a fake
+	// CallToolResult here; if you need a real success path, plumb an interface.
 	clientPtr := &atomic.Pointer[mcpclient.Client]{}
-	// Note: We need to cast the fake client to the interface type
-	// This is a workaround since mcp-go client is a struct, not an interface
 	connected := &atomic.Bool{}
 	connected.Store(true)
 
