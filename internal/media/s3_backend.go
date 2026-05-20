@@ -254,6 +254,16 @@ func (b *S3Backend) Delete(ctx context.Context, sessionKey string) error {
 		slog.Warn("media s3: manifest cleanup had failures (non-fatal)", "session_hash", sessionHash, "error", err)
 	}
 
+	// Wipe the local cache directory for this session too. Without this the
+	// `.media-cache/<sessionHash>/` blobs hang around forever after the
+	// session is gone — they're orphaned (no S3 source to refetch from)
+	// but still take up disk until the host's safety-net cleanup-cron
+	// runs. Best-effort: any error is logged, never propagated.
+	sessionCacheDir := filepath.Join(b.cacheDir, sessionHash)
+	if err := os.RemoveAll(sessionCacheDir); err != nil {
+		slog.Warn("media s3: cache cleanup had failures (non-fatal)", "session_hash", sessionHash, "dir", sessionCacheDir, "error", err)
+	}
+
 	return nil
 }
 
