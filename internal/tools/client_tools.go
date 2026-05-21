@@ -54,6 +54,8 @@ func NewExecuteActionTool() Tool {
 			"first to see the elements and find the right selector. Actions: " +
 			"'fill' (types into an input/textarea/contenteditable — requires value; React/ProseMirror/Tiptap-safe), " +
 			"'click' (clicks a button/link/checkbox — dispatches full pointer→mouse→click sequence), " +
+			"'double_click' (double-clicks an element — use for inline cell editing, row selection in data grids, file manager open), " +
+			"'clear' (clears an input/textarea/contenteditable — React-safe; use before fill when the field has existing content that might interfere), " +
 			"'select' (picks an option in a <select> — requires value), " +
 			"'press_enter' (submits a form by simulating Enter on an input/textarea — preferred " +
 			"over click for search forms like Google/GitHub where a visible submit button may be " +
@@ -71,7 +73,7 @@ func NewExecuteActionTool() Tool {
 				},
 				"action": map[string]any{
 					"type":        "string",
-					"enum":        []string{"fill", "click", "select", "press_enter", "hover", "keyboard", "get_value"},
+					"enum":        []string{"fill", "click", "double_click", "clear", "select", "press_enter", "hover", "keyboard", "get_value"},
 					"description": "The action to perform",
 				},
 				"value": map[string]any{
