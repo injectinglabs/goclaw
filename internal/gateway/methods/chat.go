@@ -372,10 +372,7 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 			if thinking != "" {
 				msg.Thinking = thinking
 			}
-			if err := m.sessions.AddMessage(runCtxBase, sessionKey, msg); err != nil {
-				slog.Warn("partial-save: AddMessage failed", "sessionKey", sessionKey, "error", err)
-				return
-			}
+			m.sessions.AddMessage(runCtxBase, sessionKey, msg)
 			if err := m.sessions.Save(runCtxBase, sessionKey); err != nil {
 				slog.Warn("partial-save: Save failed", "sessionKey", sessionKey, "error", err)
 			}
