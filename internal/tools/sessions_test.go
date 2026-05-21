@@ -112,6 +112,7 @@ func (m *mockSessionStore) SetLabel(_ context.Context, key, label string) {
 
 func (m *mockSessionStore) SetAgentInfo(context.Context, string, uuid.UUID, string) {}
 func (m *mockSessionStore) TruncateHistory(context.Context, string, int)            {}
+func (m *mockSessionStore) TruncateBefore(context.Context, string, int)              {}
 func (m *mockSessionStore) SetHistory(context.Context, string, []providers.Message) {}
 func (m *mockSessionStore) Reset(context.Context, string)                           {}
 func (m *mockSessionStore) Delete(context.Context, string) error                    { return nil }

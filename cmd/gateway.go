@@ -163,6 +163,15 @@ func runGateway() {
 	}
 	slog.Info("model registry initialized", "anthropic_models", len(modelReg.Catalog("anthropic")), "openai_models", len(modelReg.Catalog("openai")))
 
+	// Start the LLM service model-alias fetcher so per-model context windows
+	// for aliases like "default" / "fast" are correct (otherwise compaction
+	// triggers way too early because Resolve() falls back to Loop.contextWindow).
+	// Reads LLM_SERVICE_URL + LLM_INTERNAL_AUTH_TOKEN from env; no-op when URL
+	// is unset (lite/desktop builds). Polls every 5 minutes.
+	modelAliasFetcher := providers.NewModelAliasFetcher(modelReg)
+	modelAliasFetcher.Start(context.Background())
+	defer modelAliasFetcher.Stop()
+
 	// Warn if deprecated session scope settings are configured
 	if cfg.Sessions.Scope != "" && cfg.Sessions.Scope != "per-sender" {
 		slog.Warn("sessions.scope config is deprecated and ignored — fixed to per-sender", "configured", cfg.Sessions.Scope)
