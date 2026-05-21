@@ -62,7 +62,28 @@ func (m *ChatMethods) Register(router *gateway.MethodRouter) {
 	router.Register(protocol.MethodChatAbort, m.handleAbort)
 	router.Register(protocol.MethodChatInject, m.handleInject)
 	router.Register(protocol.MethodChatSessionStatus, m.handleSessionStatus)
+	router.Register(protocol.MethodChatActiveSessions, m.handleActiveSessions)
 	router.Register(protocol.MethodChatToolResult, m.handleToolResult)
+}
+
+// handleActiveSessions returns the calling user's currently-running agent
+// runs across all of their sessions, including the partially-streamed
+// assistant content/thinking so the SPA can rebuild the in-flight chat
+// bubble after a page reload.
+//
+// Filtered to the caller's userID + tenant — admins do NOT see other
+// users' runs here. (chat.session.status is single-session and uses a
+// different ownership check for that.)
+func (m *ChatMethods) handleActiveSessions(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	tenantID := client.TenantID()
+	userID := client.UserID()
+	snapshots := m.agents.ActiveSessionsForUser(tenantID, userID)
+	if snapshots == nil {
+		snapshots = []agent.ActiveRunSnapshot{}
+	}
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
+		"runs": snapshots,
+	}))
 }
 
 // handleSessionStatus returns the running state and activity for a session.
@@ -262,7 +283,7 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 
 	// Create cancellable context for abort support (matching TS AbortController pattern).
 	runCtx, cancel := context.WithCancel(runCtxBase)
-	injectCh := m.agents.RegisterRun(runCtxBase, runID, sessionKey, params.AgentID, cancel)
+	injectCh := m.agents.RegisterRun(runCtxBase, runID, sessionKey, params.AgentID, userID, cancel)
 
 	// Run agent asynchronously - events are broadcast via the event system
 	go func() {
