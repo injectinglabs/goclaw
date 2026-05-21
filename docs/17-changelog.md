@@ -4,6 +4,38 @@ All notable changes to GoClaw Gateway are documented here. Format follows [Keep 
 
 ---
 
+### Parked — Stream-to-DB for multi-instance reload recovery (2026-05-21)
+
+Branch `feat/stream-to-db` + PR [#108](https://github.com/injectinglabs/goclaw/pull/108)
+(draft) implements stream-to-DB persistence for in-flight assistant
+content: pre-insert assistant row with `status='streaming'`, throttled
+UPDATE during generation (debounce 2 s OR 2000 chars), terminal flush
+sets `status` to `''` / `'cancelled'` / `'errored'`. Makes DB the source
+of truth for the partial bubble, eliminating the in-memory `ActiveRun`
+buffer requirement that breaks multi-instance reload recovery without
+sticky sessions.
+
+**Status:** intentionally not merged. Sticky sessions on
+`goclaw-prod-tg` (deployment-side, zero code) cover the same user-visible
+problem for current scale (tens of DAU) and are recommended as the
+short-term answer. See `injecting-ai-goclaw/docs/ARCHITECTURE.md`
+("Multi-instance reload recovery") for the comparison matrix and
+activation triggers.
+
+**Files touched (for the future un-parker):** `providers/types.go`
+(new `Status` field on `Message`), `store/session_store.go` + PG/SQLite
+impls (`SetLastMessageContent`, `DropLastStreamingMessage`),
+`agent/router.go` (`ActiveRun` debounce fields, `RegisterRun` new
+`flushFn` param, `ForceFlush`, `RunBuffer`), `gateway/methods/chat.go`
+(placeholder insert + terminal-status defer), `agent/loop_pipeline_callbacks.go`
+(drop placeholder on first `flushMessages`).
+
+Frontend half: website PR [#127](https://github.com/injectinglabs/injecting-ai-web-agent-website/pull/127),
+`feat/streaming-status-render` — wires the new `status` field into the
+existing in-progress bubble UI.
+
+---
+
 ### ACTOR vs SCOPE — #915 group permission fix + propagation (2026-04-16)
 
 Resolves Issue #915 (Telegram group `write_file` permission denied after `/addwriter`) and closes an adjacent silent-privilege-bypass discovered during the audit.
