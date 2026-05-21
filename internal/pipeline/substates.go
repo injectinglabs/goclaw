@@ -29,10 +29,21 @@ type ContextState struct {
 
 // ThinkState: owned by ThinkStage.
 type ThinkState struct {
-	LastResponse    *providers.ChatResponse
-	TotalUsage      providers.Usage
-	TruncRetries    int  // consecutive truncation retries (max 3)
-	StreamingActive bool // true during active stream
+	LastResponse *providers.ChatResponse
+	// TotalUsage sums tokens across every LLM iteration in this run. Used
+	// for billing / ai_tasks aggregates where the sum is the right number
+	// (each iteration costs separately).
+	TotalUsage providers.Usage
+	// LastPromptTokens is the prompt_tokens from the FINAL iteration only
+	// (last-write-wins). This is the size the upstream provider just sent
+	// — and therefore the size that will be re-sent on the next user turn
+	// once we append one user message. The session's context-usage UI
+	// indicator reads this field, not TotalUsage.PromptTokens, because a
+	// 3-iteration tool loop accumulates prompt counts that have no
+	// physical meaning for the next-turn context.
+	LastPromptTokens int
+	TruncRetries     int  // consecutive truncation retries (max 3)
+	StreamingActive  bool // true during active stream
 }
 
 // PruneState: owned by PruneStage.
@@ -79,17 +90,21 @@ type EvolutionState struct {
 
 // RunResult is the final output of a pipeline run.
 type RunResult struct {
-	RunID          string
-	Content        string
-	Thinking       string
-	TotalUsage     providers.Usage
-	Iterations     int
-	ToolCalls      int
-	LoopKilled     bool
-	Duration       time.Duration
-	AsyncToolCalls []string
-	MediaResults   []MediaResult
-	Deliverables   []string
-	BlockReplies   int
-	LastBlockReply string
+	RunID      string
+	Content    string
+	Thinking   string
+	TotalUsage providers.Usage
+	// LastPromptTokens carries the FINAL iteration's prompt_tokens so the
+	// agent layer can write it into sessions.last_prompt_tokens without
+	// double-counting iterations the way TotalUsage.PromptTokens does.
+	LastPromptTokens int
+	Iterations       int
+	ToolCalls        int
+	LoopKilled       bool
+	Duration         time.Duration
+	AsyncToolCalls   []string
+	MediaResults     []MediaResult
+	Deliverables     []string
+	BlockReplies     int
+	LastBlockReply   string
 }

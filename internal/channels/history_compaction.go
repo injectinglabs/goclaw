@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/actorheaders"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -20,6 +21,15 @@ type CompactionConfig struct {
 	MaxTokens  int                // max output tokens for summarization (default 4096)
 	Provider   providers.Provider // LLM provider for summarization
 	Model      string             // model to use for summarization
+	// Attribution dependencies — needed to stamp X-Actor-* headers onto
+	// the outbound provider.Chat call (web-agent-api rejects the
+	// service-token path without them). Both optional: when either is
+	// nil, runCompaction skips the header attachment and the receiver
+	// 400's — that surfaces as a clear signal "this channel's
+	// compaction isn't wired up" instead of silent inflation of the
+	// sessions table.
+	TenantStore          store.TenantStore
+	ChannelInstanceStore store.ChannelInstanceStore
 }
 
 // MaybeCompact checks if compaction is needed for a history key and triggers it in background.
@@ -183,6 +193,27 @@ func (ph *PendingHistory) runCompaction(historyKey string, cfg *CompactionConfig
 	}
 	if len(entries) <= threshold {
 		return
+	}
+
+	// Attribution: compaction is per-channel cleanup. When the channel
+	// row carries `created_by_user_id` (task #64), attribute to that
+	// user; the row sits in their workspace's billing. When it's empty
+	// (legacy rows from before task #64 shipped, or system-seeded
+	// channels with no human owner), switch to the infra path so the
+	// org pays the cost in a separate `source='infra'` bucket and no
+	// single user's quota gets hit by other people's compaction.
+	if cfg.TenantStore != nil && ph.tenantID != uuid.Nil {
+		creatorUserID := ""
+		if cfg.ChannelInstanceStore != nil {
+			if inst, lookupErr := cfg.ChannelInstanceStore.GetByName(ctx, ph.channelName); lookupErr == nil && inst != nil {
+				creatorUserID = inst.CreatedBy
+			}
+		}
+		if creatorUserID != "" {
+			ctx = actorheaders.Attach(ctx, cfg.TenantStore, ph.tenantID, creatorUserID)
+		} else {
+			ctx = actorheaders.AttachInfra(ctx, cfg.TenantStore, ph.tenantID)
+		}
 	}
 
 	_, err = CompactGroup(ctx, ph.store, ph.channelName, historyKey, cfg.Provider, cfg.Model, cfg.KeepRecent, cfg.MaxTokens)

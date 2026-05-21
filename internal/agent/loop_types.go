@@ -88,6 +88,14 @@ type Loop struct {
 	// store.WithAgentID. See docs/agent-identity-conventions.md.
 	agentUUID        uuid.UUID
 	tenantID         uuid.UUID // agent's owning tenant
+	tenantSlug       string    // canonical tenant slug — see Config.TenantSlug
+	// externalOrgID is the web-backend organizations.id (UUID) for this
+	// tenant, sourced from tenants.settings.external_org_id. When non-empty
+	// it overrides tenantSlug in outbound X-Actor-Org-ID headers, removing
+	// the slug-format coupling between goclaw and downstream attribution.
+	// Empty during rollout for tenants the auth-proxy hasn't stamped yet —
+	// loop_context.go falls back to the slug in that case.
+	externalOrgID    string
 	// agentOtherConfig is a defensive byte copy of agents.other_config JSONB.
 	// Copied once at Loop construction; used to build AgentAudioSnapshot at tool dispatch.
 	agentOtherConfig json.RawMessage
@@ -359,6 +367,8 @@ type LoopConfig struct {
 	// Agent UUID + tenant for context propagation to tools
 	AgentUUID        uuid.UUID
 	TenantID         uuid.UUID        // agent's owning tenant — injected into execution context
+	TenantSlug       string           // canonical tenant slug, e.g. "org-team-acme"; pre-resolved at construction so the loop has a stable identifier for downstream service-token calls when the per-request context doesn't carry one (Telegram path).
+	ExternalOrgID    string           // web-backend organizations.id (UUID), stamped onto tenants.settings.external_org_id by auth-proxy. Preferred over TenantSlug for outbound X-Actor-Org-ID; empty until first login after the stamp lands.
 	AgentOtherConfig json.RawMessage  // raw other_config JSONB — copied defensively in NewLoop
 	AgentType        string           // "open" or "predefined"
 	DisplayName string    // human-readable agent display name (for runtime section)
@@ -494,6 +504,8 @@ func NewLoop(cfg LoopConfig) *Loop {
 		displayName:            cfg.DisplayName,
 		agentUUID:              cfg.AgentUUID,
 		tenantID:               cfg.TenantID,
+		tenantSlug:             cfg.TenantSlug,
+		externalOrgID:          cfg.ExternalOrgID,
 		agentOtherConfig:       append([]byte(nil), cfg.AgentOtherConfig...), // defensive copy
 		agentType:              cfg.AgentType,
 		provider:               cfg.Provider,
@@ -613,6 +625,13 @@ type RunRequest struct {
 	HideInput     bool   // don't persist input message in session history (announce runs)
 	ContentSuffix string // appended to assistant response before saving (e.g. image markdown for WS)
 
+	// ClientKind identifies the WS caller for tool-palette tailoring.
+	// "extension" keeps browser page-tools (execute_action, execute_js, navigate, …);
+	// "website" or any other non-extension value strips them so the LLM doesn't
+	// waste turns invoking client tools the website cannot service. Empty =
+	// legacy behavior (no filtering) for non-WS channels and pre-flag callers.
+	ClientKind string
+
 	// Mid-run message injection channel (nil = disabled).
 	// When set, the loop drains this channel at turn boundaries to inject
 	// user follow-up messages into the running conversation.
@@ -658,6 +677,7 @@ type MediaResult struct {
 	ContentType string `json:"content_type,omitempty"` // MIME type
 	Size        int64  `json:"size,omitempty"`         // file size in bytes
 	AsVoice     bool   `json:"as_voice,omitempty"`     // send as voice message (Telegram OGG)
+	Filename    string `json:"filename,omitempty"`     // display name for chat UI (uuids look ugly)
 }
 
 // runState encapsulates all mutable state for a single agent run.
@@ -665,10 +685,15 @@ type MediaResult struct {
 // on *runState without passing 20+ individual variables.
 type runState struct {
 	// Loop control
-	loopDetector   toolLoopState
-	totalUsage     providers.Usage
-	iteration      int
-	totalToolCalls int
+	loopDetector toolLoopState
+	totalUsage   providers.Usage
+	// lastPromptTokens is the prompt_tokens from the FINAL LLM iteration
+	// of this run (last-write-wins as iterations progress). Used to set
+	// sessions.last_prompt_tokens without the per-iteration over-counting
+	// that totalUsage.PromptTokens introduces in tool loops.
+	lastPromptTokens int
+	iteration        int
+	totalToolCalls   int
 
 	// Output accumulators
 	finalContent   string

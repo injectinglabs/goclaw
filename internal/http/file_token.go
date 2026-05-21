@@ -72,6 +72,15 @@ func SignMediaPath(rawPath, secret string) string {
 	if rawPath == "" {
 		return ""
 	}
+	// Pass-through for absolute URLs (http/https). MCP tools may return
+	// `MEDIA:https://bucket.s3.amazonaws.com/...?X-Amz-Signature=…` —
+	// they're already signed by S3 / a remote backend and goclaw should
+	// hand the URL to the client unchanged. Without this branch the
+	// path-mangling below (filepath.Clean, /v1/files/ prefix) would
+	// corrupt the URL into a 404.
+	if strings.HasPrefix(rawPath, "http://") || strings.HasPrefix(rawPath, "https://") {
+		return rawPath
+	}
 	// Defense-in-depth: reject path traversal (also blocked by handleServe)
 	if strings.Contains(rawPath, "..") {
 		return ""

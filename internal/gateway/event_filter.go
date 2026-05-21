@@ -42,6 +42,26 @@ func clientCanReceiveEvent(c *Client, event bus.Event) bool {
 		return false // fail-closed: regular users blocked from unscoped events
 	}
 
+	// Cron-delivered (runtime reminder fired): scope to the job owner so
+	// other team-org members don't see another user's reminder pop up live.
+	// gateway_cron.go puts the owner in `user_id` (snake_case); the
+	// `reminders` table path is already SQL-filtered the same way, so a
+	// page refresh hides the row from non-owners — this aligns the live
+	// WS path with that behaviour.
+	//
+	// IMPORTANT: must be checked BEFORE the RoleAdmin-bypass below.
+	// auth-proxy promotes every browser client to RoleAdmin (router.go
+	// gateway-token path), so without this ordering the admin shortcut
+	// would let every team member receive every other member's reminder.
+	// Cron is personal, not team — admins don't get a peek either.
+	if event.Name == protocol.EventCronDelivered {
+		if uid := extractMapField(event.Payload, "user_id"); uid != "" {
+			return uid == c.userID
+		}
+		// No user_id in payload → fail-closed (don't leak across users).
+		return false
+	}
+
 	// Admin sees everything (when not tenant-scoped, handled above).
 	if permissions.HasMinRole(c.role, permissions.RoleAdmin) {
 		return true

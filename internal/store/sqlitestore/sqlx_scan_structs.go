@@ -108,6 +108,8 @@ type mcpServerRow struct {
 	CreatedBy   string          `json:"created_by" db:"created_by"`
 	CreatedAt   sqliteTime      `json:"created_at" db:"created_at"`
 	UpdatedAt   sqliteTime      `json:"updated_at" db:"updated_at"`
+	// TenantID is nullable on fresh installs (schema v25+); NULL = global row.
+	TenantID *string `json:"tenant_id" db:"tenant_id"`
 }
 
 func (r *mcpServerRow) toMCPServerData() store.MCPServerData {
@@ -127,5 +129,6 @@ func (r *mcpServerRow) toMCPServerData() store.MCPServerData {
 		Settings:    r.Settings,
 		Enabled:     r.Enabled,
 		CreatedBy:   r.CreatedBy,
+		IsGlobal:    r.TenantID == nil,
 	}
 }

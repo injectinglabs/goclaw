@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"mime"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
@@ -219,10 +222,63 @@ func (t *BridgeTool) Execute(ctx context.Context, args map[string]any) *tools.Re
 		return tools.ErrorResult(text)
 	}
 
+	// Extract MEDIA:<path> lines from the raw MCP text BEFORE we wrap
+	// it as untrusted content. The wrap interpose a "<<<EXTERNAL…" prefix
+	// that hides the MEDIA: marker from the agent-loop parseMediaResult
+	// path (loop_media.go), so MCP-emitted media files would otherwise
+	// never reach result.Media — and the frontend never gets a
+	// media_refs entry for them. This is the same MEDIA: convention
+	// built-in tools (create_image, create_audio) already use.
+	mediaFiles := extractMCPMediaPaths(text)
+
 	// Wrap MCP tool results as external/untrusted content to prevent prompt injection.
 	// MCP servers may be third-party and return adversarial content.
 	wrapped := wrapMCPContent(text, t.serverName, t.toolName)
-	return tools.NewResult(wrapped)
+	res := tools.NewResult(wrapped)
+	if len(mediaFiles) > 0 {
+		res.Media = mediaFiles
+	}
+	return res
+}
+
+// extractMCPMediaPaths scans an MCP tool's text content for `MEDIA:<path>`
+// markers and returns one bus.MediaFile per match. Mirrors the convention
+// used by built-in tools (see loop_media.go::parseMediaResult). The MIME
+// type is guessed from the file extension; the agent loop fills in a
+// fallback if it's still empty.
+//
+// Security: the agent loop validates that each path exists and resolves
+// inside the tenant workspace before attaching it (see persistMedia and
+// auto-attach in loop_tools.go), so a malicious MCP server cannot smuggle
+// /etc/passwd onto the chat reply by emitting `MEDIA:/etc/passwd`.
+func extractMCPMediaPaths(text string) []bus.MediaFile {
+	if !strings.Contains(text, "MEDIA:") {
+		return nil
+	}
+	var out []bus.MediaFile
+	seen := make(map[string]struct{})
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if !strings.HasPrefix(line, "MEDIA:") {
+			continue
+		}
+		path := strings.TrimSpace(strings.TrimPrefix(line, "MEDIA:"))
+		// Trim trailing punctuation a markdown/JSON renderer may stick on.
+		path = strings.TrimRight(path, `)]"',;.`)
+		if path == "" {
+			continue
+		}
+		if _, dup := seen[path]; dup {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, bus.MediaFile{
+			Path:     path,
+			MimeType: mime.TypeByExtension(filepath.Ext(path)),
+			Filename: filepath.Base(path),
+		})
+	}
+	return out
 }
 
 // inputSchemaToMap converts mcp.ToolInputSchema to the map format expected by tools.Tool.Parameters().

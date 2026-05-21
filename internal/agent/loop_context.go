@@ -12,6 +12,7 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 	"github.com/nextlevelbuilder/goclaw/internal/workspace"
@@ -38,9 +39,58 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	if l.tenantID != uuid.Nil {
 		ctx = store.WithTenantID(ctx, l.tenantID)
 	}
+	// Ensure tenant slug is in context too. The HTTP/WS gateway sets it
+	// at request entry (internal/gateway/router.go:92,
+	// internal/http/auth.go:347), but other inbound paths — Telegram,
+	// channel webhooks, scheduled jobs — go through cmd/gateway_consumer_*
+	// which only stamps WithTenantID. Without a slug in context the
+	// service-token outbound (web-agent-api X-Actor-Org-ID) arrives empty
+	// and downstream attribution falls back to active_org_id, which is
+	// wrong for users who switched workspace in the dashboard while a
+	// Telegram channel was still attached to the previous tenant. The
+	// loop's own tenantSlug is the authoritative value here — it's
+	// resolved once at construction in resolver.go from the agent's
+	// TenantID via deps.TenantStore.
+	if l.tenantSlug != "" && store.TenantSlugFromContext(ctx) == "" {
+		ctx = store.WithTenantSlug(ctx, l.tenantSlug)
+	}
 	// Inject user ID into context for per-user scoping (memory, context files, etc.)
 	if req.UserID != "" {
 		ctx = store.WithUserID(ctx, req.UserID)
+	}
+	// Attach actor identity for the OpenAI-compatible outbound HTTP
+	// client. Trusted downstream services (currently web-agent-api at
+	// stg-web-agent-api.injecting.ai / web-agent-api.injecting.ai) use
+	// these to attribute the call to the right user/org instead of
+	// trusting the provider's cached api_key — which previously caused
+	// multi-tenant attribution to flip between members of the same
+	// team-org based on who last synced the auth-proxy cache.
+	//
+	// X-Actor-Org-ID preference order:
+	//   1. l.externalOrgID — web-backend organizations.id (UUID),
+	//      stamped on tenants.settings.external_org_id by auth-proxy.
+	//      Canonical; resolve_actor_payload on web-agent-api takes
+	//      this path directly (`_looks_like_uuid`).
+	//   2. tenant slug from context / l.tenantSlug — goclaw slug
+	//      ("org-<type>-<web_slug>"). Backward-compat fallback for
+	//      tenants the auth-proxy hasn't stamped yet during rollout;
+	//      receiver inverts the prefix family and joins on
+	//      organizations.slug.
+	if req.UserID != "" {
+		actor := map[string]string{
+			"X-Actor-User-ID": req.UserID,
+		}
+		orgID := l.externalOrgID
+		if orgID == "" {
+			orgID = store.TenantSlugFromContext(ctx)
+			if orgID == "" {
+				orgID = l.tenantSlug
+			}
+		}
+		if orgID != "" {
+			actor["X-Actor-Org-ID"] = orgID
+		}
+		ctx = providers.WithActorHeaders(ctx, actor)
 	}
 	// Resolve merged tenant user identity for credential lookups.
 	// Keeps UserID unchanged (session/workspace scoping) but sets a separate
@@ -86,6 +136,18 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	// Inject tenant-specific allowed paths for filesystem tools.
 	if len(l.tenantAllowedPaths) > 0 {
 		ctx = tools.WithTenantAllowedPaths(ctx, l.tenantAllowedPaths)
+	}
+	// Inject read-only roots for filesystem tools. media.Store's S3 backend
+	// downloads uploaded files into a process-local cache under a separate
+	// directory; without this hint read_file / list_files / read_image
+	// reject those paths as "outside workspace" and the agent can't see
+	// the files the user just attached to chat. write tools intentionally
+	// do NOT consult this list — the cache must stay read-only so the LLM
+	// can't write `soul.md`/`MEMORY.md`/arbitrary payloads into it.
+	if l.mediaStore != nil {
+		if cache := l.mediaStore.CacheRoot(); cache != "" {
+			ctx = tools.WithReadOnlyAllowedPaths(ctx, []string{cache})
+		}
 	}
 	// Inject channel type into context for tools (e.g. message tool needs it for Zalo group routing)
 	if req.ChannelType != "" {

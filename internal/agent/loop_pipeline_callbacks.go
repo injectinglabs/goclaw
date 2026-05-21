@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -35,6 +36,12 @@ func (l *Loop) pipelineCallbacks(req *RunRequest, bridgeRS *runState) pipelineCa
 		event.TenantID = l.tenantID
 		l.emit(event)
 	}
+	// Shared state between enrichMedia (which persists the upload and
+	// computes MediaRefs) and flushMessages (which writes the user row).
+	// Without this, MediaRefs land nowhere and the frontend's reload
+	// path sees `media_refs: []` after a refresh — attachments disappear
+	// from the UI even though the bytes were saved to .uploads/.
+	var currentMediaRefs []providers.MediaRef
 	return pipelineCallbackSet{
 		emitRun:            emitRun,
 		injectContext:      l.makeInjectContext(req),
@@ -42,7 +49,7 @@ func (l *Loop) pipelineCallbacks(req *RunRequest, bridgeRS *runState) pipelineCa
 		resolveWorkspace:   l.makeResolveWorkspace(req),
 		loadContextFiles:   l.makeLoadContextFiles(),
 		buildMessages:      l.makeBuildMessages(),
-		enrichMedia:        l.makeEnrichMedia(req),
+		enrichMedia:        l.makeEnrichMedia(req, &currentMediaRefs),
 		injectReminders:    l.makeInjectReminders(req),
 		buildFilteredTools: l.makeBuildFilteredTools(req),
 		callLLM:            l.makeCallLLM(req, emitRun),
@@ -55,7 +62,7 @@ func (l *Loop) pipelineCallbacks(req *RunRequest, bridgeRS *runState) pipelineCa
 		processToolResult:  l.makeProcessToolResult(req, bridgeRS),
 		checkReadOnly:      l.makeCheckReadOnly(req, bridgeRS),
 		sanitizeContent:    SanitizeAssistantContent,
-		flushMessages:      l.makeFlushMessages(req),
+		flushMessages:      l.makeFlushMessages(req, &currentMediaRefs),
 		updateMetadata:     l.makeUpdateMetadata(req),
 		bootstrapCleanup:   l.makeBootstrapCleanup(),
 		maybeSummarize:     l.maybeSummarize,
@@ -84,7 +91,7 @@ type pipelineCallbackSet struct {
 	checkReadOnly      func(state *pipeline.RunState) (*providers.Message, bool)
 	sanitizeContent    func(string) string
 	flushMessages      func(ctx context.Context, sessionKey string, msgs []providers.Message) error
-	updateMetadata     func(ctx context.Context, sessionKey string, usage providers.Usage) error
+	updateMetadata     func(ctx context.Context, sessionKey string, usage providers.Usage, lastPromptTokens, msgCount int) error
 	bootstrapCleanup   func(ctx context.Context, state *pipeline.RunState) error
 	maybeSummarize     func(ctx context.Context, sessionKey string)
 }
@@ -162,7 +169,11 @@ func (l *Loop) makeLoadSessionHistory() func(ctx context.Context, sessionKey str
 	}
 }
 
-func (l *Loop) makeEnrichMedia(req *RunRequest) func(ctx context.Context, state *pipeline.RunState) error {
+func (l *Loop) makeEnrichMedia(req *RunRequest, capturedRefs *[]providers.MediaRef) func(ctx context.Context, state *pipeline.RunState) error {
+	// mediaRefsAttached gates the SetLastUserMessageMediaRefs call below
+	// so it fires exactly once per run — subsequent turns can't dirty
+	// the persisted user message.
+	var mediaRefsAttached bool
 	return func(ctx context.Context, state *pipeline.RunState) error {
 		// enrichInputMedia enriches messages in-place: attaches inline images,
 		// reloads historical media, enriches <media:*> tags, populates context
@@ -172,13 +183,33 @@ func (l *Loop) makeEnrichMedia(req *RunRequest) func(ctx context.Context, state 
 		if len(msgs) == 0 {
 			return nil
 		}
-		enrichedCtx, enrichedMsgs, _ := l.enrichInputMedia(ctx, req, msgs)
+		enrichedCtx, enrichedMsgs, mediaRefs := l.enrichInputMedia(ctx, req, msgs)
+		if capturedRefs != nil {
+			*capturedRefs = mediaRefs
+		}
 		// Propagate enriched context (media images/docs/audio/video refs for tools).
 		state.Ctx = enrichedCtx
 		// Update history with enriched messages (media tags, inline images).
 		// Skip system message (index 0) — only history + user messages are enriched.
 		if len(enrichedMsgs) > 1 {
 			state.Messages.SetHistory(enrichedMsgs[1:])
+		}
+
+		// Attach the freshly-persisted media refs to the user message
+		// chat.go already eager-Save'd at request boundary. Without this
+		// step the message is durable but its `media_refs` field is
+		// empty, so frontend restores no attachment chips after reload.
+		// SetLastUserMessageMediaRefs is idempotent (it overwrites the
+		// slice); mediaRefsAttached gates re-runs across turns.
+		if !mediaRefsAttached && len(mediaRefs) > 0 {
+			if err := l.sessions.SetLastUserMessageMediaRefs(ctx, req.SessionKey, mediaRefs); err != nil {
+				slog.Warn("enrichMedia: attach media_refs to user message failed (non-fatal)",
+					"sessionKey", req.SessionKey, "error", err)
+			} else if err := l.sessions.Save(ctx, req.SessionKey); err != nil {
+				slog.Warn("enrichMedia: save after media_refs attach failed (non-fatal)",
+					"sessionKey", req.SessionKey, "error", err)
+			}
+			mediaRefsAttached = true
 		}
 		return nil
 	}
@@ -380,20 +411,14 @@ func (l *Loop) makeRunMemoryFlush() func(ctx context.Context, state *pipeline.Ru
 	}
 }
 
-func (l *Loop) makeFlushMessages(req *RunRequest) func(ctx context.Context, sessionKey string, msgs []providers.Message) error {
-	// Track whether user message has been persisted (first flush only).
-	// v2 adds user message to pendingMsgs explicitly; v3 keeps it in history
-	// (via BuildMessages) so it never reaches FlushPending. This closure
-	// persists the user message on first flush to match v2 session format.
-	var userMsgFlushed bool
+func (l *Loop) makeFlushMessages(req *RunRequest, _ *[]providers.MediaRef) func(ctx context.Context, sessionKey string, msgs []providers.Message) error {
+	// User message + media_refs are now eagerly persisted in
+	// makeEnrichMedia (before the LLM call) so they're visible to
+	// sessions.preview / chat.abort / chat.activeSessions immediately,
+	// not only after this end-of-turn flush. flushMessages handles
+	// only the pending assistant turn messages now.
+	_ = req
 	return func(ctx context.Context, sessionKey string, msgs []providers.Message) error {
-		if !userMsgFlushed && !req.HideInput && req.Message != "" {
-			userMsgFlushed = true
-			l.sessions.AddMessage(ctx, sessionKey, providers.Message{
-				Role:    "user",
-				Content: req.Message,
-			})
-		}
 		for _, msg := range msgs {
 			l.sessions.AddMessage(ctx, sessionKey, msg)
 		}
@@ -401,10 +426,17 @@ func (l *Loop) makeFlushMessages(req *RunRequest) func(ctx context.Context, sess
 	}
 }
 
-func (l *Loop) makeUpdateMetadata(req *RunRequest) func(ctx context.Context, sessionKey string, usage providers.Usage) error {
-	return func(ctx context.Context, sessionKey string, usage providers.Usage) error {
+func (l *Loop) makeUpdateMetadata(req *RunRequest) func(ctx context.Context, sessionKey string, usage providers.Usage, lastPromptTokens, msgCount int) error {
+	return func(ctx context.Context, sessionKey string, usage providers.Usage, lastPromptTokens, msgCount int) error {
 		l.sessions.UpdateMetadata(ctx, sessionKey, l.model, l.provider.Name(), req.Channel)
 		l.sessions.AccumulateTokens(ctx, sessionKey, int64(usage.PromptTokens), int64(usage.CompletionTokens))
+		// Snapshot of the FINAL iteration's prompt_tokens — what the
+		// context-usage indicator reads from sessions.last_prompt_tokens.
+		// Skip when zero (provider didn't report usage on this run) so we
+		// don't clobber a previously-good value with a meaningless 0.
+		if lastPromptTokens > 0 {
+			l.sessions.SetLastPromptTokens(ctx, sessionKey, lastPromptTokens, msgCount)
+		}
 		// Persist session to DB (matching v2 finalizeRun behavior).
 		// FlushMessages already ran, so all pending messages are in the cache.
 		l.sessions.Save(ctx, sessionKey)

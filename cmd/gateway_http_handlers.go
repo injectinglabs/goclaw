@@ -87,6 +87,7 @@ func wireHTTP(stores *store.Stores, defaultWorkspace, dataDir, bundledSkillsDir 
 
 	if stores != nil && stores.PendingMessages != nil {
 		pendingMessagesH = httpapi.NewPendingMessagesHandler(stores.PendingMessages, stores.Agents, providerReg)
+		pendingMessagesH.SetTenantStore(stores.Tenants)
 	}
 
 	if stores != nil && stores.SecureCLI != nil {

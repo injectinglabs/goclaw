@@ -70,10 +70,16 @@ func wireExtras(
 		contextFileInterceptor = tools.NewContextFileInterceptor(stores.Agents, workspace, agentCtxCache, userCtxCache)
 	}
 
-	// 1c. Persistent media storage for cross-turn image/document access
-	mediaStore, err := media.NewStore(filepath.Join(workspace, ".media"))
+	// 1c. Persistent media storage for cross-turn image/document access.
+	// Default is the historical filesystem-backed store under
+	// {workspace}/.media. Set GOCLAW_MEDIA_BACKEND=s3 (plus the matching
+	// _S3_* env vars) to switch to S3 without touching call sites — the
+	// Store façade hides the backend choice from the rest of the code.
+	mediaCfg := media.LoadConfigFromEnv(filepath.Join(workspace, ".media"))
+	mediaStore, err := media.NewStoreFromConfig(context.Background(), mediaCfg)
 	if err != nil {
-		slog.Warn("media store creation failed, images will not persist across turns", "error", err)
+		slog.Warn("media store creation failed, images will not persist across turns",
+			"backend", mediaCfg.Backend, "error", err)
 	}
 
 	// Wire media cleanup on session delete.
@@ -264,6 +270,38 @@ func wireExtras(
 			}
 		},
 		OnEvent: func(event agent.AgentEvent) {
+			// Mirror chunk/thinking/tool events into the router's
+			// in-memory streaming buffer so chat.activeSessions can hand
+			// a reconnecting client the in-flight assistant bubble
+			// (content + thinking + tool indicators) exactly as it was
+			// before page reload. Best-effort: Append* silently no-op
+			// once the run is unregistered.
+			if event.RunID != "" {
+				if payload, ok := event.Payload.(map[string]string); ok {
+					switch event.Type {
+					case protocol.ChatEventChunk:
+						agentRouter.AppendContent(event.RunID, payload["content"])
+					case protocol.ChatEventThinking:
+						agentRouter.AppendThinking(event.RunID, payload["content"])
+					}
+				}
+				if payload, ok := event.Payload.(map[string]any); ok {
+					switch event.Type {
+					case protocol.AgentEventToolCall:
+						id, _ := payload["id"].(string)
+						name, _ := payload["name"].(string)
+						agentRouter.AppendToolCall(event.RunID, id, name)
+					case protocol.AgentEventToolResult:
+						id, _ := payload["id"].(string)
+						isErr, _ := payload["is_error"].(bool)
+						result, _ := payload["result"].(string)
+						if result == "" {
+							result, _ = payload["content"].(string)
+						}
+						agentRouter.AppendToolResult(event.RunID, id, isErr, result)
+					}
+				}
+			}
 			// Sign /v1/files/ and /v1/media/ URLs in content before delivery.
 			// Sessions store clean paths; signing happens only at delivery time.
 			secret := httpapi.FileSigningKey()
@@ -333,6 +371,15 @@ func wireExtras(
 			}
 			if writeMemIntc != nil {
 				ia.SetMemoryInterceptor(writeMemIntc)
+			}
+		}
+		// Mirror `deliver=true` writes into the media store so chat
+		// attachments survive the host workspace-cleanup cron (`-mtime
+		// +7 -delete`). mediaStore.SaveFile is signature-compatible with
+		// tools.MediaUploadFunc.
+		if mediaStore != nil {
+			if wf, ok := writeTool.(*tools.WriteFileTool); ok {
+				wf.SetMediaUploadFunc(mediaStore.SaveFile)
 			}
 		}
 	}

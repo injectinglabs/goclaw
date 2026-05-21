@@ -47,6 +47,17 @@ func GenerateTitle(ctx context.Context, provider providers.Provider, model, user
 	title = strings.Trim(title, "\"'`")
 	title = strings.TrimSpace(title)
 
+	// Fallback when the LLM goes silent (observed with thinking-capable
+	// models on tool-heavy prompts — they sometimes return empty content
+	// despite OptThinkingLevel="off"). A truncated user message is a
+	// strictly better label than the bare sessionKey the sidebar would
+	// otherwise show.
+	if title == "" {
+		title = strings.TrimSpace(userMessage)
+		slog.Info("title generation: LLM returned empty, falling back to user message",
+			"fallbackLen", len(title))
+	}
+
 	if runes := []rune(title); len(runes) > 100 {
 		title = string(runes[:100])
 	}

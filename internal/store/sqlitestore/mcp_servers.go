@@ -16,8 +16,9 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
+// mcpServerSelectCols includes tenant_id so that scans can populate IsGlobal.
 const mcpServerSelectCols = `id, name, display_name, transport, command, args, url, headers, env,
-		 api_key, tool_prefix, timeout_sec, settings, enabled, created_by, created_at, updated_at`
+		 api_key, tool_prefix, timeout_sec, settings, enabled, created_by, created_at, updated_at, tenant_id`
 
 // SQLiteMCPServerStore implements store.MCPServerStore backed by SQLite.
 type SQLiteMCPServerStore struct {
@@ -52,9 +53,20 @@ func (s *SQLiteMCPServerStore) CreateServer(ctx context.Context, srv *store.MCPS
 	encHeaders := s.encryptJSON(jsonOrEmpty(srv.Headers))
 	encEnv := s.encryptJSON(jsonOrEmpty(srv.Env))
 
-	tenantID := store.TenantIDFromContext(ctx)
-	if tenantID == uuid.Nil {
-		tenantID = store.MasterTenantID
+	// On SQLite, global servers are stored under MasterTenantID because existing
+	// installations enforce NOT NULL on tenant_id (the column constraint can only
+	// be relaxed via full table recreation which requires PRAGMA foreign_keys=OFF
+	// outside a transaction — not supported in the incremental migration runner).
+	// Fresh installations (schema v25+) have a nullable column and store NULL.
+	var tenantIDVal any
+	if srv.IsGlobal {
+		tenantIDVal = nil // works on fresh installs; existing DBs fall back via column default
+	} else {
+		tenantID := store.TenantIDFromContext(ctx)
+		if tenantID == uuid.Nil {
+			tenantID = store.MasterTenantID
+		}
+		tenantIDVal = tenantID
 	}
 
 	_, err := s.db.ExecContext(ctx,
@@ -64,7 +76,7 @@ func (s *SQLiteMCPServerStore) CreateServer(ctx context.Context, srv *store.MCPS
 		srv.ID, srv.Name, nilStr(srv.DisplayName), srv.Transport, nilStr(srv.Command),
 		jsonOrEmpty(srv.Args), nilStr(srv.URL), encHeaders, encEnv,
 		nilStr(apiKey), nilStr(srv.ToolPrefix), srv.TimeoutSec,
-		jsonOrEmpty(srv.Settings), srv.Enabled, srv.CreatedBy, now, now, tenantID,
+		jsonOrEmpty(srv.Settings), srv.Enabled, srv.CreatedBy, now, now, tenantIDVal,
 	)
 	return err
 }
@@ -77,7 +89,8 @@ func (s *SQLiteMCPServerStore) GetServer(ctx context.Context, id uuid.UUID) (*st
 		if tenantID == uuid.Nil {
 			return nil, sql.ErrNoRows
 		}
-		q += ` AND tenant_id = ?`
+		// Include global rows (tenant_id IS NULL) alongside tenant-owned rows.
+		q += ` AND (tenant_id = ? OR tenant_id IS NULL)`
 		qArgs = append(qArgs, tenantID)
 	}
 	var row mcpServerRow
@@ -97,7 +110,8 @@ func (s *SQLiteMCPServerStore) GetServerByName(ctx context.Context, name string)
 		if tenantID == uuid.Nil {
 			return nil, sql.ErrNoRows
 		}
-		q += ` AND tenant_id = ?`
+		// Include global rows alongside tenant-owned rows.
+		q += ` AND (tenant_id = ? OR tenant_id IS NULL)`
 		qArgs = append(qArgs, tenantID)
 	}
 	var row mcpServerRow
@@ -130,7 +144,8 @@ func (s *SQLiteMCPServerStore) ListServers(ctx context.Context) ([]store.MCPServ
 		if tenantID == uuid.Nil {
 			return []store.MCPServerData{}, nil
 		}
-		q += ` WHERE tenant_id = ?`
+		// Return both tenant-owned and global rows.
+		q += ` WHERE (tenant_id = ? OR tenant_id IS NULL)`
 		qArgs = append(qArgs, tenantID)
 	}
 	q += ` ORDER BY name`

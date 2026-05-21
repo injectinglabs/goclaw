@@ -104,8 +104,14 @@ type PipelineDeps struct {
 	StripMessageDirectives   func(content string) string
 	DeduplicateMediaSuffix   func(content, suffix string) string
 	IsSilentReply          func(content string) bool
-	EmitSessionCompleted   func(ctx context.Context, sessionKey string, msgCount, tokensUsed, compactionCount int)
-	UpdateMetadata         func(ctx context.Context, sessionKey string, usage providers.Usage) error
+	EmitSessionCompleted func(ctx context.Context, sessionKey string, msgCount, tokensUsed, compactionCount int)
+	// UpdateMetadata receives the run's TotalUsage (cumulative, for billing)
+	// AND the final iteration's prompt_tokens + message count (for the
+	// sessions.last_prompt_tokens snapshot used by the context-usage UI).
+	// Implementations must keep the two separate: billing aggregates the
+	// cumulative figure; the UI snapshot needs the last-iteration value
+	// (or it inflates across tool loops).
+	UpdateMetadata   func(ctx context.Context, sessionKey string, usage providers.Usage, lastPromptTokens, msgCount int) error
 	BootstrapCleanup       func(ctx context.Context, state *RunState) error
 	MaybeSummarize         func(ctx context.Context, sessionKey string)
 

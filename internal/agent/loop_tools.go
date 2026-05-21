@@ -91,7 +91,11 @@ func (l *Loop) processToolResult(
 			if ct == "" {
 				ct = mimeFromExt(filepath.Ext(mf.Path))
 			}
-			rs.mediaResults = append(rs.mediaResults, MediaResult{Path: mf.Path, ContentType: ct})
+			rs.mediaResults = append(rs.mediaResults, MediaResult{
+				Path:        mf.Path,
+				ContentType: ct,
+				Filename:    mf.Filename,
+			})
 		}
 	} else if mr := parseMediaResult(result.ForLLM); mr != nil {
 		rs.mediaResults = append(rs.mediaResults, *mr)

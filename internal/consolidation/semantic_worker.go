@@ -14,10 +14,11 @@ import (
 
 // semanticWorker handles episodic.created events → extracts KG facts from summaries.
 type semanticWorker struct {
-	kgStore   store.KnowledgeGraphStore
-	extractor EntityExtractor
-	eventBus  eventbus.DomainEventBus
-	alertDeps bgalert.AlertDeps
+	kgStore     store.KnowledgeGraphStore
+	extractor   EntityExtractor
+	eventBus    eventbus.DomainEventBus
+	alertDeps   bgalert.AlertDeps
+	tenantStore store.TenantStore // for outbound actor-header attribution
 }
 
 // Handle extracts entities and relations from an episodic summary.
@@ -28,8 +29,10 @@ func (w *semanticWorker) Handle(ctx context.Context, event eventbus.DomainEvent)
 	}
 
 	// Inject tenant context so bgalert scopes correctly.
+	var tenantUUID uuid.UUID
 	if event.TenantID != "" {
 		if tid, err := uuid.Parse(event.TenantID); err == nil {
+			tenantUUID = tid
 			ctx = store.WithTenantID(ctx, tid)
 		}
 	}
@@ -38,8 +41,11 @@ func (w *semanticWorker) Handle(ctx context.Context, event eventbus.DomainEvent)
 		return nil
 	}
 
-	// Extract entities/relations from summary (much cheaper than full session)
-	result, err := w.extractor.Extract(ctx, payload.Summary)
+	// Extract entities/relations from summary (much cheaper than full session).
+	// Attribution headers required for the service-token path on web-agent-api
+	// (see attachBackgroundActorHeaders).
+	extractCtx := attachBackgroundActorHeaders(ctx, w.tenantStore, tenantUUID, event.UserID)
+	result, err := w.extractor.Extract(extractCtx, payload.Summary)
 	if err != nil {
 		bgalert.ReportProviderError(ctx, w.alertDeps, "kg_extraction", err)
 		slog.Warn("semantic: extraction failed", "episodic_id", payload.EpisodicID, "err", err)

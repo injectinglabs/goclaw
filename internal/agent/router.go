@@ -254,6 +254,7 @@ type ActiveRun struct {
 	RunID      string
 	SessionKey string
 	AgentID    string
+	UserID     string // owning user; lets chat.activeSessions filter to caller's runs without joining sessions
 	Cancel     context.CancelFunc
 	StartedAt  time.Time
 	InjectCh   chan InjectedMessage // buffered channel for mid-run user message injection
@@ -261,6 +262,27 @@ type ActiveRun struct {
 	State      atomic.Int32        // 0=running, 1=aborting, 2=done
 	TraceID    uuid.UUID           // set after trace creation via SetRunTraceID
 	TenantID   uuid.UUID           // captured at RegisterRun for forceMarkTraceAborted
+
+	// Streaming snapshot accumulated from emitted chunks so a reconnecting
+	// client can rebuild the in-flight assistant bubble exactly as it was
+	// before refresh. Protected by `bufMu` because emitRun runs on the
+	// agent loop goroutine while chat.activeSessions reads from the WS
+	// handler goroutine.
+	bufMu     sync.Mutex
+	Content   string
+	Thinking  string
+	ToolCalls []ToolCallSnapshot
+}
+
+// ToolCallSnapshot is the per-tool entry attached to ActiveRun so a
+// reconnecting client can rebuild the streaming bubble's tool indicators
+// (running spinners + ✓/✗ chips + Connect buttons) for calls that fired
+// before the page reload.
+type ToolCallSnapshot struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Status  string `json:"status"` // "running", "done", "error"
+	Result  string `json:"result,omitempty"`
 }
 
 // AbortResult describes the outcome of a single AbortRun call.
@@ -287,13 +309,16 @@ func safeClose(ch chan struct{}) {
 
 // RegisterRun records an active run so it can be aborted later.
 // ctx is used to capture the tenant ID for forceMarkTraceAborted.
+// userID is the run's owning user — empty for tenant-system runs (cron,
+// title-gen) which never need to surface in chat.activeSessions.
 // Returns a receive-only channel for mid-run message injection.
-func (r *Router) RegisterRun(ctx context.Context, runID, sessionKey, agentID string, cancel context.CancelFunc) <-chan InjectedMessage {
+func (r *Router) RegisterRun(ctx context.Context, runID, sessionKey, agentID, userID string, cancel context.CancelFunc) <-chan InjectedMessage {
 	injectCh := make(chan InjectedMessage, injectBufferSize)
 	r.activeRuns.Store(runID, &ActiveRun{
 		RunID:      runID,
 		SessionKey: sessionKey,
 		AgentID:    agentID,
+		UserID:     userID,
 		Cancel:     cancel,
 		StartedAt:  time.Now(),
 		InjectCh:   injectCh,
@@ -302,6 +327,165 @@ func (r *Router) RegisterRun(ctx context.Context, runID, sessionKey, agentID str
 	})
 	r.sessionRuns.Store(sessionKey, runID)
 	return injectCh
+}
+
+// AppendContent grows the in-memory streaming snapshot for the given run.
+// Called from the WS chat handler's emitRun wrapper on every AgentEventChunk
+// so chat.activeSessions can hand back the accumulated bubble after a
+// page reload. Best-effort: returns silently if the run is no longer
+// registered (race between final chunk and UnregisterRun).
+func (r *Router) AppendContent(runID, chunk string) {
+	if chunk == "" {
+		return
+	}
+	val, ok := r.activeRuns.Load(runID)
+	if !ok {
+		return
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	run.Content += chunk
+	run.bufMu.Unlock()
+}
+
+// AppendToolCall records a tool.call event so a reconnecting client can
+// re-render the tool indicator without waiting for the next event. Status
+// is "running" until AppendToolResult flips it to done/error.
+func (r *Router) AppendToolCall(runID, callID, name string) {
+	if callID == "" {
+		return
+	}
+	val, ok := r.activeRuns.Load(runID)
+	if !ok {
+		return
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	run.ToolCalls = append(run.ToolCalls, ToolCallSnapshot{
+		ID:     callID,
+		Name:   name,
+		Status: "running",
+	})
+	run.bufMu.Unlock()
+}
+
+// AppendToolResult flips a previously-recorded tool call to done/error
+// and stores the result preview. Lookup is by callID — if not found
+// (unknown id, racy buffer state) the result is dropped silently.
+func (r *Router) AppendToolResult(runID, callID string, isErr bool, result string) {
+	if callID == "" {
+		return
+	}
+	val, ok := r.activeRuns.Load(runID)
+	if !ok {
+		return
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	for i := range run.ToolCalls {
+		if run.ToolCalls[i].ID == callID {
+			if isErr {
+				run.ToolCalls[i].Status = "error"
+			} else {
+				run.ToolCalls[i].Status = "done"
+			}
+			run.ToolCalls[i].Result = result
+			break
+		}
+	}
+	run.bufMu.Unlock()
+}
+
+// AppendThinking mirrors AppendContent for chain-of-thought chunks emitted
+// by reasoning models (MiniMax, DeepSeek-R1). Kept separate from Content
+// so the UI can render the thinking block independently after reload.
+func (r *Router) AppendThinking(runID, chunk string) {
+	if chunk == "" {
+		return
+	}
+	val, ok := r.activeRuns.Load(runID)
+	if !ok {
+		return
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	run.Thinking += chunk
+	run.bufMu.Unlock()
+}
+
+// RunBuffer returns a read-only snapshot of the run's accumulated
+// content + thinking + tool-call buffer. Used by chat.go's goroutine
+// cleanup to persist whatever the LLM had streamed before an external
+// abort interrupted the normal end-of-turn flushMessages. Returns
+// ok=false if the run is no longer registered (already cleaned up).
+// ToolCalls slice is a defensive copy so the caller can iterate
+// safely without holding bufMu.
+func (r *Router) RunBuffer(runID string) (content, thinking string, toolCalls []ToolCallSnapshot, ok bool) {
+	val, found := r.activeRuns.Load(runID)
+	if !found {
+		return "", "", nil, false
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	content = run.Content
+	thinking = run.Thinking
+	if len(run.ToolCalls) > 0 {
+		toolCalls = make([]ToolCallSnapshot, len(run.ToolCalls))
+		copy(toolCalls, run.ToolCalls)
+	}
+	run.bufMu.Unlock()
+	return content, thinking, toolCalls, true
+}
+
+// ActiveRunSnapshot is a read-only projection of an ActiveRun suitable for
+// JSON marshalling. Excludes the cancel func, channels, atomics, and other
+// non-serialisable fields.
+type ActiveRunSnapshot struct {
+	RunID      string             `json:"runId"`
+	SessionKey string             `json:"sessionKey"`
+	AgentID    string             `json:"agentId,omitempty"`
+	StartedAt  time.Time          `json:"startedAt"`
+	Content    string             `json:"content,omitempty"`
+	Thinking   string             `json:"thinking,omitempty"`
+	ToolCalls  []ToolCallSnapshot `json:"toolCalls,omitempty"`
+}
+
+// ActiveSessionsForUser returns the active runs owned by the given user
+// within the tenant. Used by chat.activeSessions on WS connect so the
+// SPA can rebuild the in-flight chat bubble after a page reload.
+// Empty userID is treated as a no-op (returns nil) — system runs are
+// never surfaced to user clients.
+func (r *Router) ActiveSessionsForUser(tenantID uuid.UUID, userID string) []ActiveRunSnapshot {
+	if userID == "" {
+		return nil
+	}
+	var out []ActiveRunSnapshot
+	r.activeRuns.Range(func(_, val any) bool {
+		run := val.(*ActiveRun)
+		if run.TenantID != tenantID || run.UserID != userID {
+			return true
+		}
+		run.bufMu.Lock()
+		content := run.Content
+		thinking := run.Thinking
+		var toolCalls []ToolCallSnapshot
+		if len(run.ToolCalls) > 0 {
+			toolCalls = make([]ToolCallSnapshot, len(run.ToolCalls))
+			copy(toolCalls, run.ToolCalls)
+		}
+		run.bufMu.Unlock()
+		out = append(out, ActiveRunSnapshot{
+			RunID:      run.RunID,
+			SessionKey: run.SessionKey,
+			AgentID:    run.AgentID,
+			StartedAt:  run.StartedAt,
+			Content:    content,
+			Thinking:   thinking,
+			ToolCalls:  toolCalls,
+		})
+		return true
+	})
+	return out
 }
 
 // SetRunTraceID associates a trace UUID with an active run.

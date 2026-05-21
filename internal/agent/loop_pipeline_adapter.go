@@ -260,6 +260,7 @@ func convertRunResult(pr *pipeline.RunResult) *RunResult {
 			ContentType: m.ContentType,
 			Size:        m.Size,
 			AsVoice:     m.AsVoice,
+			Filename:    m.Filename,
 		}
 	}
 	return &RunResult{

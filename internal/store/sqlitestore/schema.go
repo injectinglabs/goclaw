@@ -16,7 +16,7 @@ var schemaSQL string
 
 // SchemaVersion is the current SQLite schema version.
 // Bump this when adding new migration steps below.
-const SchemaVersion = 24
+const SchemaVersion = 25
 
 // migrations maps version → SQL to apply when upgrading FROM that version.
 // schema.sql always represents the LATEST full schema (for fresh DBs).
@@ -466,6 +466,18 @@ WHERE context_pruning IS NOT NULL
 	20: `SELECT 1;`,
 	21: `SELECT 1;`,
 	22: `SELECT 1;`,
+
+	// Version 24 → 25: mcp_servers global scope (mirrors PG migration 000058).
+	// SQLite cannot remove NOT NULL from an existing column without full table
+	// recreation (which requires PRAGMA foreign_keys=OFF outside a transaction).
+	// For existing installations, tenant_id remains NOT NULL; the application
+	// layer stores "global" servers under MasterTenantID on SQLite.
+	// Fresh installations use schema.sql which already has the nullable column.
+	// Only the indexes are updated here — safe to run inside a transaction.
+	24: `DROP INDEX IF EXISTS idx_mcp_servers_tenant_name;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_servers_tenant_name ON mcp_servers(tenant_id, name) WHERE tenant_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_servers_global_name ON mcp_servers(name) WHERE tenant_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_mcp_servers_global ON mcp_servers(name) WHERE tenant_id IS NULL;`,
 
 	// Version 23 → 24: vault_documents scope/ownership consistency triggers.
 	// Mirrors PG migration 000055 CHECK constraint; SQLite cannot add CHECK via

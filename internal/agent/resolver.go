@@ -270,10 +270,16 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			sandboxCfgOverride = &resolved
 		}
 
-		// Resolve tenant slug once for workspace + dataDir scoping.
-		var tenantSlug string
+		// Resolve tenant slug + external org ID once for workspace + dataDir
+		// scoping and outbound actor headers. externalOrgID is the
+		// web-backend organizations.id stamped by auth-proxy on each
+		// login; empty until the first login after the stamp lands.
+		var (
+			tenantSlug     string
+			externalOrgID  string
+		)
 		if ag.TenantID != store.MasterTenantID && ag.TenantID != uuid.Nil {
-			tenantSlug = resolveTenantSlug(deps.TenantStore, ag.TenantID)
+			tenantSlug, externalOrgID = resolveTenantSlugAndExternalOrgID(deps.TenantStore, ag.TenantID)
 		}
 
 		// Expand ~ in workspace path and ensure directory exists.
@@ -477,6 +483,8 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			DisplayName:            ag.DisplayName,
 			AgentUUID:              ag.ID,
 			TenantID:               ag.TenantID,
+			TenantSlug:             tenantSlug,
+			ExternalOrgID:          externalOrgID,
 			AgentOtherConfig:       ag.OtherConfig,
 			AgentType:              ag.AgentType,
 			IsTeamLead:             isTeamLead,
@@ -607,14 +615,39 @@ func (r *Router) InvalidateTenant(tenantID uuid.UUID) {
 // resolveTenantSlug looks up the tenant slug for workspace path resolution.
 // Returns the tenant ID string as fallback if lookup fails.
 func resolveTenantSlug(ts store.TenantStore, tenantID uuid.UUID) string {
+	slug, _ := resolveTenantSlugAndExternalOrgID(ts, tenantID)
+	return slug
+}
+
+// resolveTenantSlugAndExternalOrgID returns the goclaw tenant slug AND the
+// web-backend organizations.id (UUID) stamped into tenant.Settings as
+// `external_org_id` by the auth-proxy on each login. The external org ID is
+// what downstream services (web-agent-api) treat as the canonical
+// attribution key on `X-Actor-Org-ID`, avoiding the slug-format coupling
+// that the legacy "org-<type>-<slug>" string introduced.
+//
+// Returns (slug, "") when the tenant row exists but the stamp hasn't been
+// applied yet (during rollout, or for tenants that haven't been touched
+// since the auth-proxy ships the stamp). Callers fall back to the slug in
+// that case.
+func resolveTenantSlugAndExternalOrgID(ts store.TenantStore, tenantID uuid.UUID) (string, string) {
 	if ts == nil {
-		return tenantID.String()
+		return tenantID.String(), ""
 	}
 	tenant, err := ts.GetTenant(context.Background(), tenantID)
 	if err != nil || tenant == nil {
-		return tenantID.String()
+		return tenantID.String(), ""
 	}
-	return tenant.Slug
+	var extOrgID string
+	if len(tenant.Settings) > 0 {
+		var s struct {
+			ExternalOrgID string `json:"external_org_id"`
+		}
+		if json.Unmarshal(tenant.Settings, &s) == nil {
+			extOrgID = s.ExternalOrgID
+		}
+	}
+	return tenant.Slug, extOrgID
 }
 
 func derefInt(p *int) int {

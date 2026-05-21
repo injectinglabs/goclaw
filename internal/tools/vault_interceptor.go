@@ -95,17 +95,20 @@ func (v *VaultInterceptor) AfterWrite(ctx context.Context, resolvedPath, content
 
 	// Publish enrichment event (async summary + embedding + auto-linking).
 	if v.eventBus != nil {
+		userID := store.UserIDFromContext(ctx)
 		v.eventBus.Publish(eventbus.DomainEvent{
 			ID:        uuid.Must(uuid.NewV7()).String(),
 			Type:      eventbus.EventVaultDocUpserted,
 			SourceID:  doc.ID + ":" + hash,
 			TenantID:  tenantID,
 			AgentID:   eventAgentID,
+			UserID:    userID,
 			Timestamp: time.Now(),
 			Payload: eventbus.VaultDocUpsertedPayload{
 				DocID:       doc.ID,
 				TenantID:    tenantID,
 				AgentID:     eventAgentID,
+				UserID:      userID,
 				Path:        relPath,
 				ContentHash: hash,
 				Workspace:   v.workspace,
@@ -179,17 +182,20 @@ func (v *VaultInterceptor) AfterWriteMedia(ctx context.Context, resolvedPath, su
 
 	// Publish enrichment event (async embedding + auto-linking; may skip summarize if caption provided).
 	if v.eventBus != nil {
+		userID := store.UserIDFromContext(ctx)
 		v.eventBus.Publish(eventbus.DomainEvent{
 			ID:        uuid.Must(uuid.NewV7()).String(),
 			Type:      eventbus.EventVaultDocUpserted,
 			SourceID:  doc.ID + ":" + hash,
 			TenantID:  tenantID,
 			AgentID:   eventAgentID,
+			UserID:    userID,
 			Timestamp: time.Now(),
 			Payload: eventbus.VaultDocUpsertedPayload{
 				DocID:       doc.ID,
 				TenantID:    tenantID,
 				AgentID:     eventAgentID,
+				UserID:      userID,
 				Path:        relPath,
 				ContentHash: hash,
 				Workspace:   v.workspace,

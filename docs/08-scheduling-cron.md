@@ -189,6 +189,17 @@ Example retry sequence: fail → wait 2s → retry → fail → wait 4s → retr
 
 Retries are transparent to the user; final run status (ok or error) is logged to the `cron_run_logs` table.
 
+### Per-User Event Scoping (Shared-Tenant Safety)
+
+In single-tenant goclaw every WS client connected to a tenant is the same user, so `EventCronDelivered` could be broadcast tenant-wide without consequence. Under shared-tenant deployments (e.g. injecting.ai's team-org tenants where multiple Cognito users share one `org-team-*` tenant), the cron delivery event MUST be scoped to the job owner — otherwise creating a reminder as member A pops a live notification on member B's chat while the SQL-backed reminders list correctly hides the row.
+
+The fix is in two places:
+
+1. **Emit side** — `cmd/gateway_cron.go` puts `user_id` (snake_case) into the `cron.delivered` payload alongside the existing reminder fields. The owner id is read from the cron job row.
+2. **Filter side** — `internal/gateway/event_filter.go` has a dedicated `EventCronDelivered` branch (lines 57–63) that runs **before** the `RoleAdmin` shortcut. Without that ordering, any deployment that promotes browser clients to `RoleAdmin` at the gateway boundary (the auth-proxy gateway-token path does this) would bypass the per-user check. The branch fails closed: a payload without `user_id` is dropped, not broadcast.
+
+Authorization on the cron RPC methods (`cron.list`, `cron.delete`, `cron.toggle`, `cron.update`, `cron.run` in `internal/gateway/methods/cron.go`) was simultaneously narrowed from `canSeeAll(role, ownerIDs, userID)` to `client.IsOwner()`. The previous check let any `RoleAdmin` browser client mutate another member's cron jobs; `IsOwner()` is the true cross-tenant superuser bit and is the right gate for cross-user mutation in a shared-tenant world.
+
 ### v3 Agent Evolution Cron Jobs
 
 Two background cron jobs manage agent evolution (v3):

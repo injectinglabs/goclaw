@@ -130,6 +130,7 @@ func (l *Loop) finalizeRun(
 			MimeType: mr.ContentType,
 			Kind:     kind,
 			Path:     mr.Path,
+			Filename: mr.Filename,
 		})
 	}
 	rs.pendingMsgs = append(rs.pendingMsgs, assistantMsg)
@@ -197,10 +198,15 @@ func (l *Loop) finalizeRun(
 	l.sessions.UpdateMetadata(ctx, req.SessionKey, l.model, l.provider.Name(), req.Channel)
 	l.sessions.AccumulateTokens(ctx, req.SessionKey, int64(rs.totalUsage.PromptTokens), int64(rs.totalUsage.CompletionTokens))
 
-	// Calibrate token estimation: store actual prompt tokens + message count.
-	if rs.totalUsage.PromptTokens > 0 {
+	// Calibrate token estimation: store the FINAL iteration's prompt_tokens
+	// + message count. Using totalUsage.PromptTokens here would over-count
+	// across tool-loop iterations and produce a misleading context-fill
+	// indicator. rs.lastPromptTokens is the snapshot of the last call only.
+	// (This v2 path is currently legacy / unused; the live pipeline path
+	// goes through makeUpdateMetadata. Keep the two in sync defensively.)
+	if rs.lastPromptTokens > 0 {
 		msgCount := len(history) + rs.checkpointFlushedMsgs + len(rs.pendingMsgs)
-		l.sessions.SetLastPromptTokens(ctx, req.SessionKey, rs.totalUsage.PromptTokens, msgCount)
+		l.sessions.SetLastPromptTokens(ctx, req.SessionKey, rs.lastPromptTokens, msgCount)
 	}
 
 	l.sessions.Save(ctx, req.SessionKey)

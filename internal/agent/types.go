@@ -20,4 +20,12 @@ type Agent interface {
 	Model() string
 	ProviderName() string
 	Provider() providers.Provider
+	// ExternalOrgID and TenantSlug let out-of-loop call sites (e.g. the
+	// auto-title goroutine in gateway/methods/chat.go) attach the same
+	// X-Actor-Org-ID actor header that Loop.injectContext applies on the
+	// regular run path. Prefer ExternalOrgID; fall back to TenantSlug
+	// during the rollout window when auth-proxy hasn't stamped
+	// tenants.settings.external_org_id yet.
+	ExternalOrgID() string
+	TenantSlug() string
 }

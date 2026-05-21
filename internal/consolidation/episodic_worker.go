@@ -18,11 +18,12 @@ import (
 // episodicWorker handles session.completed events → creates episodic summaries.
 type episodicWorker struct {
 	store         store.EpisodicStore
-	sessions      store.SessionCoreStore      // for reading session messages during summarization
-	systemConfigs store.SystemConfigStore     // per-tenant provider config
-	registry      *providers.Registry         // provider resolution
+	sessions      store.SessionCoreStore  // for reading session messages during summarization
+	systemConfigs store.SystemConfigStore // per-tenant provider config
+	registry      *providers.Registry     // provider resolution
 	eventBus      eventbus.DomainEventBus
 	alertDeps     bgalert.AlertDeps
+	tenantStore   store.TenantStore // for outbound actor-header attribution
 }
 
 // resolveProvider delegates to shared background provider resolution.
@@ -70,7 +71,12 @@ func (w *episodicWorker) Handle(ctx context.Context, event eventbus.DomainEvent)
 	if summary == "" {
 		provider, model := w.resolveProvider(ctx, tenantUUID)
 		if provider != nil {
-			summary, err = w.summarizeSession(ctx, provider, model, payload)
+			// Attribution headers: web-agent-api 400's the service-token path
+			// without X-Actor-User-ID / X-Actor-Org-ID. Empty userID falls
+			// through to ctx unchanged; the call still fails but with a clear
+			// signal rather than a silent mis-attribution.
+			summarizeCtx := attachBackgroundActorHeaders(ctx, w.tenantStore, tenantUUID, event.UserID)
+			summary, err = w.summarizeSession(summarizeCtx, provider, model, payload)
 			if err != nil {
 				bgalert.ReportProviderError(ctx, w.alertDeps, "episodic", err)
 				return fmt.Errorf("episodic: summarize: %w", err)

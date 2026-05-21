@@ -205,6 +205,7 @@ func runGateway() {
 				Extractor:     kgExtractor,
 				AlertDeps:     bgalert.AlertDeps{SystemConfigs: pgStores.SystemConfigs, MsgBus: msgBus},
 				AgentStore:    pgStores.Agents,
+				TenantStore:   pgStores.Tenants,
 			})
 			defer cleanupConsolidation()
 			slog.Info("consolidation pipeline registered", "provider", bgProvider.Name(), "model", bgModel)
@@ -226,6 +227,7 @@ func runGateway() {
 			MsgBus:        msgBus,
 			TeamStore:     pgStores.Teams,
 			AlertDeps:     bgalert.AlertDeps{SystemConfigs: pgStores.SystemConfigs, MsgBus: msgBus},
+			TenantStore:   pgStores.Tenants,
 		})
 		enrichProgress = ep
 		enrichWorker = ew
@@ -441,6 +443,7 @@ func runGateway() {
 		instanceLoader = channels.NewInstanceLoader(pgStores.ChannelInstances, pgStores.Agents, channelMgr, msgBus, pgStores.Pairing)
 		instanceLoader.SetProviderRegistry(providerRegistry)
 		instanceLoader.SetPendingCompactionConfig(cfg.Channels.PendingCompaction)
+		instanceLoader.SetTenantStore(pgStores.Tenants)
 		instanceLoader.RegisterFactory(channels.TypeTelegram, telegram.FactoryWithStoresAndAudio(pgStores.Agents, pgStores.ConfigPermissions, pgStores.Teams, pgStores.SubagentTasks, pgStores.PendingMessages, audioMgr))
 		instanceLoader.RegisterFactory(channels.TypeDiscord, discord.FactoryWithStoresAndAudio(pgStores.Agents, pgStores.ConfigPermissions, pgStores.PendingMessages, audioMgr))
 		instanceLoader.RegisterFactory(channels.TypeFeishu, feishu.FactoryWithPendingStoreAndAudio(pgStores.PendingMessages, audioMgr))

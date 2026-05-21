@@ -108,6 +108,15 @@ type SessionCoreStore interface {
 	// Get returns the session if it exists (cache or DB), nil otherwise. Never creates.
 	Get(ctx context.Context, key string) *SessionData
 	AddMessage(ctx context.Context, key string, msg providers.Message)
+	// SetLastUserMessageMediaRefs replaces the MediaRefs slice on the
+	// most-recent user-role message in the session. Used by the pipeline
+	// after persistMedia uploads complete, so the user message gets its
+	// attachment pointers without a duplicate AddMessage. Returns nil
+	// silently if no user message exists yet (caller's job to ensure
+	// it does — chat.go eager-AddMessage at request boundary). Not
+	// idempotent on the message identity, but idempotent on refs (each
+	// call replaces, not appends).
+	SetLastUserMessageMediaRefs(ctx context.Context, key string, refs []providers.MediaRef) error
 	GetHistory(ctx context.Context, key string) []providers.Message
 	GetSummary(ctx context.Context, key string) string
 	SetSummary(ctx context.Context, key, summary string)

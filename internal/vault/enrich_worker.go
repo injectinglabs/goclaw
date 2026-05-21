@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nextlevelbuilder/goclaw/internal/actorheaders"
 	"github.com/nextlevelbuilder/goclaw/internal/bgalert"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/eventbus"
@@ -47,6 +48,12 @@ type EnrichWorkerDeps struct {
 	MsgBus        bus.EventPublisher        // for WS event broadcast
 	TeamStore     store.TaskCommentStore    // for Phase 2.5 task-based auto-linking (nil-safe)
 	AlertDeps     bgalert.AlertDeps         // for reporting non-retryable LLM errors
+	// TenantStore is read at chatWithRetry time to build the
+	// X-Actor-Org-ID HTTP header (canonical web-backend org UUID stored
+	// on tenants.settings.external_org_id). Without it the outbound LLM
+	// call from the enrich worker arrives at web-agent-api without
+	// attribution and 400's on the service-token path.
+	TenantStore store.TenantStore
 }
 
 // RegisterEnrichWorker subscribes the enrichment worker to vault doc events.
@@ -60,6 +67,7 @@ func RegisterEnrichWorker(deps EnrichWorkerDeps) (func(), *EnrichProgress, *Enri
 		registry:      deps.Registry,
 		msgBus:        deps.MsgBus,
 		alertDeps:     deps.AlertDeps,
+		tenantStore:   deps.TenantStore,
 		dedup:         make(map[string]string),
 		sem:           semaphore.NewWeighted(enrichMaxConcurrent),
 		progress:      progress,
@@ -79,6 +87,7 @@ type EnrichWorker struct {
 	registry      *providers.Registry         // provider resolution
 	msgBus        bus.EventPublisher          // for error event broadcast
 	alertDeps     bgalert.AlertDeps           // for reporting non-retryable LLM errors
+	tenantStore   store.TenantStore           // for outbound actor-header attribution
 	queue         enrichBatchQueue
 	progress      *EnrichProgress
 
@@ -296,6 +305,25 @@ func (w *EnrichWorker) processChunk(ctx context.Context, items []eventbus.VaultD
 
 	// Batch-fetch all existing docs in a single query.
 	tenantID := pending[0].TenantID
+
+	// Attach X-Actor-* headers for the upcoming provider.Chat calls.
+	// All items in a chunk share the same tenant; we attribute the
+	// outbound LLM call(s) to the first item's uploader. Mixed-user
+	// batches (multiple uploaders in the same tenant inside one tick)
+	// attribute to whoever fired first — documented compromise so we
+	// don't lose batching.
+	// When the chunk has no user attribution at all (bulk paths like
+	// RescanWorkspace and EnqueueUnenriched, neither of which is tied
+	// to a single human), switch to the infra path: the receiver
+	// charges the org without touching any user's quota and writes the
+	// ai_tasks row with source='infra'. See migration 050 + auth.py.
+	if tid, parseErr := uuid.Parse(tenantID); parseErr == nil {
+		if pending[0].UserID != "" {
+			ctx = actorheaders.Attach(ctx, w.tenantStore, tid, pending[0].UserID)
+		} else {
+			ctx = actorheaders.AttachInfra(ctx, w.tenantStore, tid)
+		}
+	}
 
 	// Resolve provider once per chunk (all items share tenantID)
 	provider, model := w.resolveProviderForTenant(ctx, tenantID)

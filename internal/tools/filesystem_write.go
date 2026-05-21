@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -10,6 +11,15 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/sandbox"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
+
+// MediaUploadFunc copies a freshly-written local file into the durable
+// media store (S3 on stage/prod, FS in dev). Returns the media ID and a
+// local cache path the chat UI can keep referencing after the original
+// workspace file is pruned by the host-side cleanup cron. Pass the
+// already-resolved absolute source path; the implementation consumes it
+// (rename or copy+remove), so callers MUST hand in a tmp copy if they
+// want to keep the workspace file intact.
+type MediaUploadFunc func(sessionKey, srcPath, mime string) (id string, dstPath string, err error)
 
 // WriteFileTool writes content to a file, optionally through a sandbox container.
 type WriteFileTool struct {
@@ -23,6 +33,18 @@ type WriteFileTool struct {
 	permStore       store.ConfigPermissionStore // nil = no group write restriction
 	workspaceIntc   *WorkspaceInterceptor       // nil = no team workspace validation
 	vaultIntc       *VaultInterceptor           // nil = no vault registration
+	// mediaUpload, when set, mirrors successful `deliver=true` writes into
+	// the media store so chat attachments survive the 7d cleanup of the
+	// workspace volume. nil → keep legacy local-only behaviour.
+	mediaUpload MediaUploadFunc
+}
+
+// SetMediaUploadFunc enables durable copy of delivered files to the media
+// store. Wired from cmd/gateway_managed.go to mediaStore.SaveFile. Without
+// this hook the tool falls back to local-workspace-only delivery (file
+// disappears when the systemd cleanup-cron prunes the workspace).
+func (t *WriteFileTool) SetMediaUploadFunc(fn MediaUploadFunc) {
+	t.mediaUpload = fn
 }
 
 // AllowPaths adds extra path prefixes that write_file is allowed to access
@@ -230,13 +252,80 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *Resul
 	result := SilentResult(msg)
 	result.Deliverable = content
 	if deliver {
-		result.Media = []bus.MediaFile{{Path: resolved, Filename: filepath.Base(resolved)}}
+		// Default: chat bubble points at the local workspace file the LLM
+		// just wrote. Works immediately; gets pruned after 7d by the host
+		// cleanup-cron. uploadDeliveredToMediaStore upgrades this path to
+		// the media-store cache (S3-backed) when the hook is wired, so the
+		// attachment survives the cron-driven cleanup.
+		deliveredPath := resolved
+		if t.mediaUpload != nil {
+			if cachePath := uploadDeliveredToMediaStore(ctx, t.mediaUpload, resolved); cachePath != "" {
+				deliveredPath = cachePath
+			}
+		}
+		result.Media = []bus.MediaFile{{
+			Path:     deliveredPath,
+			Filename: filepath.Base(resolved),
+		}}
 		// Track delivered path so message tool's self-send guard can detect duplicates.
 		if dm := DeliveredMediaFromCtx(ctx); dm != nil {
-			dm.Mark(resolved)
+			dm.Mark(deliveredPath)
 		}
 	}
 	return result
+}
+
+// uploadDeliveredToMediaStore copies the just-written local file into the
+// media store (S3 on stage/prod, FS in dev) so the chat attachment keeps
+// resolving after the workspace's 7d cleanup cron prunes the original.
+// Returns the cache path on success, "" on any failure — the caller falls
+// back to the original local path in that case so the user still sees
+// the file immediately, just without long-term durability.
+func uploadDeliveredToMediaStore(ctx context.Context, upload MediaUploadFunc, src string) string {
+	sessionKey := ToolSessionKeyFromCtx(ctx)
+	if sessionKey == "" {
+		// SaveFile hashes sessionKey to derive the per-session cache dir;
+		// without one we'd write to a global default that's never cleaned
+		// when the session is deleted. Better to skip and surface local.
+		return ""
+	}
+	tmp, err := copyToTempForUpload(src)
+	if err != nil {
+		return ""
+	}
+	mime := mimeFromExt(filepath.Ext(src))
+	_, dst, err := upload(sessionKey, tmp, mime)
+	if err != nil {
+		_ = os.Remove(tmp) // upload didn't consume on error
+		return ""
+	}
+	return dst
+}
+
+// copyToTempForUpload makes a sibling tmpfile of src so mediaUpload's
+// rename/copy+remove on the tmp doesn't disturb the workspace file the
+// LLM just wrote (and may re-read via read_file on the original path).
+func copyToTempForUpload(src string) (string, error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+	out, err := os.CreateTemp("", "wf-upload-*"+filepath.Ext(src))
+	if err != nil {
+		return "", err
+	}
+	tmpPath := out.Name()
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	return tmpPath, nil
 }
 
 func (t *WriteFileTool) executeInSandbox(ctx context.Context, path, content, sandboxKey string, deliver, appendMode bool) *Result {
