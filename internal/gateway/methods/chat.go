@@ -360,12 +360,17 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 			if m.agents == nil {
 				return
 			}
-			content, thinking, ok := m.agents.RunBuffer(runID)
+			content, thinking, toolCalls, ok := m.agents.RunBuffer(runID)
 			slog.Info("partial-save: entering defer",
 				"sessionKey", sessionKey, "runID", runID,
 				"ctxErr", runCtx.Err(), "loopErr", loopErr,
-				"bufferOk", ok, "contentLen", len(content), "thinkingLen", len(thinking))
-			if !ok || content == "" {
+				"bufferOk", ok, "contentLen", len(content),
+				"thinkingLen", len(thinking), "toolCalls", len(toolCalls))
+			// Skip only if absolutely nothing was streamed (no text, no
+			// tool calls). A turn that did tools but no final text is
+			// still worth persisting so the reload-recovery UI can show
+			// the tool indicators.
+			if !ok || (content == "" && len(toolCalls) == 0) {
 				return
 			}
 			// Idempotency: if flushMessages happened to land the same
@@ -376,24 +381,53 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 				if hist[i].Role == "user" {
 					break
 				}
-				if hist[i].Role == "assistant" && hist[i].Content == content {
+				if hist[i].Role == "assistant" && hist[i].Content == content && content != "" {
 					slog.Info("partial-save: skipped (already in history)",
 						"sessionKey", sessionKey)
 					return
 				}
 			}
+			// Synthesise tool_calls on the assistant message so the
+			// reload-recovery UI sees the same indicators it saw during
+			// the live stream. Args are omitted (router buffer doesn't
+			// store them) — UI only needs id + name for the indicator.
 			msg := providers.Message{Role: "assistant", Content: content}
 			if thinking != "" {
 				msg.Thinking = thinking
 			}
+			if len(toolCalls) > 0 {
+				msg.ToolCalls = make([]providers.ToolCall, 0, len(toolCalls))
+				for _, tc := range toolCalls {
+					msg.ToolCalls = append(msg.ToolCalls, providers.ToolCall{
+						ID:   tc.ID,
+						Name: tc.Name,
+					})
+				}
+			}
 			m.sessions.AddMessage(runCtxBase, sessionKey, msg)
+			// Append a role="tool" message for every tool call that
+			// produced a result so the conversation tail is well-formed.
+			// Running calls (status="running") are skipped — they were
+			// interrupted before completion.
+			for _, tc := range toolCalls {
+				if tc.Status != "done" && tc.Status != "error" {
+					continue
+				}
+				m.sessions.AddMessage(runCtxBase, sessionKey, providers.Message{
+					Role:       "tool",
+					Content:    tc.Result,
+					ToolCallID: tc.ID,
+					IsError:    tc.Status == "error",
+				})
+			}
 			if err := m.sessions.Save(runCtxBase, sessionKey); err != nil {
 				slog.Warn("partial-save: Save failed",
 					"sessionKey", sessionKey, "error", err)
 				return
 			}
 			slog.Info("partial-save: persisted",
-				"sessionKey", sessionKey, "contentLen", len(content))
+				"sessionKey", sessionKey, "contentLen", len(content),
+				"toolCallsSaved", len(toolCalls))
 		}()
 		defer drainTeamDispatch() // dispatch pending team tasks + release lock (even on panic)
 

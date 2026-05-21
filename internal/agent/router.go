@@ -414,21 +414,27 @@ func (r *Router) AppendThinking(runID, chunk string) {
 }
 
 // RunBuffer returns a read-only snapshot of the run's accumulated
-// content + thinking buffer. Used by chat.go's goroutine cleanup to
-// persist whatever the LLM had streamed before an external abort
-// interrupted the normal end-of-turn flushMessages. Returns ok=false
-// if the run is no longer registered (already cleaned up).
-func (r *Router) RunBuffer(runID string) (content, thinking string, ok bool) {
+// content + thinking + tool-call buffer. Used by chat.go's goroutine
+// cleanup to persist whatever the LLM had streamed before an external
+// abort interrupted the normal end-of-turn flushMessages. Returns
+// ok=false if the run is no longer registered (already cleaned up).
+// ToolCalls slice is a defensive copy so the caller can iterate
+// safely without holding bufMu.
+func (r *Router) RunBuffer(runID string) (content, thinking string, toolCalls []ToolCallSnapshot, ok bool) {
 	val, found := r.activeRuns.Load(runID)
 	if !found {
-		return "", "", false
+		return "", "", nil, false
 	}
 	run := val.(*ActiveRun)
 	run.bufMu.Lock()
 	content = run.Content
 	thinking = run.Thinking
+	if len(run.ToolCalls) > 0 {
+		toolCalls = make([]ToolCallSnapshot, len(run.ToolCalls))
+		copy(toolCalls, run.ToolCalls)
+	}
 	run.bufMu.Unlock()
-	return content, thinking, true
+	return content, thinking, toolCalls, true
 }
 
 // ActiveRunSnapshot is a read-only projection of an ActiveRun suitable for
