@@ -341,18 +341,30 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 		// only — reload after Stop wipes it. Fires BEFORE cancel +
 		// UnregisterRun (LIFO), so RunBuffer can still read the ActiveRun.
 		defer func() {
-			// Best-practice gate: only on cancellation. Normal completion
-			// (loopErr == nil) routed through flushMessages + Save already;
-			// a real error (loopErr != nil but not Canceled) means the LLM
-			// itself failed and the partial may be inconsistent — don't
-			// persist.
-			if loopErr == nil || !errors.Is(loopErr, context.Canceled) {
+			// Gate on runCtx.Err() — it is non-nil iff external cancellation
+			// (AbortRun → run.Cancel) reached this run. Reliable across all
+			// provider/transport error wrapping, unlike errors.Is(loopErr,
+			// context.Canceled) which depends on the error chain implementing
+			// Unwrap properly. The local `defer cancel()` fires AFTER this
+			// defer (LIFO), so its contribution to runCtx.Err() is not yet
+			// visible — what we read here reflects only external aborts.
+			//
+			// Fallback: also fire if loopErr wraps context.Canceled, since
+			// some providers may bubble the cancel signal through their own
+			// error path even before runCtx is cancelled at the agent level.
+			cancelled := runCtx.Err() != nil ||
+				(loopErr != nil && errors.Is(loopErr, context.Canceled))
+			if !cancelled {
 				return
 			}
 			if m.agents == nil {
 				return
 			}
 			content, thinking, ok := m.agents.RunBuffer(runID)
+			slog.Info("partial-save: entering defer",
+				"sessionKey", sessionKey, "runID", runID,
+				"ctxErr", runCtx.Err(), "loopErr", loopErr,
+				"bufferOk", ok, "contentLen", len(content), "thinkingLen", len(thinking))
 			if !ok || content == "" {
 				return
 			}
@@ -365,6 +377,8 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 					break
 				}
 				if hist[i].Role == "assistant" && hist[i].Content == content {
+					slog.Info("partial-save: skipped (already in history)",
+						"sessionKey", sessionKey)
 					return
 				}
 			}
@@ -374,8 +388,12 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 			}
 			m.sessions.AddMessage(runCtxBase, sessionKey, msg)
 			if err := m.sessions.Save(runCtxBase, sessionKey); err != nil {
-				slog.Warn("partial-save: Save failed", "sessionKey", sessionKey, "error", err)
+				slog.Warn("partial-save: Save failed",
+					"sessionKey", sessionKey, "error", err)
+				return
 			}
+			slog.Info("partial-save: persisted",
+				"sessionKey", sessionKey, "contentLen", len(content))
 		}()
 		defer drainTeamDispatch() // dispatch pending team tasks + release lock (even on panic)
 
