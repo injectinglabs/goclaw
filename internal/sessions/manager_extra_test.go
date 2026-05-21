@@ -98,6 +98,42 @@ func TestTruncateHistory_LessThanKeep(t *testing.T) {
 	}
 }
 
+// TestTruncateBefore drops messages[0:splitIdx].
+func TestTruncateBefore(t *testing.T) {
+	m := NewManager("")
+	ctx := context.Background()
+	key := "agent:a1:s1"
+
+	for i := 0; i < 10; i++ {
+		m.AddMessage(ctx, key, providers.Message{Role: "user", Content: "msg"})
+	}
+	m.TruncateBefore(ctx, key, 7)
+
+	history := m.GetHistory(ctx, key)
+	if len(history) != 3 {
+		t.Fatalf("expected 3 messages after TruncateBefore(7), got %d", len(history))
+	}
+}
+
+// TestTruncateBefore_NonExistentSession is a silent no-op.
+func TestTruncateBefore_NonExistentSession(t *testing.T) {
+	m := NewManager("")
+	m.TruncateBefore(context.Background(), "nonexistent", 5)
+}
+
+// TestTruncateBefore_ZeroIsNoop preserves all messages.
+func TestTruncateBefore_ZeroIsNoop(t *testing.T) {
+	m := NewManager("")
+	ctx := context.Background()
+	key := "agent:a1:s1"
+	m.AddMessage(ctx, key, providers.Message{Role: "user", Content: "a"})
+	m.AddMessage(ctx, key, providers.Message{Role: "user", Content: "b"})
+	m.TruncateBefore(ctx, key, 0)
+	if len(m.GetHistory(ctx, key)) != 2 {
+		t.Fatalf("TruncateBefore(0) must be a no-op")
+	}
+}
+
 // TestLastUsedChannel_Empty returns ("","") for an empty manager.
 func TestLastUsedChannel_Empty(t *testing.T) {
 	m := NewManager("")

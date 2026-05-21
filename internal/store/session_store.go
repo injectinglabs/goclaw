@@ -124,6 +124,13 @@ type SessionCoreStore interface {
 	SetLabel(ctx context.Context, key, label string)
 	SetAgentInfo(ctx context.Context, key string, agentUUID uuid.UUID, userID string)
 	TruncateHistory(ctx context.Context, key string, keepLast int)
+	// TruncateBefore drops messages[0:splitIdx] from the session, retaining
+	// everything from splitIdx onward. Callers compute splitIdx using the
+	// shared agent.safeSplitIndex helper so the cut never lands between a
+	// tool_call → tool_result pair (which would leave an orphan at the
+	// head of the kept slice and force sanitizeHistory to repair on the
+	// next LLM call).
+	TruncateBefore(ctx context.Context, key string, splitIdx int)
 	SetHistory(ctx context.Context, key string, msgs []providers.Message)
 	Reset(ctx context.Context, key string)
 	Delete(ctx context.Context, key string) error

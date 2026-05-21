@@ -96,6 +96,25 @@ func (s *SQLiteSessionStore) TruncateHistory(ctx context.Context, key string, ke
 	}
 }
 
+// TruncateBefore drops messages[0:splitIdx]. See store.SessionCoreStore docs.
+func (s *SQLiteSessionStore) TruncateBefore(ctx context.Context, key string, splitIdx int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, ok := s.cache[sessionCacheKey(ctx, key)]
+	if !ok {
+		return
+	}
+	if splitIdx <= 0 {
+		return
+	}
+	if splitIdx >= len(data.Messages) {
+		data.Messages = []providers.Message{}
+	} else {
+		data.Messages = data.Messages[splitIdx:]
+	}
+	data.Updated = time.Now()
+}
+
 func (s *SQLiteSessionStore) SetHistory(ctx context.Context, key string, msgs []providers.Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

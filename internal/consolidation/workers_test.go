@@ -237,10 +237,14 @@ func (m *mockSessionStore) GetLabel(context.Context, string) string { return "" 
 func (m *mockSessionStore) SetLabel(context.Context, string, string) {}
 func (m *mockSessionStore) SetAgentInfo(context.Context, string, uuid.UUID, string) {}
 func (m *mockSessionStore) TruncateHistory(context.Context, string, int) {}
+func (m *mockSessionStore) TruncateBefore(context.Context, string, int)  {}
 func (m *mockSessionStore) SetHistory(context.Context, string, []providers.Message) {}
 func (m *mockSessionStore) Reset(context.Context, string) {}
 func (m *mockSessionStore) Delete(context.Context, string) error { return nil }
 func (m *mockSessionStore) Save(context.Context, string) error { return nil }
+func (m *mockSessionStore) SetLastUserMessageMediaRefs(context.Context, string, []providers.MediaRef) error {
+	return nil
+}
 
 // mockDomainEventBus implements eventbus.DomainEventBus for testing.
 type mockDomainEventBus struct {

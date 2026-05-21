@@ -28,6 +28,14 @@ type ModelRegistry interface {
 	Catalog(provider string) []ModelSpec
 }
 
+// AliasRegisterer is implemented by registries that support alias entries
+// where the same ModelSpec is reachable via every known provider name
+// (anthropic/openai/openrouter/openai-compat/etc.). Used by the LLM-service
+// model fetcher to register provider-agnostic aliases like "default" or "fast".
+type AliasRegisterer interface {
+	RegisterAlias(alias string, spec ModelSpec)
+}
+
 // ForwardCompatResolver is implemented by providers to handle unknown models.
 type ForwardCompatResolver interface {
 	ResolveForwardCompat(modelID string, registry ModelRegistry) *ModelSpec
@@ -53,6 +61,38 @@ func registryKey(provider, modelID string) string {
 // Register adds or updates a model spec.
 func (r *InMemoryRegistry) Register(spec ModelSpec) {
 	r.models.Store(registryKey(spec.Provider, spec.ID), &spec)
+}
+
+// aliasProviders lists every provider name under which a registered alias is
+// looked up by the rest of the codebase. Keeping the spec retrievable under
+// every key avoids guessing the provider name at Resolve() time.
+var aliasProviders = []string{
+	"",                // empty provider (Loop default)
+	"anthropic",
+	"openai",
+	"openai-compat",
+	"openrouter",
+	"openrouter-compat",
+	"dashscope",
+	"codex",
+	"llm-service",
+}
+
+// RegisterAlias registers the same ModelSpec under multiple provider keys so
+// that subsequent Resolve(provider, alias) calls return it regardless of which
+// provider name the caller carries. The supplied spec's ID is overwritten with
+// `alias` and the Provider field is set to the corresponding key for each
+// registration. Used by the LLM-service model fetcher.
+func (r *InMemoryRegistry) RegisterAlias(alias string, spec ModelSpec) {
+	if alias == "" {
+		return
+	}
+	for _, p := range aliasProviders {
+		entry := spec
+		entry.ID = alias
+		entry.Provider = p
+		r.models.Store(registryKey(p, alias), &entry)
+	}
 }
 
 // RegisterResolver sets the forward-compat resolver for a provider.
