@@ -413,6 +413,24 @@ func (r *Router) AppendThinking(runID, chunk string) {
 	run.bufMu.Unlock()
 }
 
+// RunBuffer returns a read-only snapshot of the run's accumulated
+// content + thinking buffer. Used by chat.go's goroutine cleanup to
+// persist whatever the LLM had streamed before an external abort
+// interrupted the normal end-of-turn flushMessages. Returns ok=false
+// if the run is no longer registered (already cleaned up).
+func (r *Router) RunBuffer(runID string) (content, thinking string, ok bool) {
+	val, found := r.activeRuns.Load(runID)
+	if !found {
+		return "", "", false
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	content = run.Content
+	thinking = run.Thinking
+	run.bufMu.Unlock()
+	return content, thinking, true
+}
+
 // ActiveRunSnapshot is a read-only projection of an ActiveRun suitable for
 // JSON marshalling. Excludes the cancel func, channels, atomics, and other
 // non-serialisable fields.
