@@ -176,13 +176,14 @@ func NewWaitForElementTool() Tool {
 		name: "wait_for_element",
 		desc: "Waits for an element to appear in the DOM — use after clicking a button that opens a modal, " +
 			"submitting a form that triggers an AJAX response, or navigating to a new page. " +
-			"Polls every 200 ms up to timeout_ms (max 30 000). Returns success when found, error on timeout.",
+			"Polls every 200 ms up to timeout_ms (max 30 000). Returns success when found, error on timeout. " +
+			"Supports ' >> ' shadow/iframe selectors (same syntax as execute_action).",
 		params: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"selector": map[string]any{
 					"type":        "string",
-					"description": "CSS selector to wait for",
+					"description": "CSS selector to wait for. Use ' >> ' to cross shadow DOM or same-origin iframe boundaries.",
 				},
 				"timeout_ms": map[string]any{
 					"type":        "integer",
