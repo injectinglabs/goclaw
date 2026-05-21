@@ -3,6 +3,7 @@ package methods
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/google/uuid"
 
@@ -323,9 +324,62 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 	injectCh := m.agents.RegisterRun(runCtxBase, runID, sessionKey, params.AgentID, userID, cancel)
 
 	// Run agent asynchronously - events are broadcast via the event system
+	//
+	// loopErr is captured from loop.Run below and read by the partial-save
+	// defer. Gating on loop.Run's actual return (rather than ActiveRun state
+	// flags) avoids the race where AbortRun could CAS Aborting=1 in the
+	// millisecond between flushMessages persisting normally and the
+	// goroutine running its defers — which would have caused a duplicate
+	// assistant turn.
+	var loopErr error
 	go func() {
 		defer m.agents.UnregisterRun(runID)
 		defer cancel()
+		// Persist whatever the LLM streamed before an external abort
+		// interrupted the normal end-of-turn flushMessages. Without this,
+		// the partial assistant text exists in client UI + server buffer
+		// only — reload after Stop wipes it. Fires BEFORE cancel +
+		// UnregisterRun (LIFO), so RunBuffer can still read the ActiveRun.
+		defer func() {
+			// Best-practice gate: only on cancellation. Normal completion
+			// (loopErr == nil) routed through flushMessages + Save already;
+			// a real error (loopErr != nil but not Canceled) means the LLM
+			// itself failed and the partial may be inconsistent — don't
+			// persist.
+			if loopErr == nil || !errors.Is(loopErr, context.Canceled) {
+				return
+			}
+			if m.agents == nil {
+				return
+			}
+			content, thinking, ok := m.agents.RunBuffer(runID)
+			if !ok || content == "" {
+				return
+			}
+			// Idempotency: if flushMessages happened to land the same
+			// assistant turn before cancellation propagated, the tail of
+			// history already contains it — don't double-write.
+			hist := m.sessions.GetHistory(runCtxBase, sessionKey)
+			for i := len(hist) - 1; i >= 0; i-- {
+				if hist[i].Role == "user" {
+					break
+				}
+				if hist[i].Role == "assistant" && hist[i].Content == content {
+					return
+				}
+			}
+			msg := providers.Message{Role: "assistant", Content: content}
+			if thinking != "" {
+				msg.Thinking = thinking
+			}
+			if err := m.sessions.AddMessage(runCtxBase, sessionKey, msg); err != nil {
+				slog.Warn("partial-save: AddMessage failed", "sessionKey", sessionKey, "error", err)
+				return
+			}
+			if err := m.sessions.Save(runCtxBase, sessionKey); err != nil {
+				slog.Warn("partial-save: Save failed", "sessionKey", sessionKey, "error", err)
+			}
+		}()
 		defer drainTeamDispatch() // dispatch pending team tasks + release lock (even on panic)
 
 		// Parse media items (supports both legacy string paths and new {path,filename} objects).
@@ -373,7 +427,11 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 			}
 		}
 
-		result, err := loop.Run(runCtx, agent.RunRequest{
+		var result *agent.RunResult
+		var err error
+		// Note: err is also assigned to the outer loopErr below so the
+		// partial-save defer can distinguish cancellation from normal exit.
+		result, err = loop.Run(runCtx, agent.RunRequest{
 			SessionKey:    sessionKey,
 			Message:       message,
 			Media:         mediaFiles,
@@ -391,6 +449,7 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 				m.agents.SetRunTraceID(runID, traceID)
 			},
 		})
+		loopErr = err // surface loop result to partial-save defer
 
 		if err != nil {
 			// Send cancelled response so the frontend's chat.send promise resolves
