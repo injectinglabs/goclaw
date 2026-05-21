@@ -296,6 +296,17 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 	// Media refs are attached to this same message later in
 	// makeEnrichMedia via SetLastUserMessageMediaRefs — no double write.
 	if params.Message != "" {
+		// Stamp identity + channel BEFORE the message + Save. Without
+		// this the row lands in PG with empty user_id / channel, so
+		// sessions.list (which filters by user_id + channel='ws' for
+		// non-admin WS clients) drops it — the user reloads and their
+		// own chat is invisible. sessions.Get-based ownership checks
+		// (chat.abort, sessions.delete, sessions.preview) ALSO fail
+		// because session.UserID != client.UserID() collapses to a
+		// 401/404. agent_uuid is set later by loop.Run; uuid.Nil here
+		// is intentional (SetAgentInfo skips Nil overwrites).
+		m.sessions.SetAgentInfo(runCtxBase, sessionKey, uuid.Nil, userID)
+		m.sessions.UpdateMetadata(runCtxBase, sessionKey, "", "", "ws")
 		m.sessions.AddMessage(runCtxBase, sessionKey, providers.Message{
 			Role:    "user",
 			Content: params.Message,
