@@ -230,9 +230,12 @@ var coreToolSummaries = map[string]string{
 	"delegate":                "Delegate a task to a linked agent (requires agent_links). See ## Delegation Targets for available agents",
 	"memory_expand":           "Retrieve full session details from episodic memory results — use after memory_search returns episodic hits",
 	"vault_search": "Search documents in the knowledge vault (hybrid keyword + semantic)",
-	"refresh_page_content": "Read the user's current browser tab — returns URL, title, interactive elements with CSS selectors, headings, text preview. Call when the user asks about or wants to act on the page they are on.",
-	"execute_action":       "Perform an action on the user's current browser tab: fill (into input/textarea), click (button/link), select (dropdown option), or press_enter (submit a form via Enter key — preferred for search inputs on Google/GitHub/etc.). Always call refresh_page_content first to find selectors.",
-	"execute_js":           "Escape hatch: run arbitrary JavaScript in the user's current browser tab (MAIN world) and return the result. Use ONLY when execute_action cannot reach the element — custom comboboxes, shadow DOM, reading page state, multi-step widget interactions. Prefer execute_action for plain fill/click/select.",
+	"refresh_page_content":  "Read the user's current browser tab — returns URL, title, interactive elements with CSS selectors, headings, text preview. Call when the user asks about or wants to act on the page they are on.",
+	"execute_action":        "Perform an action on the user's current browser tab: fill (input/textarea/contenteditable), click (button/link), select (dropdown), press_enter (form submit), hover (open dropdown/tooltip), keyboard (Escape/Tab/ArrowDown/Control+z/etc.), get_value (read current value). Always call refresh_page_content first to find selectors.",
+	"execute_js":            "Escape hatch: run arbitrary JavaScript in the user's current browser tab (MAIN world) and return the result. Use ONLY when execute_action cannot reach the element — custom comboboxes, reading page state, multi-step widget interactions. Prefer execute_action for plain fill/click/select.",
+	"wait_for_navigation":   "Wait for the page URL or title to change after a SPA router-link click or form submit. Follow with refresh_page_content.",
+	"wait_for_network":      "Wait until no fetch/XHR requests are in-flight (network idle). Use after AJAX form submits before reading updated page state.",
+	"scroll_into_view":      "Scroll a specific element into the center of the viewport by selector. Use when the snapshot shows [off-screen] elements instead of blind scroll-down loops.",
 
 	// Tool aliases (edit_file, sessions_spawn, Read, Write, Edit, Bash, etc.)
 	// are registered in the tool registry but excluded from the system prompt

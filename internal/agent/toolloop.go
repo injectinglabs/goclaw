@@ -42,7 +42,8 @@ var mutatingTools = map[string]bool{
 	"create_image": true, "create_video": true, "create_audio": true,
 	"tts": true, "cron": true, "publish_skill": true,
 	"sessions_send": true,
-	"execute_action": true, // browser-page mutation (fill/click/select)
+	"execute_action":   true, // browser-page mutation (fill/click/select/hover/keyboard)
+	"scroll_into_view": true, // browser-page viewport change
 }
 
 // teamTasksReadOnlyActions are team_tasks actions that don't indicate real progress.
