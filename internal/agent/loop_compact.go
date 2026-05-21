@@ -2,11 +2,10 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
+	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
 
@@ -47,7 +46,7 @@ func (l *Loop) compactMessagesInPlace(ctx context.Context, messages []providers.
 	}
 
 	// Resolve keepCount from compaction config (same defaults as maybeSummarize).
-	keepCount := 4
+	keepCount := config.DefaultKeepLastMessages
 	if l.compactionCfg != nil && l.compactionCfg.KeepLastMessages > 0 {
 		keepCount = l.compactionCfg.KeepLastMessages
 	}
@@ -56,43 +55,36 @@ func (l *Loop) compactMessagesInPlace(ctx context.Context, messages []providers.
 		keepCount = minKeep
 	}
 
-	splitIdx := len(messages) - keepCount
-
-	// Walk backward from splitIdx to find a clean boundary —
-	// avoid splitting tool_use → tool_result pairs.
-	for splitIdx > 0 {
-		m := messages[splitIdx]
-		if m.Role == "tool" || (m.Role == "assistant" && len(m.ToolCalls) > 0) {
-			splitIdx--
-			continue
-		}
-		break
-	}
+	// Use the shared safeSplitIndex helper so the boundary semantics are
+	// identical to maybeSummarize / TruncateBefore — no tool_call/tool_result
+	// orphans on either side of the cut.
+	splitIdx := safeSplitIndex(messages, len(messages)-keepCount)
 	if splitIdx <= 1 {
 		return nil
 	}
 
-	// Build summary input (same pattern as maybeSummarize in loop_history.go).
+	// Build summary input via the tool-collapse helper so tool invocations and
+	// their (truncated) results survive into the summary — previously these
+	// were silently dropped, causing the agent to forget what tools ran.
 	toSummarize := messages[:splitIdx]
-	var sb strings.Builder
-	for _, m := range toSummarize {
-		switch m.Role {
-		case "user":
-			fmt.Fprintf(&sb, "user: %s\n", m.Content)
-		case "assistant":
-			fmt.Fprintf(&sb, "assistant: %s\n", SanitizeAssistantContent(m.Content))
-		}
-	}
+	flatHistory := collapseToolCallsForSummary(toSummarize)
 
 	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
+	// Summarization is a trivial task — route to the cheap "fast" alias by
+	// default instead of the agent's primary model (which may be expensive).
+	summarizerModel := config.DefaultSummarizerModelAlias
+	if l.compactionCfg != nil && l.compactionCfg.SummarizerModel != "" {
+		summarizerModel = l.compactionCfg.SummarizerModel
+	}
+
 	resp, err := l.provider.Chat(sctx, providers.ChatRequest{
 		Messages: []providers.Message{{
 			Role:    "user",
-			Content: compactionSummaryPrompt + sb.String(),
+			Content: compactionSummaryPrompt + flatHistory,
 		}},
-		Model:   l.model,
+		Model:   summarizerModel,
 		Options: map[string]any{"max_tokens": 1024, "temperature": 0.3},
 	})
 	if err != nil {

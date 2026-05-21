@@ -279,6 +279,28 @@ func (m *Manager) TruncateHistory(_ context.Context, key string, keepLast int) {
 	s.Updated = time.Now()
 }
 
+// TruncateBefore drops messages[0:splitIdx]. Used by the summarize/compact
+// path with a splitIdx pre-computed by agent.safeSplitIndex so the cut never
+// lands between a tool_call and its matching tool_result.
+func (m *Manager) TruncateBefore(_ context.Context, key string, splitIdx int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	s, ok := m.sessions[key]
+	if !ok {
+		return
+	}
+	if splitIdx <= 0 {
+		return
+	}
+	if splitIdx >= len(s.Messages) {
+		s.Messages = []providers.Message{}
+	} else {
+		s.Messages = s.Messages[splitIdx:]
+	}
+	s.Updated = time.Now()
+}
+
 // SetHistory replaces a session's message history with the given slice.
 func (m *Manager) SetHistory(_ context.Context, key string, msgs []providers.Message) {
 	m.mu.Lock()

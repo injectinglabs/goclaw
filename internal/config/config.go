@@ -155,8 +155,12 @@ type AgentDefaults struct {
 type CompactionConfig struct {
 	ReserveTokensFloor int                `json:"reserveTokensFloor,omitempty"` // min reserve tokens (default 20000)
 	MaxHistoryShare    float64            `json:"maxHistoryShare,omitempty"`    // max share of context for history (default 0.85)
-	KeepLastMessages   int                `json:"keepLastMessages,omitempty"`   // messages to keep after compaction (default 4)
+	KeepLastMessages   int                `json:"keepLastMessages,omitempty"`   // messages to keep after compaction (default DefaultKeepLastMessages = 16)
 	MemoryFlush        *MemoryFlushConfig `json:"memoryFlush,omitempty"`        // pre-compaction flush
+	// SummarizerModel selects which model the summarization LLM call uses.
+	// Default DefaultSummarizerModelAlias ("fast"). Summarization is a trivial
+	// task and should not run on the agent's primary model.
+	SummarizerModel string `json:"summarizerModel,omitempty"`
 }
 
 // MemoryFlushConfig configures the pre-compaction memory flush.

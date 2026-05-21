@@ -222,7 +222,7 @@ func (l *Loop) maybeSummarize(ctx context.Context, sessionKey string) {
 	}
 
 	// Resolve keepLast before spawning goroutine (reads config under caller's scope).
-	keepLast := 4
+	keepLast := config.DefaultKeepLastMessages
 	if l.compactionCfg != nil && l.compactionCfg.KeepLastMessages > 0 {
 		keepLast = l.compactionCfg.KeepLastMessages
 	}
@@ -243,16 +243,24 @@ func (l *Loop) maybeSummarize(ctx context.Context, sessionKey string) {
 		}
 
 		summary := l.sessions.GetSummary(sctx, sessionKey)
-		toSummarize := history[:len(history)-keepLast]
 
-		var sb strings.Builder
+		// Compute a safe split boundary — never cut between a tool_call and its
+		// matching tool_result. Keeps the head of the post-truncation history
+		// clean so sanitizeHistory's defensive repair becomes a no-op.
+		splitIdx := safeSplitIndex(history, len(history)-keepLast)
+		if splitIdx <= 1 {
+			return
+		}
+		toSummarize := history[:splitIdx]
+
+		// Collapse tool calls + (truncated) results into the summary input.
+		// Previously the loop here silently dropped every tool message, so the
+		// agent forgot what tools ran after a compaction cycle.
+		flatHistory := collapseToolCallsForSummary(toSummarize)
+
+		// Collect media kinds for the summarizer note (preserved from old code).
 		var mediaKinds []string
 		for _, m := range toSummarize {
-			if m.Role == "user" {
-				sb.WriteString(fmt.Sprintf("user: %s\n", m.Content))
-			} else if m.Role == "assistant" {
-				sb.WriteString(fmt.Sprintf("assistant: %s\n", SanitizeAssistantContent(m.Content)))
-			}
 			for _, ref := range m.MediaRefs {
 				mediaKinds = append(mediaKinds, ref.Kind)
 			}
@@ -280,11 +288,18 @@ func (l *Loop) maybeSummarize(ctx context.Context, sessionKey string) {
 		if summary != "" {
 			prompt.WriteString("Existing context: " + summary + "\n\n")
 		}
-		prompt.WriteString(sb.String())
+		prompt.WriteString(flatHistory)
+
+		// Route summarization to the cheap "fast" alias by default — primary
+		// agent model is too expensive for a trivial summarization task.
+		summarizerModel := config.DefaultSummarizerModelAlias
+		if l.compactionCfg != nil && l.compactionCfg.SummarizerModel != "" {
+			summarizerModel = l.compactionCfg.SummarizerModel
+		}
 
 		resp, err := l.provider.Chat(sctx, providers.ChatRequest{
 			Messages: []providers.Message{{Role: "user", Content: prompt.String()}},
-			Model:    l.model,
+			Model:    summarizerModel,
 			Options:  map[string]any{"max_tokens": 1024, "temperature": 0.3},
 		})
 		if err != nil {
@@ -305,7 +320,11 @@ func (l *Loop) maybeSummarize(ctx context.Context, sessionKey string) {
 		}
 
 		l.sessions.SetSummary(sctx, sessionKey, SanitizeAssistantContent(resp.Content))
-		l.sessions.TruncateHistory(sctx, sessionKey, keepLast)
+		// Use the pre-computed safe splitIdx so the cut never lands between a
+		// tool_call → tool_result pair (which would orphan the result at the
+		// head of the kept slice and force sanitizeHistory to repair on the
+		// next LLM call).
+		l.sessions.TruncateBefore(sctx, sessionKey, splitIdx)
 
 		// Inject preserved MediaRefs into the first kept message so they survive truncation.
 		if len(preservedRefs) > 0 {
