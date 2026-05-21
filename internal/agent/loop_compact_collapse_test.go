@@ -117,8 +117,10 @@ func TestDefaultKeepLastMessages_IsBumpedTo16(t *testing.T) {
 	}
 }
 
-func TestDefaultSummarizerModelAlias_IsFast(t *testing.T) {
-	if config.DefaultSummarizerModelAlias != "fast" {
-		t.Fatalf("expected DefaultSummarizerModelAlias=\"fast\", got %q", config.DefaultSummarizerModelAlias)
+func TestDefaultSummarizerModelAlias_IsEmpty(t *testing.T) {
+	// Empty default means: reuse the agent's primary model. Operators can
+	// override via CompactionConfig.SummarizerModel = "fast" if cost matters.
+	if config.DefaultSummarizerModelAlias != "" {
+		t.Fatalf("expected DefaultSummarizerModelAlias=\"\" (reuse primary model), got %q", config.DefaultSummarizerModelAlias)
 	}
 }

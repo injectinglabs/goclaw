@@ -72,11 +72,15 @@ func (l *Loop) compactMessagesInPlace(ctx context.Context, messages []providers.
 	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// Summarization is a trivial task — route to the cheap "fast" alias by
-	// default instead of the agent's primary model (which may be expensive).
-	summarizerModel := config.DefaultSummarizerModelAlias
+	// Summarization model: default is to reuse the agent's primary model
+	// (l.model), keeping summary quality consistent with the rest of the turn.
+	// Operators can override via CompactionConfig.SummarizerModel (e.g. "fast")
+	// to flip summarization to a cheaper model without a code change.
+	summarizerModel := l.model
 	if l.compactionCfg != nil && l.compactionCfg.SummarizerModel != "" {
 		summarizerModel = l.compactionCfg.SummarizerModel
+	} else if config.DefaultSummarizerModelAlias != "" {
+		summarizerModel = config.DefaultSummarizerModelAlias
 	}
 
 	resp, err := l.provider.Chat(sctx, providers.ChatRequest{

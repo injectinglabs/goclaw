@@ -18,9 +18,15 @@ const (
 	// results. 16 strikes a balance between context retention and token usage.
 	DefaultKeepLastMessages = 16
 
-	// DefaultSummarizerModelAlias is the model alias used when invoking the
-	// summarizer LLM call. Summarization is a trivial task and should not run on
-	// the agent's primary model (which may be expensive). "fast" is resolved via
-	// the LLM service alias registry to a cheap, fast-tier model.
-	DefaultSummarizerModelAlias = "fast"
+	// DefaultSummarizerModelAlias controls which model the summarizer LLM call
+	// uses. Empty (the default) means: reuse the agent's primary model. This
+	// keeps quality consistent with the rest of the turn at the price of a
+	// little extra cost vs a dedicated cheap summarizer.
+	//
+	// Operators who want to flip summarization to a cheaper/faster model can
+	// set `CompactionConfig.SummarizerModel = "fast"` (or any other alias the
+	// LLM service resolves) — no code change, just config. This is the
+	// industry-recommended hybrid: simple default, configurable when cost
+	// becomes a concern.
+	DefaultSummarizerModelAlias = ""
 )

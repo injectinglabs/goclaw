@@ -158,8 +158,10 @@ type CompactionConfig struct {
 	KeepLastMessages   int                `json:"keepLastMessages,omitempty"`   // messages to keep after compaction (default DefaultKeepLastMessages = 16)
 	MemoryFlush        *MemoryFlushConfig `json:"memoryFlush,omitempty"`        // pre-compaction flush
 	// SummarizerModel selects which model the summarization LLM call uses.
-	// Default DefaultSummarizerModelAlias ("fast"). Summarization is a trivial
-	// task and should not run on the agent's primary model.
+	// Empty (default) means: reuse the agent's primary model — keeps quality
+	// consistent with the rest of the turn at slightly higher cost. Set to
+	// e.g. "fast" to flip summarization to a cheaper alias without a code
+	// change.
 	SummarizerModel string `json:"summarizerModel,omitempty"`
 }
 

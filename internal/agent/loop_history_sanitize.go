@@ -290,11 +290,15 @@ func (l *Loop) maybeSummarize(ctx context.Context, sessionKey string) {
 		}
 		prompt.WriteString(flatHistory)
 
-		// Route summarization to the cheap "fast" alias by default — primary
-		// agent model is too expensive for a trivial summarization task.
-		summarizerModel := config.DefaultSummarizerModelAlias
+		// Summarization model: default is l.model (primary agent model) — keeps
+		// summary quality consistent with the rest of the turn. Operators can
+		// override via CompactionConfig.SummarizerModel (e.g. "fast") to flip
+		// to a cheaper model without redeploying.
+		summarizerModel := l.model
 		if l.compactionCfg != nil && l.compactionCfg.SummarizerModel != "" {
 			summarizerModel = l.compactionCfg.SummarizerModel
+		} else if config.DefaultSummarizerModelAlias != "" {
+			summarizerModel = config.DefaultSummarizerModelAlias
 		}
 
 		resp, err := l.provider.Chat(sctx, providers.ChatRequest{
