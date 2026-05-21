@@ -476,69 +476,6 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 			}
 		}
 
-		// Auto-generate conversation title on first message (label empty
-		// = never titled). Hoisted BEFORE loop.Run so the title-gen
-		// goroutine fires even when the user clicks Stop mid-stream —
-		// the title only needs params.Message, not the assistant output,
-		// and runCtxBase (WithoutCancel) is not cancelled by AbortRun.
-		// Previously this block lived after the loop.Run error check,
-		// so an aborted run returned before reaching it and the chat
-		// stayed labelled with its sessionKey forever.
-		existingLabel := m.sessions.GetLabel(ctx, sessionKey)
-		slog.Info("title-gen: label check",
-			"sessionKey", sessionKey, "existingLabel", existingLabel,
-			"willGen", existingLabel == "")
-		if existingLabel == "" {
-			agentProvider := loop.Provider()
-			agentModel := loop.Model()
-			userMsg := params.Message
-			titleCtx := runCtxBase
-			slog.Info("title-gen: prepared",
-				"sessionKey", sessionKey,
-				"providerNil", agentProvider == nil,
-				"model", agentModel, "userMsgLen", len(userMsg))
-			if userID != "" {
-				orgID := loop.ExternalOrgID()
-				orgIDSource := "external"
-				if orgID == "" {
-					orgID = store.TenantSlugFromContext(runCtxBase)
-					orgIDSource = "ctxSlug"
-				}
-				if orgID == "" {
-					orgID = loop.TenantSlug()
-					orgIDSource = "loopSlug"
-				}
-				slog.Info("title-gen: orgID resolved",
-					"sessionKey", sessionKey, "orgID", orgID, "source", orgIDSource)
-				if orgID != "" {
-					titleCtx = providers.WithActorHeaders(titleCtx, map[string]string{
-						"X-Actor-User-ID": userID,
-						"X-Actor-Org-ID":  orgID,
-					})
-				}
-			}
-			go func() {
-				slog.Info("title-gen: goroutine entered", "sessionKey", sessionKey)
-				title := agent.GenerateTitle(titleCtx, agentProvider, agentModel, userMsg)
-				slog.Info("title-gen: GenerateTitle returned",
-					"sessionKey", sessionKey, "titleLen", len(title), "title", title)
-				if title == "" {
-					return
-				}
-				m.sessions.SetLabel(titleCtx, sessionKey, title)
-				if err := m.sessions.Save(titleCtx, sessionKey); err != nil {
-					slog.Warn("title-gen: save failed",
-						"sessionKey", sessionKey, "error", err)
-					return
-				}
-				slog.Info("title-gen: persisted + broadcasting",
-					"sessionKey", sessionKey, "title", title)
-				bus.BroadcastForTenant(m.eventBus, protocol.EventSessionUpdated,
-					client.TenantID(),
-					map[string]string{"sessionKey": sessionKey, "label": title, "userId": userID})
-			}()
-		}
-
 		var result *agent.RunResult
 		var err error
 		// Note: err is also assigned to the outer loopErr below so the
@@ -574,6 +511,58 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 			}
 			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, err.Error()))
 			return
+		}
+
+		// Auto-generate conversation title on first message (label empty = never titled).
+		if label := m.sessions.GetLabel(ctx, sessionKey); label == "" {
+			agentProvider := loop.Provider()
+			agentModel := loop.Model()
+			userMsg := params.Message
+			// Use runCtxBase (WithoutCancel + tenant-aware) so title save uses correct tenant.
+			titleCtx := runCtxBase
+			// Attach actor headers for the outbound /v1/chat/completions
+			// call so the downstream service-token endpoint can attribute
+			// this background turn to the right user/org. Without this,
+			// GenerateTitle bypassed Loop.injectContext (which is where the
+			// regular run path sets these), and the outbound arrived with
+			// only Authorization=service-token and no X-Actor-* headers —
+			// web-agent-api 400'd with "requires X-Actor-User-ID and
+			// X-Actor-Org-ID" on every new-chat first message.
+			if userID != "" {
+				// Prefer the web-backend org UUID stamped onto the
+				// tenant by auth-proxy (see resolveTenantSlugAndExternalOrgID
+				// + tenants.settings.external_org_id) — keeps title-gen
+				// in sync with the regular run path in injectContext.
+				// Falls back to the goclaw slug for tenants the
+				// auth-proxy hasn't stamped yet during rollout.
+				orgID := loop.ExternalOrgID()
+				if orgID == "" {
+					orgID = store.TenantSlugFromContext(runCtxBase)
+				}
+				if orgID == "" {
+					orgID = loop.TenantSlug()
+				}
+				if orgID != "" {
+					titleCtx = providers.WithActorHeaders(titleCtx, map[string]string{
+						"X-Actor-User-ID": userID,
+						"X-Actor-Org-ID":  orgID,
+					})
+				}
+			}
+			go func() {
+				title := agent.GenerateTitle(titleCtx, agentProvider, agentModel, userMsg)
+				if title == "" {
+					return
+				}
+				m.sessions.SetLabel(titleCtx, sessionKey, title)
+				if err := m.sessions.Save(titleCtx, sessionKey); err != nil {
+					slog.Warn("failed to save session title", "sessionKey", sessionKey, "error", err)
+					return
+				}
+				bus.BroadcastForTenant(m.eventBus, protocol.EventSessionUpdated,
+					client.TenantID(),
+					map[string]string{"sessionKey": sessionKey, "label": title, "userId": userID})
+			}()
 		}
 
 		// TTS auto-apply: convert [[tts]] tagged responses to voice audio
