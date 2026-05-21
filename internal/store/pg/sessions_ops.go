@@ -2,6 +2,7 @@ package pg
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -66,4 +67,72 @@ func (s *PGSessionStore) Delete(ctx context.Context, key string) error {
 	tid := tenantIDForInsert(ctx)
 	_, err := s.db.ExecContext(ctx, "DELETE FROM sessions WHERE session_key = $1 AND tenant_id = $2", key, tid)
 	return err
+}
+
+// SetLastMessageContent rewrites the content/thinking/status fields on the
+// trailing assistant message in the cached message slice. It walks the slice
+// backward looking for the most-recent role="assistant" entry, then mutates
+// it in place under the store mutex. Other Message fields (Role, CreatedAt,
+// MediaRefs, etc.) are left untouched so the placeholder identity survives
+// the stream-to-DB partial updates.
+//
+// Returns an error in two failure modes the caller should treat as "abort
+// the flush":
+//   - the session is empty (or only has non-assistant messages)
+//   - the trailing message is not role="assistant" (race with a tool turn
+//     appending in between flush calls — should never happen because chat.go
+//     gates flushes behind the per-run streamFlushFn, but defensive)
+//
+// Save() is NOT invoked here — the agent loop batches the partial write
+// behind a debounce, so the caller controls when the cache snapshot lands
+// in the DB. This keeps the lock-held window small (~µs).
+func (s *PGSessionStore) SetLastMessageContent(ctx context.Context, key string, content, thinking, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, ok := s.cache[sessionCacheKey(ctx, key)]
+	if !ok || len(data.Messages) == 0 {
+		return errors.New("SetLastMessageContent: session has no messages")
+	}
+	for i := len(data.Messages) - 1; i >= 0; i-- {
+		if data.Messages[i].Role != "assistant" {
+			continue
+		}
+		// Found the trailing assistant. If a tool/user message landed
+		// after it, the walk would have hit them first — reject so the
+		// caller does not silently rewrite the wrong row.
+		if i != len(data.Messages)-1 {
+			return errors.New("SetLastMessageContent: trailing message is not assistant")
+		}
+		data.Messages[i].Content = content
+		data.Messages[i].Thinking = thinking
+		data.Messages[i].Status = status
+		data.Updated = time.Now()
+		return nil
+	}
+	return errors.New("SetLastMessageContent: no assistant message in session")
+}
+
+// DropLastStreamingMessage slices off the trailing assistant message when its
+// Status is "streaming". flushMessages calls it before appending the real
+// finalized turn so the partial placeholder is replaced cleanly, not
+// duplicated. No-op (returns nil) if the last message has a different status
+// or is not an assistant — this lets multi-iteration turns call it
+// idempotently without re-walking on each iteration. Save() is the caller's
+// responsibility.
+func (s *PGSessionStore) DropLastStreamingMessage(ctx context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, ok := s.cache[sessionCacheKey(ctx, key)]
+	if !ok || len(data.Messages) == 0 {
+		return nil
+	}
+	last := &data.Messages[len(data.Messages)-1]
+	if last.Role != "assistant" || last.Status != "streaming" {
+		return nil
+	}
+	data.Messages = data.Messages[:len(data.Messages)-1]
+	data.Updated = time.Now()
+	return nil
 }

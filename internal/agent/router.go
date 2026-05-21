@@ -272,6 +272,17 @@ type ActiveRun struct {
 	Content   string
 	Thinking  string
 	ToolCalls []ToolCallSnapshot
+
+	// Stream-to-DB debounce state. lastFlushTime + lastFlushedLen track
+	// when/where the streaming-placeholder row in `sessions.messages` was
+	// last updated; AppendContent/AppendThinking check these against the
+	// debounce thresholds (≥2KB grown OR ≥2s since last flush) before
+	// calling streamFlushFn. streamFlushFn is wired by RegisterRun and
+	// closes over the per-run sessionKey + RunBuffer reader; nil when the
+	// caller passed nil (cron / system runs that never need DB streaming).
+	lastFlushTime  time.Time
+	lastFlushedLen int
+	streamFlushFn  func() error
 }
 
 // ToolCallSnapshot is the per-tool entry attached to ActiveRun so a
@@ -311,29 +322,58 @@ func safeClose(ch chan struct{}) {
 // ctx is used to capture the tenant ID for forceMarkTraceAborted.
 // userID is the run's owning user — empty for tenant-system runs (cron,
 // title-gen) which never need to surface in chat.activeSessions.
+// flushFn is the per-run closure that writes the current Content/Thinking
+// buffer to the session's trailing assistant placeholder via the
+// stream-to-DB path. Pass nil for runs that don't need DB streaming (cron,
+// subagent, telegram bot) — Append* then keeps the buffer in-memory only.
+// Added as the LAST positional parameter so any out-of-tree caller still on
+// the old signature fails-fast at compile time (intentional — we want to
+// catch every call site, not silently default to nil).
 // Returns a receive-only channel for mid-run message injection.
-func (r *Router) RegisterRun(ctx context.Context, runID, sessionKey, agentID, userID string, cancel context.CancelFunc) <-chan InjectedMessage {
+func (r *Router) RegisterRun(ctx context.Context, runID, sessionKey, agentID, userID string, cancel context.CancelFunc, flushFn func() error) <-chan InjectedMessage {
 	injectCh := make(chan InjectedMessage, injectBufferSize)
 	r.activeRuns.Store(runID, &ActiveRun{
-		RunID:      runID,
-		SessionKey: sessionKey,
-		AgentID:    agentID,
-		UserID:     userID,
-		Cancel:     cancel,
-		StartedAt:  time.Now(),
-		InjectCh:   injectCh,
-		Done:       make(chan struct{}),
-		TenantID:   store.TenantIDFromContext(ctx),
+		RunID:         runID,
+		SessionKey:    sessionKey,
+		AgentID:       agentID,
+		UserID:        userID,
+		Cancel:        cancel,
+		StartedAt:     time.Now(),
+		InjectCh:      injectCh,
+		Done:          make(chan struct{}),
+		TenantID:      store.TenantIDFromContext(ctx),
+		streamFlushFn: flushFn,
+		lastFlushTime: time.Now(),
 	})
 	r.sessionRuns.Store(sessionKey, runID)
 	return injectCh
 }
+
+// streamFlushContentDelta is the byte threshold (in Content growth) that
+// triggers a stream-to-DB flush during a chunk. ~2KB matches a few hundred
+// tokens — enough that we are not paying for an UPDATE per token, small
+// enough that a reload-recovery client sees fresh partial output.
+const streamFlushContentDelta = 2000
+
+// streamFlushInterval is the wall-clock backstop for the debounce. If a
+// stream produces slow chunks (reasoning models, network stalls), we still
+// land a partial write every 2s so the placeholder row in DB does not stay
+// frozen for an entire turn.
+const streamFlushInterval = 2 * time.Second
 
 // AppendContent grows the in-memory streaming snapshot for the given run.
 // Called from the WS chat handler's emitRun wrapper on every AgentEventChunk
 // so chat.activeSessions can hand back the accumulated bubble after a
 // page reload. Best-effort: returns silently if the run is no longer
 // registered (race between final chunk and UnregisterRun).
+//
+// As a side effect this also drives the stream-to-DB debounce: after
+// appending under bufMu we call maybeFlushLocked which checks the
+// content-delta + wall-clock thresholds and, if a flush is due, invokes
+// streamFlushFn synchronously while still holding bufMu. The flush blocks
+// the chunk path for one PG UPDATE-by-PK (~1-3ms, same order as the chunk
+// handler itself) — simpler than releasing and reacquiring the lock and
+// avoids a window where another chunk could race a partial save.
 func (r *Router) AppendContent(runID, chunk string) {
 	if chunk == "" {
 		return
@@ -345,6 +385,7 @@ func (r *Router) AppendContent(runID, chunk string) {
 	run := val.(*ActiveRun)
 	run.bufMu.Lock()
 	run.Content += chunk
+	run.maybeFlushLocked()
 	run.bufMu.Unlock()
 }
 
@@ -399,6 +440,9 @@ func (r *Router) AppendToolResult(runID, callID string, isErr bool, result strin
 // AppendThinking mirrors AppendContent for chain-of-thought chunks emitted
 // by reasoning models (MiniMax, DeepSeek-R1). Kept separate from Content
 // so the UI can render the thinking block independently after reload.
+// Same debounce policy as AppendContent — the debounce keys off Content
+// growth, but a thinking chunk still gets a chance to land via the
+// wall-clock branch (long reasoning bursts with no visible content).
 func (r *Router) AppendThinking(runID, chunk string) {
 	if chunk == "" {
 		return
@@ -410,7 +454,83 @@ func (r *Router) AppendThinking(runID, chunk string) {
 	run := val.(*ActiveRun)
 	run.bufMu.Lock()
 	run.Thinking += chunk
+	run.maybeFlushLocked()
 	run.bufMu.Unlock()
+}
+
+// maybeFlushLocked is the debounce gate for stream-to-DB. Must be called
+// with bufMu held. Skips the DB hit entirely when no flushFn is wired
+// (cron / system runs), when nothing has been written since the last
+// flush, or when neither the delta nor the wall-clock threshold has been
+// crossed. On success bumps lastFlushTime + lastFlushedLen so the next
+// chunk does not double-flush. Flush errors are swallowed here — the
+// terminal-status defer in chat.go is the canonical "make sure DB is in
+// sync" path; surfacing a transient UPDATE error mid-stream would cancel
+// the whole run for a recoverable issue.
+func (run *ActiveRun) maybeFlushLocked() {
+	if run.streamFlushFn == nil {
+		return
+	}
+	contentLen := len(run.Content)
+	if contentLen == run.lastFlushedLen {
+		return
+	}
+	delta := contentLen - run.lastFlushedLen
+	if delta < streamFlushContentDelta && time.Since(run.lastFlushTime) < streamFlushInterval {
+		return
+	}
+	// Synchronous flush under bufMu — see AppendContent comment for why
+	// we accept the ~1-3ms hold time instead of releasing the lock.
+	if err := run.streamFlushFn(); err != nil {
+		// Best-effort: record the time anyway so a hot loop on a broken
+		// flush function does not hammer the DB on every chunk.
+		run.lastFlushTime = time.Now()
+		return
+	}
+	run.lastFlushTime = time.Now()
+	run.lastFlushedLen = contentLen
+}
+
+// ForceFlush runs streamFlushFn unconditionally for the given run. Called
+// from the chat.go terminal-status defer so we land one final write that
+// reflects every byte emitted up to abort/error/completion — the debounce
+// otherwise might have left the trailing ~2KB unflushed. Also bumps
+// lastFlushTime/lastFlushedLen so a follow-up debounce-window check from a
+// late chunk does not re-issue an identical UPDATE. Returns nil silently
+// when the run is no longer registered (race) or has no flushFn (system
+// runs).
+func (r *Router) ForceFlush(runID string) error {
+	val, ok := r.activeRuns.Load(runID)
+	if !ok {
+		return nil
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	defer run.bufMu.Unlock()
+	if run.streamFlushFn == nil {
+		return nil
+	}
+	err := run.streamFlushFn()
+	run.lastFlushTime = time.Now()
+	run.lastFlushedLen = len(run.Content)
+	return err
+}
+
+// RunBuffer returns a snapshot of the in-memory Content + Thinking buffers
+// for the given run. The chat.go terminal-status defer uses it to capture
+// whatever bytes were emitted before cancel/error so the streaming
+// placeholder is finalized with the partial content (not blanked). Reads
+// under bufMu — safe to call from any goroutine. ok=false when the run is
+// no longer registered (race between UnregisterRun and the terminal defer).
+func (r *Router) RunBuffer(runID string) (content, thinking string, ok bool) {
+	val, found := r.activeRuns.Load(runID)
+	if !found {
+		return "", "", false
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	defer run.bufMu.Unlock()
+	return run.Content, run.Thinking, true
 }
 
 // ActiveRunSnapshot is a read-only projection of an ActiveRun suitable for

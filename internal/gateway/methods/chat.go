@@ -3,6 +3,7 @@ package methods
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/google/uuid"
 
@@ -318,15 +319,103 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 		}
 	}
 
+	// Pre-insert the streaming assistant placeholder so a client that
+	// reloads after Stop (or reconnects to a different ALB-routed instance
+	// without sticky sessions) can read the bubble out of the DB even
+	// before any chunks have landed. Same eager-write rationale as the
+	// user message above: durable storage first, async worker second. The
+	// placeholder's Status="streaming" gates two downstream behaviors:
+	//   * flushMessages (loop_pipeline_callbacks) drops this row before
+	//     appending the finalized turn messages, so the final message is
+	//     not a duplicate of the placeholder.
+	//   * the terminal-status defer below rewrites Status to "cancelled"
+	//     or "errored" so a reload-recovery client knows the run did not
+	//     complete cleanly.
+	m.sessions.AddMessage(runCtxBase, sessionKey, providers.Message{
+		Role:    "assistant",
+		Content: "",
+		Status:  "streaming",
+	})
+	if err := m.sessions.Save(runCtxBase, sessionKey); err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal,
+			"failed to persist streaming placeholder: "+err.Error()))
+		return
+	}
+
 	// Create cancellable context for abort support (matching TS AbortController pattern).
 	runCtx, cancel := context.WithCancel(runCtxBase)
-	injectCh := m.agents.RegisterRun(runCtxBase, runID, sessionKey, params.AgentID, userID, cancel)
+
+	// Build the per-run flush closure that the router will call when the
+	// debounce gates open (≥2KB delta or ≥2s wall-clock since last flush).
+	// Reads the in-memory buffer back from the router under the run's
+	// bufMu, then issues SetLastMessageContent + Save against the
+	// streaming placeholder we just pre-inserted. A nil return from
+	// RunBuffer means the run unregistered between Append* and the
+	// flush — treat as no-op.
+	flushFn := func() error {
+		content, thinking, ok := m.agents.RunBuffer(runID)
+		if !ok {
+			return nil
+		}
+		if err := m.sessions.SetLastMessageContent(runCtxBase, sessionKey,
+			content, thinking, "streaming"); err != nil {
+			return err
+		}
+		return m.sessions.Save(runCtxBase, sessionKey)
+	}
+	injectCh := m.agents.RegisterRun(runCtxBase, runID, sessionKey, params.AgentID, userID, cancel, flushFn)
 
 	// Run agent asynchronously - events are broadcast via the event system
 	go func() {
+		// loopErr captures the terminal status of loop.Run for the
+		// stream-to-DB finalizer defer below. Declared in the goroutine
+		// scope so the defer (registered immediately, executes LIFO
+		// after UnregisterRun) can read it.
+		var loopErr error
+
 		defer m.agents.UnregisterRun(runID)
 		defer cancel()
 		defer drainTeamDispatch() // dispatch pending team tasks + release lock (even on panic)
+
+		// Terminal-status defer: finalize the streaming placeholder
+		// regardless of how the goroutine exits.
+		//   * loopErr == nil: the run completed; flushMessages already
+		//     called DropLastStreamingMessage and appended the real
+		//     finalized turn(s) — nothing to do here.
+		//   * loopErr != nil: write the partial Content/Thinking buffer
+		//     back to the placeholder row with a terminal Status
+		//     ("cancelled" for context.Canceled, "errored" otherwise)
+		//     so a reload-recovery client sees the partial bubble + a
+		//     clear "this run didn't finish" hint instead of an empty
+		//     row stuck in Status="streaming" forever.
+		// Errors here are warn-logged, not surfaced — the worker has
+		// already sent its protocol response to the client and we are
+		// only racing UnregisterRun.
+		defer func() {
+			if loopErr == nil {
+				return
+			}
+			// Cancellation can surface as loopErr=context.Canceled OR a
+			// provider-wrapped error where only runCtx.Err() carries
+			// the cancel signal. Treat either as "cancelled" so the
+			// frontend's Stop UX is consistent (no "errored" badge
+			// after the user explicitly clicked Stop).
+			status := "errored"
+			if errors.Is(loopErr, context.Canceled) || runCtx.Err() != nil {
+				status = "cancelled"
+			}
+			content, thinking, _ := m.agents.RunBuffer(runID)
+			if err := m.sessions.SetLastMessageContent(runCtxBase, sessionKey,
+				content, thinking, status); err != nil {
+				slog.Warn("terminal-flush: SetLastMessageContent failed",
+					"sessionKey", sessionKey, "error", err, "status", status)
+				return
+			}
+			if err := m.sessions.Save(runCtxBase, sessionKey); err != nil {
+				slog.Warn("terminal-flush: Save failed",
+					"sessionKey", sessionKey, "error", err, "status", status)
+			}
+		}()
 
 		// Parse media items (supports both legacy string paths and new {path,filename} objects).
 		items := params.parseMedia()
@@ -391,6 +480,24 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 				m.agents.SetRunTraceID(runID, traceID)
 			},
 		})
+		// Capture for the terminal-status defer. Must be assigned
+		// before any `return` so the defer sees the right status.
+		loopErr = err
+
+		// Force one final flush of the in-memory buffer to the DB on
+		// the happy path too — covers the case where the last debounce
+		// window expired with bytes still unsynced (debounce thresholds
+		// can leave the tail few hundred bytes uncommitted until
+		// flushMessages replaces the placeholder). For the error path,
+		// the defer above does this with a terminal status; on the
+		// happy path flushMessages drops the placeholder, but issuing
+		// ForceFlush first is harmless (DropLastStreamingMessage
+		// no-ops if Status != "streaming") and avoids one source of
+		// "last 50 chars missing from the bubble" reports.
+		if err := m.agents.ForceFlush(runID); err != nil {
+			slog.Warn("stream-to-DB: ForceFlush failed",
+				"sessionKey", sessionKey, "runId", runID, "error", err)
+		}
 
 		if err != nil {
 			// Send cancelled response so the frontend's chat.send promise resolves

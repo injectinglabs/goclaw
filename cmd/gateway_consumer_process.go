@@ -43,8 +43,11 @@ func makeSchedulerRunFunc(agents *agent.Router, cfg *config.Config) scheduler.Ru
 		// Inbound channel runs (Telegram/Slack/etc.) — req.UserID is the
 		// external channel sender. They never need to surface in the WS
 		// chat.activeSessions response (different sessions altogether),
-		// but the field is plumbed for consistency.
-		injectCh := agents.RegisterRun(runCtx, req.RunID, req.SessionKey, agentID, req.UserID, cancel)
+		// but the field is plumbed for consistency. flushFn=nil: channel
+		// runs do not use the stream-to-DB placeholder pattern (their
+		// transport is per-channel, not the website chat bubble), so the
+		// in-memory buffer stays in-memory.
+		injectCh := agents.RegisterRun(runCtx, req.RunID, req.SessionKey, agentID, req.UserID, cancel, nil)
 		defer agents.UnregisterRun(req.RunID)
 		defer cancel()
 
