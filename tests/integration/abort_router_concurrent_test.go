@@ -39,7 +39,7 @@ func TestRouter_AbortRun_Unauthorized(t *testing.T) {
 	// Register a run with sessionKey "session-A"
 	_, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	router.RegisterRun(context.Background(), "run-1", "session-A", "agent-1", "", cancel)
+	router.RegisterRun(context.Background(), "run-1", "session-A", "agent-1", "", cancel, nil)
 
 	// Try to abort with a different sessionKey
 	result := router.AbortRun("run-1", "session-B")
@@ -64,7 +64,7 @@ func TestRouter_AbortRun_Concurrent_OnlyOneStops(t *testing.T) {
 	_, cancel := context.WithCancel(context.Background())
 	runID := "run-1"
 	sessionKey := "session-1"
-	_ = router.RegisterRun(context.Background(), runID, sessionKey, "agent-1", "", cancel)
+	_ = router.RegisterRun(context.Background(), runID, sessionKey, "agent-1", "", cancel, nil)
 
 	// Goroutine closes Done after 50ms (simulating normal graceful exit)
 	go func() {
@@ -151,7 +151,7 @@ func TestRouter_AbortRun_ForcesAfter3s(t *testing.T) {
 	runID := "run-1"
 	sessionKey := "session-1"
 	agentID := "agent-1"
-	router.RegisterRun(tenantCtx, runID, sessionKey, agentID, "", cancel)
+	router.RegisterRun(tenantCtx, runID, sessionKey, agentID, "", cancel, nil)
 
 	// Set a trace ID
 	traceID := uuid.New()
@@ -199,3 +199,4 @@ func TestRouter_AbortRun_ForcesAfter3s(t *testing.T) {
 		}
 	}
 }
+

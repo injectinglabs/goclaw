@@ -5,6 +5,7 @@ package sqlitestore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -139,6 +140,55 @@ func (s *SQLiteSessionStore) Delete(ctx context.Context, key string) error {
 	tid := tenantIDForInsert(ctx)
 	_, err := s.db.ExecContext(ctx, "DELETE FROM sessions WHERE session_key = ? AND tenant_id = ?", key, tid)
 	return err
+}
+
+// SetLastMessageContent rewrites the content/thinking/status fields on the
+// trailing assistant message in the cached message slice. Mirrors the PG
+// implementation — see internal/store/pg/sessions_ops.go for the rationale.
+// Only mutates the cache; Save() is the caller's responsibility.
+func (s *SQLiteSessionStore) SetLastMessageContent(ctx context.Context, key string, content, thinking, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, ok := s.cache[sessionCacheKey(ctx, key)]
+	if !ok || len(data.Messages) == 0 {
+		return errors.New("SetLastMessageContent: session has no messages")
+	}
+	for i := len(data.Messages) - 1; i >= 0; i-- {
+		if data.Messages[i].Role != "assistant" {
+			continue
+		}
+		if i != len(data.Messages)-1 {
+			return errors.New("SetLastMessageContent: trailing message is not assistant")
+		}
+		data.Messages[i].Content = content
+		data.Messages[i].Thinking = thinking
+		data.Messages[i].Status = status
+		data.Updated = time.Now()
+		return nil
+	}
+	return errors.New("SetLastMessageContent: no assistant message in session")
+}
+
+// DropLastStreamingMessage slices off the trailing assistant message when its
+// Status is "streaming". Mirrors the PG implementation. No-op when the
+// trailing message has a different status; safe to call repeatedly across
+// multi-iteration turns.
+func (s *SQLiteSessionStore) DropLastStreamingMessage(ctx context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, ok := s.cache[sessionCacheKey(ctx, key)]
+	if !ok || len(data.Messages) == 0 {
+		return nil
+	}
+	last := &data.Messages[len(data.Messages)-1]
+	if last.Role != "assistant" || last.Status != "streaming" {
+		return nil
+	}
+	data.Messages = data.Messages[:len(data.Messages)-1]
+	data.Updated = time.Now()
+	return nil
 }
 
 func (s *SQLiteSessionStore) LastUsedChannel(ctx context.Context, agentID string) (string, string) {

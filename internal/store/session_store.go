@@ -128,6 +128,20 @@ type SessionCoreStore interface {
 	Reset(ctx context.Context, key string)
 	Delete(ctx context.Context, key string) error
 	Save(ctx context.Context, key string) error
+
+	// SetLastMessageContent updates the content/thinking/status fields of the
+	// most recent assistant message in the cache. Used during stream-to-DB for
+	// incremental partial-content writes. Returns error if no assistant message
+	// exists or the last message is not an assistant. Callers must Save()
+	// afterwards to flush to the DB — this method only mutates the cache.
+	SetLastMessageContent(ctx context.Context, key string, content, thinking, status string) error
+
+	// DropLastStreamingMessage removes a trailing assistant message whose
+	// Status is "streaming". No-op if the last message has a different status
+	// or is not an assistant. Called by flushMessages before appending the
+	// finalized turn messages so the streaming placeholder is replaced cleanly.
+	// Only mutates the cache; callers Save() to persist.
+	DropLastStreamingMessage(ctx context.Context, key string) error
 }
 
 // SessionMetadataStore manages session metadata, token tracking, and calibration.

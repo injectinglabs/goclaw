@@ -155,6 +155,24 @@ type Message struct {
 	// Pointer type so that older messages (stored before this field existed) deserialize as nil,
 	// allowing the frontend to fall back to synthetic timestamps.
 	CreatedAt *time.Time `json:"created_at,omitempty"`
+
+	// Status tracks the lifecycle of in-flight assistant messages for the
+	// stream-to-DB pattern. Allowed values:
+	//   ""           — default; the message is fully written (completed turn)
+	//   "streaming"  — assistant placeholder that is still being filled by
+	//                  the agent loop. chat.go pre-inserts it before the
+	//                  worker starts and AppendContent debounce-flushes
+	//                  partial content into it; flushMessages drops it
+	//                  before appending the finalized turn messages.
+	//   "cancelled"  — terminal: the run was aborted (user clicked Stop or
+	//                  context cancelled mid-stream). Buffer at-cancel is
+	//                  preserved so reload-recovery shows the partial bubble.
+	//   "errored"    — terminal: the run exited with an error other than
+	//                  context.Canceled. Buffer preserved for the same
+	//                  recovery reason as "cancelled".
+	// omitempty keeps existing rows untouched on round-trip: completed
+	// messages serialise without the field and deserialise back to "".
+	Status string `json:"status,omitempty"`
 }
 
 // ToolCall represents a tool invocation requested by the LLM.

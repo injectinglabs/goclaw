@@ -117,6 +117,16 @@ func (m *mockSessionStore) Reset(context.Context, string)                       
 func (m *mockSessionStore) Delete(context.Context, string) error                    { return nil }
 func (m *mockSessionStore) Save(context.Context, string) error                      { return nil }
 
+// Eager-media + stream-to-DB methods: never exercised by these tests but
+// required to satisfy SessionCoreStore.
+func (m *mockSessionStore) SetLastUserMessageMediaRefs(context.Context, string, []providers.MediaRef) error {
+	return nil
+}
+func (m *mockSessionStore) SetLastMessageContent(context.Context, string, string, string, string) error {
+	return nil
+}
+func (m *mockSessionStore) DropLastStreamingMessage(context.Context, string) error { return nil }
+
 func (m *mockSessionStore) UpdateMetadata(context.Context, string, string, string, string) {}
 func (m *mockSessionStore) AccumulateTokens(context.Context, string, int64, int64)         {}
 func (m *mockSessionStore) IncrementCompaction(context.Context, string)                    {}

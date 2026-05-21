@@ -418,7 +418,24 @@ func (l *Loop) makeFlushMessages(req *RunRequest, _ *[]providers.MediaRef) func(
 	// not only after this end-of-turn flush. flushMessages handles
 	// only the pending assistant turn messages now.
 	_ = req
+	// firstFlush gates the one-shot drop of the streaming placeholder
+	// (pre-inserted by chat.go before RegisterRun) on the FIRST
+	// flushMessages call of the run only. Multi-iteration turns (tool
+	// loops) call flushMessages once per LLM iteration; we want the
+	// drop to fire exactly once at iteration #1, then subsequent
+	// iterations just append their turn messages onto the now-
+	// placeholder-less transcript. DropLastStreamingMessage is a no-op
+	// when the trailing message has Status != "streaming", so the gate
+	// is also a defense-in-depth: even if a malformed turn somehow
+	// re-introduced a placeholder mid-stream, we would not drop it.
+	firstFlush := true
 	return func(ctx context.Context, sessionKey string, msgs []providers.Message) error {
+		if firstFlush {
+			firstFlush = false
+			// Best-effort: returns nil on the no-op path; any
+			// future hard error would be logged by the store.
+			_ = l.sessions.DropLastStreamingMessage(ctx, sessionKey)
+		}
 		for _, msg := range msgs {
 			l.sessions.AddMessage(ctx, sessionKey, msg)
 		}
