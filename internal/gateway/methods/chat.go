@@ -360,11 +360,6 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 			if m.agents == nil {
 				return
 			}
-			// Flip the run's State to "aborting" so ActiveSessionsForUser
-			// stops returning it. Closes the race where a WS reconnect
-			// between here and the outer UnregisterRun defer would
-			// subscribe to runID and never receive a terminal event.
-			m.agents.MarkAborting(runID)
 			content, thinking, toolCalls, ok := m.agents.RunBuffer(runID)
 			slog.Info("partial-save: entering defer",
 				"sessionKey", sessionKey, "runID", runID,
@@ -410,31 +405,20 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 				}
 			}
 			m.sessions.AddMessage(runCtxBase, sessionKey, msg)
-			// Append a role="tool" message for every tool call. Running
-			// calls (status="running") get a synthetic "[cancelled]" tool
-			// result so the conversation tail is well-formed (every
-			// assistant.tool_call has a matching role="tool" entry).
-			// Without this synthetic close, the SPA renders the orphan
-			// pair as "still streaming" forever — the visible symptom
-			// users report as "reload makes status hang" (it isn't
-			// actually running on the server; the UI just can't tell).
+			// Append a role="tool" message for every tool call that
+			// produced a result so the conversation tail is well-formed.
+			// Running calls (status="running") are skipped — they were
+			// interrupted before completion.
 			for _, tc := range toolCalls {
-				switch tc.Status {
-				case "done", "error":
-					m.sessions.AddMessage(runCtxBase, sessionKey, providers.Message{
-						Role:       "tool",
-						Content:    tc.Result,
-						ToolCallID: tc.ID,
-						IsError:    tc.Status == "error",
-					})
-				default:
-					m.sessions.AddMessage(runCtxBase, sessionKey, providers.Message{
-						Role:       "tool",
-						Content:    "[cancelled by user]",
-						ToolCallID: tc.ID,
-						IsError:    true,
-					})
+				if tc.Status != "done" && tc.Status != "error" {
+					continue
 				}
+				m.sessions.AddMessage(runCtxBase, sessionKey, providers.Message{
+					Role:       "tool",
+					Content:    tc.Result,
+					ToolCallID: tc.ID,
+					IsError:    tc.Status == "error",
+				})
 			}
 			if err := m.sessions.Save(runCtxBase, sessionKey); err != nil {
 				slog.Warn("partial-save: Save failed",

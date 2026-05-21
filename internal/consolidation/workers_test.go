@@ -242,9 +242,6 @@ func (m *mockSessionStore) SetHistory(context.Context, string, []providers.Messa
 func (m *mockSessionStore) Reset(context.Context, string) {}
 func (m *mockSessionStore) Delete(context.Context, string) error { return nil }
 func (m *mockSessionStore) Save(context.Context, string) error { return nil }
-func (m *mockSessionStore) SetLastUserMessageMediaRefs(context.Context, string, []providers.MediaRef) error {
-	return nil
-}
 
 // mockDomainEventBus implements eventbus.DomainEventBus for testing.
 type mockDomainEventBus struct {

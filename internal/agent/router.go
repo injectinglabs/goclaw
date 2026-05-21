@@ -465,17 +465,6 @@ func (r *Router) ActiveSessionsForUser(tenantID uuid.UUID, userID string) []Acti
 		if run.TenantID != tenantID || run.UserID != userID {
 			return true
 		}
-		// Skip runs whose teardown has begun (State!=0). Without this,
-		// a WS reconnecting in the window between "ctx cancelled" and
-		// "UnregisterRun" sees the run, subscribes to runID, and never
-		// receives the terminal event (broadcast already fired before
-		// reconnect) — UI hangs in "thinking" state until next reload.
-		// chat.go partial-save defer flips State to 1 to widen this
-		// filter to cover reload-driven cancels (where AbortRun is not
-		// called and State would otherwise stay 0 until UnregisterRun).
-		if run.State.Load() != 0 {
-			return true
-		}
 		run.bufMu.Lock()
 		content := run.Content
 		thinking := run.Thinking
@@ -505,18 +494,6 @@ func (r *Router) ActiveSessionsForUser(tenantID uuid.UUID, userID string) []Acti
 func (r *Router) SetRunTraceID(runID string, traceID uuid.UUID) {
 	if val, ok := r.activeRuns.Load(runID); ok {
 		val.(*ActiveRun).TraceID = traceID
-	}
-}
-
-// MarkAborting flips a run's State from 0 (running) to 1 (aborting) so
-// ActiveSessionsForUser stops surfacing it. Called from the chat handler's
-// partial-save defer when ctx-cancel arrives via WS close (reload) or
-// AbortRun — chat.activeSessions on a fresh WS then won't subscribe to a
-// runID that will never emit another event. No-op if the run is already
-// past State 0 (concurrent AbortRun or already in UnregisterRun).
-func (r *Router) MarkAborting(runID string) {
-	if val, ok := r.activeRuns.Load(runID); ok {
-		val.(*ActiveRun).State.CompareAndSwap(0, 1)
 	}
 }
 
