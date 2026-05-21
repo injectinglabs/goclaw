@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"time"
 
