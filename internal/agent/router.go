@@ -268,9 +268,21 @@ type ActiveRun struct {
 	// before refresh. Protected by `bufMu` because emitRun runs on the
 	// agent loop goroutine while chat.activeSessions reads from the WS
 	// handler goroutine.
-	bufMu    sync.Mutex
-	Content  string
-	Thinking string
+	bufMu     sync.Mutex
+	Content   string
+	Thinking  string
+	ToolCalls []ToolCallSnapshot
+}
+
+// ToolCallSnapshot is the per-tool entry attached to ActiveRun so a
+// reconnecting client can rebuild the streaming bubble's tool indicators
+// (running spinners + ✓/✗ chips + Connect buttons) for calls that fired
+// before the page reload.
+type ToolCallSnapshot struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Status  string `json:"status"` // "running", "done", "error"
+	Result  string `json:"result,omitempty"`
 }
 
 // AbortResult describes the outcome of a single AbortRun call.
@@ -336,6 +348,54 @@ func (r *Router) AppendContent(runID, chunk string) {
 	run.bufMu.Unlock()
 }
 
+// AppendToolCall records a tool.call event so a reconnecting client can
+// re-render the tool indicator without waiting for the next event. Status
+// is "running" until AppendToolResult flips it to done/error.
+func (r *Router) AppendToolCall(runID, callID, name string) {
+	if callID == "" {
+		return
+	}
+	val, ok := r.activeRuns.Load(runID)
+	if !ok {
+		return
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	run.ToolCalls = append(run.ToolCalls, ToolCallSnapshot{
+		ID:     callID,
+		Name:   name,
+		Status: "running",
+	})
+	run.bufMu.Unlock()
+}
+
+// AppendToolResult flips a previously-recorded tool call to done/error
+// and stores the result preview. Lookup is by callID — if not found
+// (unknown id, racy buffer state) the result is dropped silently.
+func (r *Router) AppendToolResult(runID, callID string, isErr bool, result string) {
+	if callID == "" {
+		return
+	}
+	val, ok := r.activeRuns.Load(runID)
+	if !ok {
+		return
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	for i := range run.ToolCalls {
+		if run.ToolCalls[i].ID == callID {
+			if isErr {
+				run.ToolCalls[i].Status = "error"
+			} else {
+				run.ToolCalls[i].Status = "done"
+			}
+			run.ToolCalls[i].Result = result
+			break
+		}
+	}
+	run.bufMu.Unlock()
+}
+
 // AppendThinking mirrors AppendContent for chain-of-thought chunks emitted
 // by reasoning models (MiniMax, DeepSeek-R1). Kept separate from Content
 // so the UI can render the thinking block independently after reload.
@@ -357,12 +417,13 @@ func (r *Router) AppendThinking(runID, chunk string) {
 // JSON marshalling. Excludes the cancel func, channels, atomics, and other
 // non-serialisable fields.
 type ActiveRunSnapshot struct {
-	RunID      string    `json:"runId"`
-	SessionKey string    `json:"sessionKey"`
-	AgentID    string    `json:"agentId,omitempty"`
-	StartedAt  time.Time `json:"startedAt"`
-	Content    string    `json:"content,omitempty"`
-	Thinking   string    `json:"thinking,omitempty"`
+	RunID      string             `json:"runId"`
+	SessionKey string             `json:"sessionKey"`
+	AgentID    string             `json:"agentId,omitempty"`
+	StartedAt  time.Time          `json:"startedAt"`
+	Content    string             `json:"content,omitempty"`
+	Thinking   string             `json:"thinking,omitempty"`
+	ToolCalls  []ToolCallSnapshot `json:"toolCalls,omitempty"`
 }
 
 // ActiveSessionsForUser returns the active runs owned by the given user
@@ -383,6 +444,11 @@ func (r *Router) ActiveSessionsForUser(tenantID uuid.UUID, userID string) []Acti
 		run.bufMu.Lock()
 		content := run.Content
 		thinking := run.Thinking
+		var toolCalls []ToolCallSnapshot
+		if len(run.ToolCalls) > 0 {
+			toolCalls = make([]ToolCallSnapshot, len(run.ToolCalls))
+			copy(toolCalls, run.ToolCalls)
+		}
 		run.bufMu.Unlock()
 		out = append(out, ActiveRunSnapshot{
 			RunID:      run.RunID,
@@ -391,6 +457,7 @@ func (r *Router) ActiveSessionsForUser(tenantID uuid.UUID, userID string) []Acti
 			StartedAt:  run.StartedAt,
 			Content:    content,
 			Thinking:   thinking,
+			ToolCalls:  toolCalls,
 		})
 		return true
 	})

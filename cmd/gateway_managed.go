@@ -270,11 +270,12 @@ func wireExtras(
 			}
 		},
 		OnEvent: func(event agent.AgentEvent) {
-			// Mirror chunk + thinking events into the router's in-memory
-			// streaming buffer so chat.activeSessions can hand a reconnecting
-			// client the in-flight assistant bubble exactly as it was before
-			// page reload. Best-effort: AppendContent/Thinking silently
-			// no-op once the run is unregistered.
+			// Mirror chunk/thinking/tool events into the router's
+			// in-memory streaming buffer so chat.activeSessions can hand
+			// a reconnecting client the in-flight assistant bubble
+			// (content + thinking + tool indicators) exactly as it was
+			// before page reload. Best-effort: Append* silently no-op
+			// once the run is unregistered.
 			if event.RunID != "" {
 				if payload, ok := event.Payload.(map[string]string); ok {
 					switch event.Type {
@@ -282,6 +283,22 @@ func wireExtras(
 						agentRouter.AppendContent(event.RunID, payload["content"])
 					case protocol.ChatEventThinking:
 						agentRouter.AppendThinking(event.RunID, payload["content"])
+					}
+				}
+				if payload, ok := event.Payload.(map[string]any); ok {
+					switch event.Type {
+					case protocol.AgentEventToolCall:
+						id, _ := payload["id"].(string)
+						name, _ := payload["name"].(string)
+						agentRouter.AppendToolCall(event.RunID, id, name)
+					case protocol.AgentEventToolResult:
+						id, _ := payload["id"].(string)
+						isErr, _ := payload["is_error"].(bool)
+						result, _ := payload["result"].(string)
+						if result == "" {
+							result, _ = payload["content"].(string)
+						}
+						agentRouter.AppendToolResult(event.RunID, id, isErr, result)
 					}
 				}
 			}
