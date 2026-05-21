@@ -119,6 +119,26 @@ func (s *SQLiteSessionStore) AddMessage(ctx context.Context, key string, msg pro
 	data.Updated = time.Now()
 }
 
+// SetLastUserMessageMediaRefs mirrors the PG impl: walks the in-memory
+// slice from the tail, overwrites MediaRefs on the most-recent user-role
+// message. Called by the pipeline after persistMedia so the user
+// message chat.go eager-added at request boundary picks up its
+// attachment pointers. No-op if no user message exists.
+func (s *SQLiteSessionStore) SetLastUserMessageMediaRefs(ctx context.Context, key string, refs []providers.MediaRef) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data := s.getOrInit(ctx, key)
+	for i := len(data.Messages) - 1; i >= 0; i-- {
+		if data.Messages[i].Role == "user" {
+			data.Messages[i].MediaRefs = refs
+			data.Updated = time.Now()
+			return nil
+		}
+	}
+	return nil
+}
+
 func (s *SQLiteSessionStore) GetHistory(ctx context.Context, key string) []providers.Message {
 	s.mu.RLock()
 	if data, ok := s.cache[sessionCacheKey(ctx, key)]; ok {

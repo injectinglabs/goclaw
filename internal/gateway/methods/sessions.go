@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/nextlevelbuilder/goclaw/internal/agent"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
@@ -16,12 +17,13 @@ import (
 // SessionsMethods handles sessions.list, sessions.preview, sessions.patch, sessions.delete, sessions.reset.
 type SessionsMethods struct {
 	sessions store.SessionStore
+	agents   *agent.Router // for aborting in-flight runs on session delete
 	eventBus bus.EventPublisher
 	cfg      *config.Config
 }
 
-func NewSessionsMethods(sess store.SessionStore, eventBus bus.EventPublisher, cfg *config.Config) *SessionsMethods {
-	return &SessionsMethods{sessions: sess, eventBus: eventBus, cfg: cfg}
+func NewSessionsMethods(sess store.SessionStore, agents *agent.Router, eventBus bus.EventPublisher, cfg *config.Config) *SessionsMethods {
+	return &SessionsMethods{sessions: sess, agents: agents, eventBus: eventBus, cfg: cfg}
 }
 
 func (m *SessionsMethods) Register(router *gateway.MethodRouter) {
@@ -212,6 +214,16 @@ func (m *SessionsMethods) handleDelete(ctx context.Context, client *gateway.Clie
 			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrUnauthorized, i18n.T(locale, i18n.MsgPermissionDenied, "session")))
 			return
 		}
+	}
+
+	// Abort any in-flight agent runs for this session BEFORE deleting it.
+	// Without this, the goroutine keeps running (it has its own ctx
+	// captured at RegisterRun time) and continues writing to a now-
+	// deleted session — wasting LLM tokens and producing a ghost
+	// response no client will ever see. Best-effort: ignore individual
+	// abort results, delete proceeds regardless.
+	if m.agents != nil {
+		m.agents.AbortRunsForSession(params.Key)
 	}
 
 	if err := m.sessions.Delete(ctx, params.Key); err != nil {

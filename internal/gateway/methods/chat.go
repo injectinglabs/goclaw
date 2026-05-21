@@ -281,6 +281,32 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 	// and defers task dispatch to post-turn.
 	runCtxBase, drainTeamDispatch := tools.InjectTeamDispatch(runCtxBase, m.postTurn)
 
+	// Persist the user message + session row SYNCHRONOUSLY at the request
+	// boundary, before any async work spawns. Industry-standard chat
+	// pattern (see WebSocket.org chat-app guides, Render real-time-AI
+	// chat) — write user input to durable storage BEFORE handing off
+	// to the worker. Guarantees:
+	//   * page reload mid-generation always shows the user's own message
+	//     (sessions.preview reads it back)
+	//   * chat.abort + sessions.delete + sessions.preview ownership
+	//     checks (which call sessions.Get) succeed for sessions that
+	//     would otherwise be in-memory only
+	//   * Save errors propagate to the client as 5xx instead of
+	//     silently letting the run start against undurable state
+	// Media refs are attached to this same message later in
+	// makeEnrichMedia via SetLastUserMessageMediaRefs — no double write.
+	if params.Message != "" {
+		m.sessions.AddMessage(runCtxBase, sessionKey, providers.Message{
+			Role:    "user",
+			Content: params.Message,
+		})
+		if err := m.sessions.Save(runCtxBase, sessionKey); err != nil {
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal,
+				"failed to persist user message: "+err.Error()))
+			return
+		}
+	}
+
 	// Create cancellable context for abort support (matching TS AbortController pattern).
 	runCtx, cancel := context.WithCancel(runCtxBase)
 	injectCh := m.agents.RegisterRun(runCtxBase, runID, sessionKey, params.AgentID, userID, cancel)

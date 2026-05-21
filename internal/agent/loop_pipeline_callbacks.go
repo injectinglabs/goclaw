@@ -169,6 +169,10 @@ func (l *Loop) makeLoadSessionHistory() func(ctx context.Context, sessionKey str
 }
 
 func (l *Loop) makeEnrichMedia(req *RunRequest, capturedRefs *[]providers.MediaRef) func(ctx context.Context, state *pipeline.RunState) error {
+	// mediaRefsAttached gates the SetLastUserMessageMediaRefs call below
+	// so it fires exactly once per run — subsequent turns can't dirty
+	// the persisted user message.
+	var mediaRefsAttached bool
 	return func(ctx context.Context, state *pipeline.RunState) error {
 		// enrichInputMedia enriches messages in-place: attaches inline images,
 		// reloads historical media, enriches <media:*> tags, populates context
@@ -179,9 +183,6 @@ func (l *Loop) makeEnrichMedia(req *RunRequest, capturedRefs *[]providers.MediaR
 			return nil
 		}
 		enrichedCtx, enrichedMsgs, mediaRefs := l.enrichInputMedia(ctx, req, msgs)
-		// Hand the current-turn MediaRefs to makeFlushMessages so the user
-		// row written to sessions.messages carries them — required for the
-		// frontend to restore attachments after a page reload.
 		if capturedRefs != nil {
 			*capturedRefs = mediaRefs
 		}
@@ -191,6 +192,23 @@ func (l *Loop) makeEnrichMedia(req *RunRequest, capturedRefs *[]providers.MediaR
 		// Skip system message (index 0) — only history + user messages are enriched.
 		if len(enrichedMsgs) > 1 {
 			state.Messages.SetHistory(enrichedMsgs[1:])
+		}
+
+		// Attach the freshly-persisted media refs to the user message
+		// chat.go already eager-Save'd at request boundary. Without this
+		// step the message is durable but its `media_refs` field is
+		// empty, so frontend restores no attachment chips after reload.
+		// SetLastUserMessageMediaRefs is idempotent (it overwrites the
+		// slice); mediaRefsAttached gates re-runs across turns.
+		if !mediaRefsAttached && len(mediaRefs) > 0 {
+			if err := l.sessions.SetLastUserMessageMediaRefs(ctx, req.SessionKey, mediaRefs); err != nil {
+				slog.Warn("enrichMedia: attach media_refs to user message failed (non-fatal)",
+					"sessionKey", req.SessionKey, "error", err)
+			} else if err := l.sessions.Save(ctx, req.SessionKey); err != nil {
+				slog.Warn("enrichMedia: save after media_refs attach failed (non-fatal)",
+					"sessionKey", req.SessionKey, "error", err)
+			}
+			mediaRefsAttached = true
 		}
 		return nil
 	}
@@ -392,29 +410,14 @@ func (l *Loop) makeRunMemoryFlush() func(ctx context.Context, state *pipeline.Ru
 	}
 }
 
-func (l *Loop) makeFlushMessages(req *RunRequest, capturedRefs *[]providers.MediaRef) func(ctx context.Context, sessionKey string, msgs []providers.Message) error {
-	// Track whether user message has been persisted (first flush only).
-	// v2 adds user message to pendingMsgs explicitly; v3 keeps it in history
-	// (via BuildMessages) so it never reaches FlushPending. This closure
-	// persists the user message on first flush to match v2 session format.
-	var userMsgFlushed bool
+func (l *Loop) makeFlushMessages(req *RunRequest, _ *[]providers.MediaRef) func(ctx context.Context, sessionKey string, msgs []providers.Message) error {
+	// User message + media_refs are now eagerly persisted in
+	// makeEnrichMedia (before the LLM call) so they're visible to
+	// sessions.preview / chat.abort / chat.activeSessions immediately,
+	// not only after this end-of-turn flush. flushMessages handles
+	// only the pending assistant turn messages now.
+	_ = req
 	return func(ctx context.Context, sessionKey string, msgs []providers.Message) error {
-		if !userMsgFlushed && !req.HideInput && req.Message != "" {
-			userMsgFlushed = true
-			userMsg := providers.Message{
-				Role:    "user",
-				Content: req.Message,
-			}
-			// Attach current-turn MediaRefs (populated by makeEnrichMedia
-			// after persistMedia ran). Without this the upload bytes live
-			// in .uploads/ but the message row has no pointer to them, so
-			// sessions.preview returns media_refs:[] and the UI can't
-			// restore the attachment chip on reload.
-			if capturedRefs != nil && len(*capturedRefs) > 0 {
-				userMsg.MediaRefs = *capturedRefs
-			}
-			l.sessions.AddMessage(ctx, sessionKey, userMsg)
-		}
 		for _, msg := range msgs {
 			l.sessions.AddMessage(ctx, sessionKey, msg)
 		}

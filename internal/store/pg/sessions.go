@@ -189,6 +189,29 @@ func (s *PGSessionStore) AddMessage(ctx context.Context, key string, msg provide
 	data.Updated = time.Now()
 }
 
+// SetLastUserMessageMediaRefs walks the in-memory message slice from
+// the tail and replaces MediaRefs on the most-recent role="user" entry.
+// The pipeline calls this after persistMedia so the user message
+// chat.go eager-AddMessage'd at request boundary picks up its
+// attachment pointers without a duplicate row. No-op if no user
+// message exists (in-flight reload-recovery race where the run is
+// running but somehow no user msg landed). Save'ing is left to the
+// caller — they typically batch with other end-of-turn writes.
+func (s *PGSessionStore) SetLastUserMessageMediaRefs(ctx context.Context, key string, refs []providers.MediaRef) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data := s.getOrInit(ctx, key)
+	for i := len(data.Messages) - 1; i >= 0; i-- {
+		if data.Messages[i].Role == "user" {
+			data.Messages[i].MediaRefs = refs
+			data.Updated = time.Now()
+			return nil
+		}
+	}
+	return nil
+}
+
 func (s *PGSessionStore) GetHistory(ctx context.Context, key string) []providers.Message {
 	s.mu.RLock()
 	if data, ok := s.cache[sessionCacheKey(ctx, key)]; ok {
