@@ -254,6 +254,7 @@ type ActiveRun struct {
 	RunID      string
 	SessionKey string
 	AgentID    string
+	UserID     string // owning user; lets chat.activeSessions filter to caller's runs without joining sessions
 	Cancel     context.CancelFunc
 	StartedAt  time.Time
 	InjectCh   chan InjectedMessage // buffered channel for mid-run user message injection
@@ -261,6 +262,15 @@ type ActiveRun struct {
 	State      atomic.Int32        // 0=running, 1=aborting, 2=done
 	TraceID    uuid.UUID           // set after trace creation via SetRunTraceID
 	TenantID   uuid.UUID           // captured at RegisterRun for forceMarkTraceAborted
+
+	// Streaming snapshot accumulated from emitted chunks so a reconnecting
+	// client can rebuild the in-flight assistant bubble exactly as it was
+	// before refresh. Protected by `bufMu` because emitRun runs on the
+	// agent loop goroutine while chat.activeSessions reads from the WS
+	// handler goroutine.
+	bufMu    sync.Mutex
+	Content  string
+	Thinking string
 }
 
 // AbortResult describes the outcome of a single AbortRun call.
@@ -287,13 +297,16 @@ func safeClose(ch chan struct{}) {
 
 // RegisterRun records an active run so it can be aborted later.
 // ctx is used to capture the tenant ID for forceMarkTraceAborted.
+// userID is the run's owning user — empty for tenant-system runs (cron,
+// title-gen) which never need to surface in chat.activeSessions.
 // Returns a receive-only channel for mid-run message injection.
-func (r *Router) RegisterRun(ctx context.Context, runID, sessionKey, agentID string, cancel context.CancelFunc) <-chan InjectedMessage {
+func (r *Router) RegisterRun(ctx context.Context, runID, sessionKey, agentID, userID string, cancel context.CancelFunc) <-chan InjectedMessage {
 	injectCh := make(chan InjectedMessage, injectBufferSize)
 	r.activeRuns.Store(runID, &ActiveRun{
 		RunID:      runID,
 		SessionKey: sessionKey,
 		AgentID:    agentID,
+		UserID:     userID,
 		Cancel:     cancel,
 		StartedAt:  time.Now(),
 		InjectCh:   injectCh,
@@ -302,6 +315,86 @@ func (r *Router) RegisterRun(ctx context.Context, runID, sessionKey, agentID str
 	})
 	r.sessionRuns.Store(sessionKey, runID)
 	return injectCh
+}
+
+// AppendContent grows the in-memory streaming snapshot for the given run.
+// Called from the WS chat handler's emitRun wrapper on every AgentEventChunk
+// so chat.activeSessions can hand back the accumulated bubble after a
+// page reload. Best-effort: returns silently if the run is no longer
+// registered (race between final chunk and UnregisterRun).
+func (r *Router) AppendContent(runID, chunk string) {
+	if chunk == "" {
+		return
+	}
+	val, ok := r.activeRuns.Load(runID)
+	if !ok {
+		return
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	run.Content += chunk
+	run.bufMu.Unlock()
+}
+
+// AppendThinking mirrors AppendContent for chain-of-thought chunks emitted
+// by reasoning models (MiniMax, DeepSeek-R1). Kept separate from Content
+// so the UI can render the thinking block independently after reload.
+func (r *Router) AppendThinking(runID, chunk string) {
+	if chunk == "" {
+		return
+	}
+	val, ok := r.activeRuns.Load(runID)
+	if !ok {
+		return
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	run.Thinking += chunk
+	run.bufMu.Unlock()
+}
+
+// ActiveRunSnapshot is a read-only projection of an ActiveRun suitable for
+// JSON marshalling. Excludes the cancel func, channels, atomics, and other
+// non-serialisable fields.
+type ActiveRunSnapshot struct {
+	RunID      string    `json:"runId"`
+	SessionKey string    `json:"sessionKey"`
+	AgentID    string    `json:"agentId,omitempty"`
+	StartedAt  time.Time `json:"startedAt"`
+	Content    string    `json:"content,omitempty"`
+	Thinking   string    `json:"thinking,omitempty"`
+}
+
+// ActiveSessionsForUser returns the active runs owned by the given user
+// within the tenant. Used by chat.activeSessions on WS connect so the
+// SPA can rebuild the in-flight chat bubble after a page reload.
+// Empty userID is treated as a no-op (returns nil) — system runs are
+// never surfaced to user clients.
+func (r *Router) ActiveSessionsForUser(tenantID uuid.UUID, userID string) []ActiveRunSnapshot {
+	if userID == "" {
+		return nil
+	}
+	var out []ActiveRunSnapshot
+	r.activeRuns.Range(func(_, val any) bool {
+		run := val.(*ActiveRun)
+		if run.TenantID != tenantID || run.UserID != userID {
+			return true
+		}
+		run.bufMu.Lock()
+		content := run.Content
+		thinking := run.Thinking
+		run.bufMu.Unlock()
+		out = append(out, ActiveRunSnapshot{
+			RunID:      run.RunID,
+			SessionKey: run.SessionKey,
+			AgentID:    run.AgentID,
+			StartedAt:  run.StartedAt,
+			Content:    content,
+			Thinking:   thinking,
+		})
+		return true
+	})
+	return out
 }
 
 // SetRunTraceID associates a trace UUID with an active run.

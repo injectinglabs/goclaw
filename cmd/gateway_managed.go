@@ -270,6 +270,21 @@ func wireExtras(
 			}
 		},
 		OnEvent: func(event agent.AgentEvent) {
+			// Mirror chunk + thinking events into the router's in-memory
+			// streaming buffer so chat.activeSessions can hand a reconnecting
+			// client the in-flight assistant bubble exactly as it was before
+			// page reload. Best-effort: AppendContent/Thinking silently
+			// no-op once the run is unregistered.
+			if event.RunID != "" {
+				if payload, ok := event.Payload.(map[string]string); ok {
+					switch event.Type {
+					case protocol.ChatEventChunk:
+						agentRouter.AppendContent(event.RunID, payload["content"])
+					case protocol.ChatEventThinking:
+						agentRouter.AppendThinking(event.RunID, payload["content"])
+					}
+				}
+			}
 			// Sign /v1/files/ and /v1/media/ URLs in content before delivery.
 			// Sessions store clean paths; signing happens only at delivery time.
 			secret := httpapi.FileSigningKey()

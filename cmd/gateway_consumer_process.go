@@ -40,7 +40,11 @@ func makeSchedulerRunFunc(agents *agent.Router, cfg *config.Config) scheduler.Ru
 		// The ctx from the scheduler is already cancellable; we create a child so the router's
 		// cancel func is independent from the scheduler's cancel func. Calling cancel twice is safe.
 		runCtx, cancel := context.WithCancel(ctx)
-		injectCh := agents.RegisterRun(runCtx, req.RunID, req.SessionKey, agentID, cancel)
+		// Inbound channel runs (Telegram/Slack/etc.) — req.UserID is the
+		// external channel sender. They never need to surface in the WS
+		// chat.activeSessions response (different sessions altogether),
+		// but the field is plumbed for consistency.
+		injectCh := agents.RegisterRun(runCtx, req.RunID, req.SessionKey, agentID, req.UserID, cancel)
 		defer agents.UnregisterRun(req.RunID)
 		defer cancel()
 

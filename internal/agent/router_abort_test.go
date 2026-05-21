@@ -47,7 +47,7 @@ func newRouterWithCollector(tc TraceCollector) *Router {
 // Returns the cancel func and Done channel from the stored ActiveRun.
 func registerRun(r *Router, runID, sessionKey string) (context.CancelFunc, chan struct{}) {
 	_, cancel := context.WithCancel(context.Background())
-	r.RegisterRun(context.Background(), runID, sessionKey, "agent-1", cancel)
+	r.RegisterRun(context.Background(), runID, sessionKey, "agent-1", "", cancel)
 	val, _ := r.activeRuns.Load(runID)
 	return cancel, val.(*ActiveRun).Done
 }
