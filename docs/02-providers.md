@@ -720,7 +720,77 @@ GoClaw v3 Wave 2 adds composable request middleware, error classification, per-m
 
 ---
 
-## 14. File Reference
+## 14. Per-Alias Model Spec Registry (ModelAliasFetcher)
+
+When goclaw forwards a chat request to an upstream that fronts multiple
+underlying models (e.g. our llm-service-web exposes `default`, `fast`,
+`vision`, etc. — each backed by a different real model on
+OpenRouter / Groq / Fireworks), the loop needs per-alias metadata —
+context window, max output tokens, vision capability, reasoning flag —
+to drive compaction thresholds, prompt-truncation safety, and image
+routing.
+
+`internal/providers/model_alias_fetcher.go` polls llm-service-web's
+`GET /v1/models` on startup and every 30 seconds, then writes each
+returned alias into the global model registry as a `ModelSpec`:
+
+```go
+type modelAliasEntry struct {
+    Alias         string `json:"alias"`
+    ID            string `json:"id"`
+    Provider      string `json:"provider"`
+    ContextWindow int    `json:"context_window"`
+    MaxTokens     int    `json:"max_tokens"`
+    Vision        bool   `json:"vision"`
+    Reasoning     bool   `json:"reasoning"`
+}
+
+registry.RegisterAlias(alias, ModelSpec{
+    ID:            alias,
+    Provider:      row.Provider,
+    ContextWindow: row.ContextWindow,
+    MaxTokens:     row.MaxTokens,
+    Reasoning:     row.Reasoning,
+    Vision:        row.Vision,
+})
+```
+
+The endpoint is public (no Authorization header required); the catalog
+isn't sensitive. The fetcher does carry a Bearer in `f.token` if set,
+for parity with the older auth model — llm-service-web ignores it.
+
+Rows with `context_window <= 0` are skipped silently. Those usually
+indicate aliases that haven't been provisioned yet in the upstream's
+`ai_models` table.
+
+### Why it exists
+
+Before this fetcher, goclaw used a single `agents.context_window` value
+set at tenant-provision time. It defaulted to 200,000 and almost never
+matched the alias the agent was actually using. The downstream
+effect:
+
+- DeepSeek V4 Flash (real ctx 1,048,576) compacted at ~170K instead of
+  ~890K → 5× less useful context retained before summarization.
+- Llama 3.1 8B (real ctx 131,072) would have been allowed to push past
+  its real limit if `agents.context_window=200000` had been treated as
+  authoritative — would hit upstream 400s.
+- The website's ContextIndicator showed 200K for every chat, hiding
+  the actual capacity from the user.
+
+Now: operator changes `ai_models.model_id` via SQL; loader on
+llm-service-web swaps its in-memory dict within ≤30s; the `/v1/models`
+endpoint surfaces the new mapping; goclaw's `ModelAliasFetcher` notices
+on its next poll; compact thresholds rebalance automatically. No code
+change anywhere in the stack.
+
+See `internal/providers/model_alias_fetcher.go` for the polling loop
+and `internal/providers/model_registry.go` for the spec lookup used by
+compact, vision routing, and prompt-truncation guards.
+
+---
+
+## 15. File Reference
 
 | File | Purpose |
 |------|---------|
