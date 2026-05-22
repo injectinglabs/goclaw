@@ -492,6 +492,17 @@ func runGateway() {
 
 	server.StartUpdateChecker(ctx)
 
+	// Local media-cache cleanup loop. S3-backed deployments only —
+	// FSBackend keeps the canonical bytes locally, so no eviction. The
+	// sweeper runs TTL + disk-pressure LRU on .media-cache/ to keep the
+	// EBS volume from filling on long-lived instances. Disabled
+	// (interval=0) by default; enable via GOCLAW_MEDIA_CACHE_SWEEP_INTERVAL.
+	if mediaStore != nil {
+		if s3b, ok := mediaStore.Backend().(*media.S3Backend); ok {
+			s3b.StartSweeper(ctx, mediaSweeperConfigFromEnv())
+		}
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
