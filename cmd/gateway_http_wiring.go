@@ -213,7 +213,10 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 	}
 
 	// Workspace file serving endpoint — serves files by absolute path, auth-token protected.
-	d.server.SetFilesHandler(httpapi.NewFilesHandler(d.workspace, d.dataDir))
+	// mediaStore is passed in so the handler can re-hydrate .media-cache/ paths
+	// from S3 when the local copy is missing (cache wipe, ASG bounce, sibling
+	// instance). nil store falls back to the legacy local-only behavior.
+	d.server.SetFilesHandler(httpapi.NewFilesHandler(d.workspace, d.dataDir, mediaStore))
 
 	// Storage file management — browse/delete files under the resolved workspace directory.
 	d.server.SetStorageHandler(httpapi.NewStorageHandler(d.workspace))

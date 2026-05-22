@@ -14,6 +14,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/edition"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
+	mediastore "github.com/nextlevelbuilder/goclaw/internal/media"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
@@ -21,16 +22,27 @@ import (
 // Accepts absolute paths — the auth token protects against unauthorized access.
 // When an exact path is not found, falls back to searching the workspace for
 // generated files by basename (media filenames include timestamps and are globally unique).
+//
+// MediaStore is optional but strongly recommended in prod: without it, a
+// served path inside .media-cache/ that isn't on this instance's local disk
+// (cache wipe, ASG bounce, cross-instance sticky-session migration) returns
+// 404 even though the bytes are still in S3. With it, the handler invokes
+// mediastore.ResolveLocalPath which extracts the media id from the path,
+// pulls the object from S3 into local cache, and serves it. Idempotent and
+// safe for repeated calls.
 type FilesHandler struct {
-	workspace string // workspace root for fallback file search
-	dataDir   string // data directory root for tenant path validation
+	workspace string                // workspace root for fallback file search
+	dataDir   string                // data directory root for tenant path validation
+	store     *mediastore.Store     // optional — enables S3 re-hydration of .media-cache misses
 }
 
 // NewFilesHandler creates a handler that serves files by absolute path.
 // workspace is the root directory used for fallback generated file search.
 // dataDir is used for tenant path validation (files must be within tenant's dirs).
-func NewFilesHandler(workspace, dataDir string) *FilesHandler {
-	return &FilesHandler{workspace: workspace, dataDir: dataDir}
+// store enables S3 re-hydration when the file isn't in the local cache (pass
+// nil in tests or single-instance dev where FSBackend is used directly).
+func NewFilesHandler(workspace, dataDir string, store *mediastore.Store) *FilesHandler {
+	return &FilesHandler{workspace: workspace, dataDir: dataDir, store: store}
 }
 
 // RegisterRoutes registers the file serving route.
@@ -210,6 +222,24 @@ func (h *FilesHandler) handleServe(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+
+	// Re-hydrate from S3 when the path looks like a MediaStore cache mirror
+	// (.media-cache/<sessionHash>/<uuid>.<ext>) but the local copy is gone.
+	// Happens after a cache wipe, container restart, or when the chat lands
+	// on a sibling ASG instance that has never read this object before.
+	// mediastore.ResolveLocalPath parses the media id out of the path and
+	// asks the backend to pull the bytes from S3 into the local cache; the
+	// returned path is then guaranteed to be on disk.
+	if err != nil && h.store != nil {
+		if resolved, rerr := mediastore.ResolveLocalPath(absPath, h.store); rerr == nil && resolved != "" {
+			if info2, statErr := os.Stat(resolved); statErr == nil {
+				absPath = resolved
+				info = info2
+				err = nil
+			}
+		}
+	}
+
 	// Fuzzy match: generated files have timestamp suffixes (e.g. "file_20260326-232559_269000.png")
 	// but LLM may reference them without timestamp (e.g. "file.png"). Try prefix match in same dir.
 	if err != nil {
