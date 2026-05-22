@@ -88,12 +88,12 @@ func (l *Loop) enrichInputMedia(ctx context.Context, req *RunRequest, messages [
 			// Still load into context as fallback — if LLM omits the path param,
 			// read_image can fall back to context images. This costs Go memory
 			// but NOT LLM tokens (base64 is in Go context, not sent to provider).
-			if images := loadImages(imageFiles, l.mediaStore); len(images) > 0 {
+			if images := loadImages(imageFiles); len(images) > 0 {
 				ctx = tools.WithMediaImages(ctx, images)
 			}
 			slog.Info("vision: file-ref mode, images accessible via read_image tool",
 				"count", len(imageFiles), "agent", l.id)
-		} else if images := loadImages(imageFiles, l.mediaStore); len(images) > 0 {
+		} else if images := loadImages(imageFiles); len(images) > 0 {
 			// Inline mode: read files, base64 encode, attach to message + context.
 			messages[len(messages)-1].Images = images
 			ctx = tools.WithMediaImages(ctx, images)

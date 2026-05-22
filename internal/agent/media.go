@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
-	"github.com/nextlevelbuilder/goclaw/internal/media"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
 
@@ -20,43 +19,32 @@ const maxImageBytes = 10 * 1024 * 1024
 // loadImages reads local image files and returns base64-encoded ImageContent slices.
 // Non-image files and files that fail to read are skipped with a warning log.
 //
-// `store` is the agent loop's media.Store (may be nil for unit-test paths
-// that don't wire one). When set, image paths are run through
-// media.ResolveLocalPath first so signed `/v1/files/...?ft=...` URLs
-// from the chat client and cache misses on multi-instance ASGs both
-// resolve to a real local file before os.ReadFile sees them.
-func loadImages(files []bus.MediaFile, store *media.Store) []providers.ImageContent {
+// Paths handed in here are assumed to be clean local filesystem paths.
+// The normalization happens at the boundary (gateway/methods/chat.go
+// runs mediastore.ResolveLocalPath on every item it builds a MediaFile
+// from, before the file ever enters the agent loop). Channels feeding
+// MediaFile from other entry points (Telegram/Slack/WhatsApp) are
+// expected to do the same — they receive uploads they themselves drove
+// through the media store, so the path is already a cache-rooted local
+// path on their codepath.
+func loadImages(files []bus.MediaFile) []providers.ImageContent {
 	if len(files) == 0 {
 		return nil
 	}
 
 	var images []providers.ImageContent
 	for _, f := range files {
-		// Resolve signed URLs and cache misses to a real local path
-		// FIRST so downstream mime-inference (which uses filepath.Ext)
-		// doesn't see `?ft=...` glued to the extension and miss the
-		// match. On multi-instance prod the chat client passes
-		// `/v1/files/<path>?ft=<token>` back as a path field; on top of
-		// that the local cache may be empty (file was uploaded on a
-		// sibling EC2). ResolveLocalPath strips the URL wrapper and
-		// hydrates the cache from S3 if needed.
-		localPath, err := media.ResolveLocalPath(f.Path, store)
-		if err != nil {
-			slog.Warn("vision: failed to resolve image path", "path", f.Path, "error", err)
-			continue
-		}
-
 		mime := f.MimeType
 		if mime == "" {
-			mime = inferImageMime(localPath)
+			mime = inferImageMime(f.Path)
 		}
 		if !strings.HasPrefix(mime, "image/") {
 			continue
 		}
 
-		data, err := os.ReadFile(localPath)
+		data, err := os.ReadFile(f.Path)
 		if err != nil {
-			slog.Warn("vision: failed to read image file", "path", localPath, "raw", f.Path, "error", err)
+			slog.Warn("vision: failed to read image file", "path", f.Path, "error", err)
 			continue
 		}
 		if len(data) > maxImageBytes {
@@ -485,7 +473,7 @@ func (l *Loop) reloadMediaForMessages(msgs []providers.Message, maxMessages int)
 		}
 		count++
 
-		if images := loadImages(imageFiles, l.mediaStore); len(images) > 0 {
+		if images := loadImages(imageFiles); len(images) > 0 {
 			msgs[i].Images = images
 			slog.Debug("media: reloaded images for historical message", "index", i, "count", len(images))
 		}
