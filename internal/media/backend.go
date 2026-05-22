@@ -20,6 +20,13 @@ type Backend interface {
 	// file SHOULD be removed by the backend on success.
 	Save(ctx context.Context, sessionKey, srcPath, mime string) (id string, ext string, err error)
 
+	// SaveReader persists the bytes from src under sessionKey without an
+	// intermediate scratch file. Same contract as Save otherwise: returns
+	// the media ID and the extension applied. hintExt (with leading dot,
+	// or "") gives the caller a way to preserve the original extension
+	// when mime-detection is ambiguous (e.g. an upload of `.tar.gz`).
+	SaveReader(ctx context.Context, sessionKey, mime string, src io.Reader, hintExt string) (id string, ext string, err error)
+
 	// Open returns a reader for the bytes of a previously-saved media ID.
 	// The caller must close the reader.
 	Open(ctx context.Context, id string) (io.ReadCloser, error)

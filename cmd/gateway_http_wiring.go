@@ -218,8 +218,11 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 	// Storage file management — browse/delete files under the resolved workspace directory.
 	d.server.SetStorageHandler(httpapi.NewStorageHandler(d.workspace))
 
-	// Media upload endpoint — accepts multipart file uploads, returns temp path + MIME type.
-	d.server.SetMediaUploadHandler(httpapi.NewMediaUploadHandler())
+	// Media upload endpoint — streams multipart uploads straight into the
+	// configured MediaStore (S3-backed in prod). Returns a UUID-shaped
+	// cache path that the chat.send boundary normalizer can resolve on
+	// any sibling instance via mediastore.ResolveLocalPath shape 3.
+	d.server.SetMediaUploadHandler(httpapi.NewMediaUploadHandler(mediaStore))
 
 	// Media serve endpoint — serves persisted media files by ID for WS/web clients.
 	if mediaStore != nil {
