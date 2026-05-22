@@ -51,13 +51,18 @@ BEGIN
         RAISE EXCEPTION 'failed to upsert global document-mcp row';
     END IF;
 
-    -- 2a. Copy agent grants from every per-tenant row to the global row.
+    -- 2a. Copy agent grants from every per-tenant row to the global
+    --     row. tenant_id is NOT NULL on the grants table (added by
+    --     migration 027_tenant_foundation), so we MUST preserve it
+    --     from the source row — the global server's tenant_id IS NULL
+    --     but the grant's tenant_id keeps pointing at the agent's
+    --     tenant.
     INSERT INTO mcp_agent_grants (
-        server_id, agent_id, enabled, tool_allow, tool_deny,
+        server_id, agent_id, tenant_id, enabled, tool_allow, tool_deny,
         config_overrides, granted_by
     )
     SELECT
-        global_id, g.agent_id, g.enabled, g.tool_allow, g.tool_deny,
+        global_id, g.agent_id, g.tenant_id, g.enabled, g.tool_allow, g.tool_deny,
         g.config_overrides,
         COALESCE(g.granted_by, 'migration_000060')
     FROM mcp_agent_grants g
@@ -65,12 +70,12 @@ BEGIN
     WHERE s.name = 'document-mcp' AND s.tenant_id IS NOT NULL
     ON CONFLICT (server_id, agent_id) DO NOTHING;
 
-    -- 2b. Same for user grants.
+    -- 2b. Same for user grants — tenant_id also NOT NULL there.
     INSERT INTO mcp_user_grants (
-        server_id, user_id, enabled, tool_allow, tool_deny, granted_by
+        server_id, user_id, tenant_id, enabled, tool_allow, tool_deny, granted_by
     )
     SELECT
-        global_id, g.user_id, g.enabled, g.tool_allow, g.tool_deny,
+        global_id, g.user_id, g.tenant_id, g.enabled, g.tool_allow, g.tool_deny,
         COALESCE(g.granted_by, 'migration_000060')
     FROM mcp_user_grants g
     INNER JOIN mcp_servers s ON s.id = g.server_id
