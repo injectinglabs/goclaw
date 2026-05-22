@@ -2,12 +2,9 @@ package http
 
 import (
 	"fmt"
-	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/channels/media"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
@@ -20,27 +17,29 @@ const (
 	maxUploadSize int64 = 50 * 1024 * 1024
 )
 
-// MediaUploadHandler handles media file uploads for WebSocket clients.
+// MediaUploadHandler accepts file uploads from any client (SPA, Chrome
+// extension, etc.) for any media kind (image, document, audio, video).
 //
-// Files land directly in the configured MediaStore (S3-backed in prod, FS
-// in dev/test). The returned path is the local cache mirror — clean,
-// UUID-shaped, and recoverable on any sibling instance via
-// mediastore.ResolveLocalPath shape 3. Without the store wired we fall
-// back to a /tmp scratch file, which works on a single-instance
-// deployment but breaks under an ASG (the chat.send WS message may land
-// on a sibling that has no view of this instance's /tmp).
+// The multipart body is streamed straight into the configured Store —
+// S3-backed in prod, FS in dev. No /tmp scratch file. The returned path
+// is the local cache mirror, UUID-shaped, recognized by
+// mediastore.ResolveLocalPath shape 3, so the subsequent chat.send WS
+// message can land on any sibling instance in the prod ASG and still
+// resolve the file (manifest in S3 lets LocalPath hydrate the local
+// cache on demand).
+//
+// On dev/test setups without a store wired the handler hard-fails
+// rather than silently falling back to /tmp — that historical fallback
+// was the root cause of the prod bug we're fixing here, and a noisy
+// 500 in dev beats a heisenbug in prod.
 type MediaUploadHandler struct {
 	store *mediastore.Store
 }
 
-// NewMediaUploadHandler creates a media upload handler. Pass a nil store
-// only in tests / single-instance dev setups; production wiring must
-// supply one so cross-instance reads can hydrate from S3.
 func NewMediaUploadHandler(store *mediastore.Store) *MediaUploadHandler {
 	return &MediaUploadHandler{store: store}
 }
 
-// RegisterRoutes registers the upload endpoint.
 func (h *MediaUploadHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/media/upload", h.auth(h.handleUpload))
 }
@@ -52,6 +51,11 @@ func (h *MediaUploadHandler) auth(next http.HandlerFunc) http.HandlerFunc {
 func (h *MediaUploadHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 	locale := extractLocale(r)
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
+
+	if h.store == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "media store not configured")})
+		return
+	}
 
 	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgFileTooLarge)})
@@ -71,55 +75,29 @@ func (h *MediaUploadHandler) handleUpload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	ext := filepath.Ext(origName)
-	if ext == "" {
-		ext = ".bin"
+	hintExt := filepath.Ext(origName)
+	if hintExt == "" {
+		hintExt = ".bin"
 	}
-
-	tmpName := fmt.Sprintf("ws_upload_%d%s", time.Now().UnixNano(), ext)
-	tmpPath := filepath.Join(os.TempDir(), tmpName)
-
-	out, err := os.Create(tmpPath)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "failed to create temp file")})
-		return
-	}
-
-	if _, err := io.Copy(out, file); err != nil {
-		out.Close()
-		os.Remove(tmpPath)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "failed to save file")})
-		return
-	}
-	out.Close()
-
 	mimeType := media.DetectMIMEType(origName)
+	sessionKey := uploadSessionKey(r)
 
-	// Promote /tmp scratch into MediaStore so the file is recoverable on
-	// any instance (S3 backend on prod). Without a store this is a no-op
-	// and we fall back to the /tmp path — fine for single-instance dev
-	// but unsafe under an ASG.
-	finalPath := tmpPath
-	if h.store != nil {
-		sessionKey := uploadSessionKey(r)
-		_, dst, err := h.store.SaveFile(sessionKey, tmpPath, mimeType)
-		if err == nil {
-			finalPath = dst
-		}
-		// best-effort cleanup of the scratch file; ignore errors.
-		_ = os.Remove(tmpPath)
+	_, dst, err := h.store.SaveReader(sessionKey, mimeType, file, hintExt)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "failed to persist upload")})
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"path":      finalPath,
+		"path":      dst,
 		"mime_type": mimeType,
 		"filename":  origName,
 	})
 }
 
 // uploadSessionKey scopes pre-chat uploads to (tenant, user) so the
-// file is co-tenant on cleanup but globally addressable by its media id
-// from any instance in the ASG.
+// file is tenant-isolated on cleanup but globally addressable by its
+// media id from any instance in the ASG.
 func uploadSessionKey(r *http.Request) string {
 	ctx := r.Context()
 	tid := store.TenantIDFromContext(ctx).String()

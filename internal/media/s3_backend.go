@@ -146,6 +146,48 @@ func (b *S3Backend) Save(ctx context.Context, sessionKey, srcPath, mime string) 
 	return mediaID, ext, nil
 }
 
+// SaveReader streams the body directly to S3 via the multipart uploader.
+// Unlike Save (which expects a srcPath on disk) this leaves no scratch
+// file behind — useful for proxying browser/multipart uploads when the
+// caller already has the body as an io.Reader and shouldn't burn disk
+// I/O on a /tmp round-trip.
+func (b *S3Backend) SaveReader(ctx context.Context, sessionKey, mime string, src io.Reader, hintExt string) (string, string, error) {
+	mediaID := uuid.New().String()
+	ext := ExtFromMime(mime)
+	if ext == "" {
+		ext = hintExt
+	}
+
+	sessionHash := s3SessionHash(sessionKey)
+	objectKey := b.objectKey(sessionHash, mediaID, ext)
+
+	if _, err := b.uploader.Upload(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(b.bucket),
+		Key:         aws.String(objectKey),
+		Body:        src,
+		ContentType: aws.String(mime),
+	}); err != nil {
+		return "", "", fmt.Errorf("media s3: upload %q: %w", objectKey, err)
+	}
+
+	manifestKey := b.manifestKey(mediaID)
+	manifestBody := sessionHash + "/" + mediaID + ext
+	if _, err := b.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(b.bucket),
+		Key:         aws.String(manifestKey),
+		Body:        strings.NewReader(manifestBody),
+		ContentType: aws.String("text/plain"),
+	}); err != nil {
+		_, _ = b.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(b.bucket),
+			Key:    aws.String(objectKey),
+		})
+		return "", "", fmt.Errorf("media s3: write manifest %q: %w", manifestKey, err)
+	}
+
+	return mediaID, ext, nil
+}
+
 func (b *S3Backend) Open(ctx context.Context, id string) (io.ReadCloser, error) {
 	relKey, err := b.resolveManifest(ctx, id)
 	if err != nil {

@@ -54,6 +54,35 @@ func (b *FSBackend) Save(_ context.Context, sessionKey, srcPath, mime string) (s
 	return mediaID, ext, nil
 }
 
+func (b *FSBackend) SaveReader(_ context.Context, sessionKey, mime string, src io.Reader, hintExt string) (string, string, error) {
+	dir := b.sessionDir(sessionKey)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", "", fmt.Errorf("media fs: create session dir: %w", err)
+	}
+
+	mediaID := uuid.New().String()
+	ext := ExtFromMime(mime)
+	if ext == "" {
+		ext = hintExt
+	}
+	dstPath := filepath.Join(dir, mediaID+ext)
+
+	out, err := os.Create(dstPath)
+	if err != nil {
+		return "", "", fmt.Errorf("media fs: create dst: %w", err)
+	}
+	if _, err := io.Copy(out, src); err != nil {
+		out.Close()
+		_ = os.Remove(dstPath)
+		return "", "", fmt.Errorf("media fs: copy bytes: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dstPath)
+		return "", "", fmt.Errorf("media fs: close dst: %w", err)
+	}
+	return mediaID, ext, nil
+}
+
 func (b *FSBackend) Open(ctx context.Context, id string) (io.ReadCloser, error) {
 	p, err := b.LocalPath(ctx, id)
 	if err != nil {
