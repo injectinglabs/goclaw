@@ -859,8 +859,13 @@ Invalidate the voice cache for the current tenant, forcing a fresh fetch on the 
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/v1/media/upload` | Upload file (multipart, 50 MB limit) |
-| `GET` | `/v1/media/{id}` | Serve media by ID with caching |
+| `POST` | `/v1/media/upload`         | SPA / extension multipart upload (50 MB). Streams body straight into `MediaStore.SaveReader` — no `/tmp` middleman. Returns the local cache mirror path so subsequent `chat.send` works on any ASG instance via `ResolveLocalPath` shape 3. |
+| `GET`  | `/v1/media/{id}`           | Serve media by ID with caching. |
+| `POST` | `/v1/internal/media/import` | **Internal-only**, bearer `GOCLAW_GATEWAY_TOKEN`. Trusted sidecars (document-mcp, future workers) push generated artefacts into MediaStore without holding S3 creds. Form fields: `file`, `session_key`, optional `content_type`. Returns `{media_id, path, mime_type, filename}`. |
+
+For the broader file-flow story (S3 bucket layout, per-instance cache,
+lifecycle policy, X-Actor-* propagation), see
+[`MEDIA_FLOW.md` in injecting-ai-goclaw](https://github.com/injectinglabs/injecting-ai-goclaw/blob/main/docs/MEDIA_FLOW.md).
 
 ---
 
@@ -871,7 +876,19 @@ Invalidate the voice cache for the current tenant, forcing a fresh fetch on the 
 | `GET` | `/v1/files/{path...}` | Serve workspace file by path |
 | `POST` | `/v1/files/sign` | Generate signed URL for token-based file access |
 
-Auth via Bearer token or `?token=` query param (for `<img>` tags). MIME type auto-detected. Path traversal blocked.
+Auth via Bearer token or `?ft=<token>` query param (for `<img>` tags and
+chat-history attachments). MIME type auto-detected. Path traversal
+blocked.
+
+**S3 re-hydration**: when the requested path looks like a MediaStore
+cache mirror (`.media-cache/<sessionHash>/<uuid>.<ext>`) and the local
+copy is missing — for example after a cache wipe, ASG bounce, or
+cross-instance sticky-session migration — the handler calls
+`mediastore.ResolveLocalPath` to pull the object from S3 into the local
+cache before serving. So `/v1/files/` is durably backed by S3 for any
+file uploaded via `/v1/media/upload` or
+`/v1/internal/media/import`, not just files that happen to be on the
+serving instance's disk.
 
 ---
 
