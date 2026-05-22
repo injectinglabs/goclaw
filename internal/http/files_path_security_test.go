@@ -25,7 +25,7 @@ func makeTestFilesHandler(t *testing.T) (*FilesHandler, string) {
 	t.Helper()
 	workspace := t.TempDir()
 	dataDir := t.TempDir()
-	h := NewFilesHandler(workspace, dataDir)
+	h := NewFilesHandler(workspace, dataDir, nil)
 	return h, workspace
 }
 
