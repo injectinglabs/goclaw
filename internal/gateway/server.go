@@ -496,6 +496,13 @@ func (s *Server) SetMediaServeHandler(h *httpapi.MediaServeHandler) {
 	s.handlers = append(s.handlers, h)
 }
 
+// SetMediaImportHandler sets the internal media-import handler (used by
+// trusted backend services like document-mcp to push generated files
+// into the goclaw MediaStore).
+func (s *Server) SetMediaImportHandler(h *httpapi.MediaImportHandler) {
+	s.handlers = append(s.handlers, h)
+}
+
 // SetMemoryHandler sets the memory management handler.
 func (s *Server) SetMemoryHandler(h *httpapi.MemoryHandler) { s.handlers = append(s.handlers, h) }
 

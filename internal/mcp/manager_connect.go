@@ -254,6 +254,13 @@ func createClient(transportType, command string, args []string, env map[string]s
 			// loudly so it's caught in seconds instead of as a 403 burst.
 			slog.Warn("mcp.connect.no_headers", "transport", "streamable-http", "url", url)
 		}
+		// Per-call X-Actor-* injection. Invoked by mcp-go on every
+		// outbound HTTP request with the request context — we read the
+		// actor identity goclaw stashed via WithActorIdentity right
+		// before BridgeTool.Execute. Sidecars (document-mcp etc.) use
+		// these instead of the bake-at-connect X-Proxy-* pattern, which
+		// can't represent per-call identity in a shared pool.
+		opts = append(opts, transport.WithHTTPHeaderFunc(actorHeadersFromContext))
 		return mcpclient.NewStreamableHttpClient(url, opts...)
 
 	default:
