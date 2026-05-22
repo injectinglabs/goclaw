@@ -171,8 +171,10 @@ func (t *ReadImageTool) callProvider(ctx context.Context, cp credentialProvider,
 }
 
 // loadImageFromPath reads an image file from the workspace and returns it as ImageContent.
+// Paths arriving here are already normalized at the chat.send boundary
+// (signed `/v1/files/...?ft=...` wrappers stripped, S3 cache hydrated) so this
+// trusts the caller and goes straight to filesystem.
 func (t *ReadImageTool) loadImageFromPath(ctx context.Context, path string) ([]providers.ImageContent, error) {
-	// Infer MIME type from extension
 	ext := strings.ToLower(filepath.Ext(path))
 	mimeTypes := map[string]string{
 		".jpg": "image/jpeg", ".jpeg": "image/jpeg",

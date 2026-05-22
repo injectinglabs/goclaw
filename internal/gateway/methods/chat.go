@@ -16,6 +16,7 @@ import (
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/media"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
+	mediastore "github.com/nextlevelbuilder/goclaw/internal/media"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/sessions"
@@ -34,6 +35,13 @@ type ChatMethods struct {
 	postTurn    tools.PostTurnProcessor
 	audioMgr    *audio.Manager  // for TTS auto-apply on WS responses (nil = disabled)
 	tools       *tools.Registry // used to route chat.toolResult → pending client tool channels
+	// mediaStore is consulted when normalizing client-supplied media
+	// paths at the chat.send boundary. With S3-backed deployments the
+	// store hydrates the local cache from S3 when the file isn't on
+	// this instance yet (multi-instance prod ASG sibling-upload case).
+	// Nil on single-instance/FSBackend deploys — boundary still strips
+	// signed-URL wrappers, just skips the S3 fetch step.
+	mediaStore *mediastore.Store
 }
 
 func NewChatMethods(agents *agent.Router, sess store.SessionStore, cfg *config.Config, rl *gateway.RateLimiter, eventBus bus.EventPublisher) *ChatMethods {
@@ -54,6 +62,15 @@ func (m *ChatMethods) SetToolRegistry(reg *tools.Registry) {
 // SetPostTurnProcessor sets the post-turn processor for team task dispatch.
 func (m *ChatMethods) SetPostTurnProcessor(pt tools.PostTurnProcessor) {
 	m.postTurn = pt
+}
+
+// SetMediaStore wires the media store so chat.send can normalize
+// client-supplied media paths before they flow into the agent loop.
+// Without this the boundary still strips signed-URL wrappers but
+// can't hydrate the local cache from S3 — that case degrades to the
+// current "ENOENT on sibling-instance upload" behaviour.
+func (m *ChatMethods) SetMediaStore(s *mediastore.Store) {
+	m.mediaStore = s
 }
 
 // Register adds chat methods to the router.
@@ -433,6 +450,34 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 
 		// Parse media items (supports both legacy string paths and new {path,filename} objects).
 		items := params.parseMedia()
+
+		// Normalize media paths at the chat.send boundary so downstream
+		// code (vision pipeline, read_image tool, document extractors)
+		// trusts the path it gets.
+		//
+		// Three real shapes arrive here from clients:
+		//   • Clean local path on the SAME instance that uploaded the file
+		//     (FSBackend, or S3Backend with a warm cache). Returned as-is.
+		//   • `/v1/files/<path>?ft=<token>` signed URL — emitted by the
+		//     chat layer when serving messages to the SPA. The SPA echoes
+		//     this exact string back as the attachment path on the next
+		//     chat.send, which is how the URL leaked into the file path
+		//     and broke vision / read_image on prod.
+		//   • Clean local path that DOESN'T exist on this instance because
+		//     the file was uploaded on a sibling EC2 in the prod ASG. The
+		//     S3 backend has the bytes; we just need to ask it to populate
+		//     the local cache.
+		//
+		// mediastore.ResolveLocalPath strips the URL wrapper and, when
+		// the store is wired, asks LocalPath(id) to hydrate the cache.
+		// Errors are non-fatal — downstream still gets the path the
+		// client sent and produces the canonical "no such file" error
+		// if the resolver couldn't do better.
+		for i := range items {
+			if resolved, err := mediastore.ResolveLocalPath(items[i].Path, m.mediaStore); err == nil {
+				items[i].Path = resolved
+			}
+		}
 
 		// Convert media items to bus.MediaFile with MIME detection.
 		var mediaFiles []bus.MediaFile
