@@ -227,6 +227,13 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 	// Media serve endpoint — serves persisted media files by ID for WS/web clients.
 	if mediaStore != nil {
 		d.server.SetMediaServeHandler(httpapi.NewMediaServeHandler(mediaStore))
+		// Internal media-import endpoint — lets document-mcp and future
+		// internal services push generated artefacts into MediaStore via
+		// the gateway bearer token instead of holding S3 creds + a private
+		// S3 prefix per service. Returned cache path goes through
+		// SignMediaPath on every history fetch, so chat-embedded links
+		// stay live for as long as the bucket lifecycle keeps the object.
+		d.server.SetMediaImportHandler(httpapi.NewMediaImportHandler(mediaStore))
 	}
 
 	// ElevenLabs voice list + refresh endpoints (GET /v1/voices, POST /v1/voices/refresh).
