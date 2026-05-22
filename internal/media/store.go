@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"io"
 	"strings"
 )
 
@@ -49,6 +50,23 @@ func (s *Store) CacheRoot() string {
 func (s *Store) SaveFile(sessionKey, srcPath, mime string) (id string, dstPath string, err error) {
 	ctx := context.Background()
 	id, _, err = s.b.Save(ctx, sessionKey, srcPath, mime)
+	if err != nil {
+		return "", "", err
+	}
+	dstPath, err = s.b.LocalPath(ctx, id)
+	if err != nil {
+		return "", "", err
+	}
+	return id, dstPath, nil
+}
+
+// SaveReader streams the bytes from src into the backend without a
+// scratch file. Returns the media ID and the cache-local filesystem
+// path the caller can hand to chat.send (boundary normalizer hydrates
+// the cache from S3 on sibling instances via ResolveLocalPath shape 3).
+func (s *Store) SaveReader(sessionKey, mime string, src io.Reader, hintExt string) (id string, dstPath string, err error) {
+	ctx := context.Background()
+	id, _, err = s.b.SaveReader(ctx, sessionKey, mime, src, hintExt)
 	if err != nil {
 		return "", "", err
 	}
