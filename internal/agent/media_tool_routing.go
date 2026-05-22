@@ -88,7 +88,7 @@ func (l *Loop) loadHistoricalImagesForTool(ctx context.Context, currentRefs []pr
 		return ctx
 	}
 
-	histImages := loadImages(histPaths, l.mediaStore)
+	histImages := loadImages(histPaths)
 	if len(histImages) == 0 {
 		return ctx
 	}
