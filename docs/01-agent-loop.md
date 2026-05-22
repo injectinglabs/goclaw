@@ -219,7 +219,7 @@ flowchart TD
     PH6 --> PH7
 
     subgraph PH7["Phase 7: Auto-Summarization"]
-        P7A{"> 50 messages OR > 75% context window?"}
+        P7A{"> 50 messages OR > 85% context window?"}
         P7A -->|No| P7D[Skip]
         P7A -->|Yes| P7B["Memory flush (synchronous, max 5 iterations, 90s timeout)"]
         P7B --> P7C["Summarize in background goroutine (120s timeout)"]
@@ -262,7 +262,7 @@ flowchart TD
 - Filter the available tools through the PolicyEngine (RBAC).
 - Call the LLM. Streaming calls emit `chunk` events in real time; non-streaming calls return a single response.
 - Record an LLM span for tracing with token counts and timing.
-- **Mid-loop compaction**: if prompt tokens exceed 75% of context window (or `MaxHistoryShare` if configured), summarize ~70% of in-memory messages, keeping the last ~30%. This happens during active iterations to prevent context overflow in long-running tasks.
+- **Mid-loop compaction**: if prompt tokens exceed 85% of the model's real context window (or `MaxHistoryShare` if configured), summarize older messages while keeping the last `KeepLast` intact (default 16). Triggered during active iterations to prevent context overflow in long-running tasks. The threshold is per-alias — goclaw learns each alias' real `context_window` from llm-service-web's `GET /v1/models` via `ModelAliasFetcher` (see Section: Per-alias context windows), so a 1M-ctx model isn't summarized at the same 200K mark as a 131K-ctx model.
 - If the response contains no tool calls, exit the loop.
 - If tool calls are present, proceed to Phase 5 and then loop back.
 - Maximum iterations before loop forcibly exits (default 20, set via `maxIterations` in agent config or `req.MaxIterations` per-request).
@@ -285,10 +285,12 @@ flowchart TD
 
 ### Phase 7: Auto-Summarization
 
-- **Trigger condition**: the history has more than 50 messages OR the estimated token count exceeds 75% of the context window.
+- **Trigger condition**: the history has more than 50 messages OR the estimated token count exceeds 85% of the model's real context window (per-alias, fed by `ModelAliasFetcher`).
 - **Per-session TryLock**: before summarizing, acquire a non-blocking per-session lock. If another concurrent run is already summarizing, skip. This prevents concurrent summarization from corrupting session history.
 - **Memory flush first**: run synchronously so the agent can persist durable memories before history is truncated. Max 5 LLM iterations, 90-second timeout.
-- **Summarize**: launch a background goroutine with a 120-second timeout. The LLM produces a summary of all messages except the last 4. The summary is saved and the history is truncated to those 4 messages. The compaction counter is incremented.
+- **Summarizer model**: defaults to the agent's primary model (`l.model`) — the same one used for the turn. Operators can override per-loop via `compactionCfg.SummarizerModel = "fast"` if cost matters, or set `config.DefaultSummarizerModelAlias` for a global default. Previously the summarizer was hardcoded to `"fast"`; switched to primary-model because small models lost important technical detail in long agentic threads, and the cost delta is dwarfed by the cost of re-running the turn after a bad summary.
+- **Summarize**: launch a background goroutine with a 120-second timeout. The LLM produces a summary of older messages; the last `KeepLast` (default 16, was 4) stay verbatim — this aligns with industry defaults (Microsoft Agent Framework, OpenCode's 40K-cushion + last-2-user-turns pattern) and gives the agent enough recent context to recover after summarization. The summary is saved, history truncated to those last messages, compaction counter incremented.
+- **Safe split + tool-call collapse**: `safeSplitIndex()` walks the cut point backwards if it would leave an `assistant.tool_calls` orphan or a `role="tool"` message at the head of the kept slice — split must always land at a clean turn boundary. `collapseToolCallsForSummary()` replaces raw tool-call JSON in the summarizer's input with a structured "assistant called tool: X(args). result: …" sketch (large results truncated to `maxToolResultPreviewChars`); the summarizer LLM gets clear semantic signal instead of opaque JSON blobs.
 
 ### Cancel Handling
 
@@ -482,12 +484,18 @@ The system uses a two-stage compaction strategy: **mid-loop** (during active ite
 
 ### Mid-Loop Compaction (During Iteration)
 
-When in-memory messages exceed 75% of context window during LLM iterations, the agent immediately summarizes the first ~70% of messages in place, keeping the last ~30%. This prevents context overflow in long-running tasks without waiting for post-run summarization.
+When in-memory messages exceed 85% of the model's real context window during LLM iterations, the agent immediately summarizes older messages in place, keeping the last `KeepLast` (default 16) intact. This prevents context overflow in long-running tasks without waiting for post-run summarization.
 
 ```
-Threshold: prompt_tokens >= contextWindow * 0.75 (configurable via MaxHistoryShare)
-Trigger: Once per run, inside the iteration loop (between LLM calls)
-Output: In-memory messages replaced with [summary] + [recent 4 messages]
+Threshold: prompt_tokens >= contextWindow * 0.85 (configurable via MaxHistoryShare)
+            where contextWindow is the model's REAL limit, learned per-alias
+            from llm-service-web's GET /v1/models via ModelAliasFetcher.
+Trigger:    Once per run, inside the iteration loop (between LLM calls)
+KeepLast:   16 by default (config.DefaultKeepLastMessages). Was 4 historically;
+            bumped after research on Microsoft Agent Framework + OpenCode's
+            "last N user turns" patterns showed that small KeepLast loses too
+            much immediate context for the agent to recover gracefully.
+Output:     In-memory messages replaced with [summary] + [last KeepLast messages]
 ```
 
 ### Post-Run Compaction (After Completion)
@@ -496,7 +504,7 @@ When the session history exceeds thresholds **after** a run completes, the sessi
 
 ```mermaid
 flowchart TD
-    CHECK{"> 50 messages OR<br/>> 75% context window?"}
+    CHECK{"> 50 messages OR<br/>> 85% context window?"}
     CHECK -->|No| SKIP[Skip compaction]
     CHECK -->|Yes| LOCK["Per-session non-blocking lock<br/>(skip if another run already compacting)"]
     LOCK -->|Lock acquired| FLUSH
@@ -505,10 +513,10 @@ flowchart TD
     FLUSH["Step 1: Memory Flush (synchronous)<br/>Embedded agent turn with write_file tool<br/>Agent stores durable memories before truncation<br/>Uses PromptMinimal mode<br/>Max 5 iterations, 90s timeout"]
     FLUSH --> SUMMARIZE
 
-    SUMMARIZE["Step 2: Summarize (background goroutine)<br/>Keep last 4 messages<br/>LLM summarizes older messages<br/>temp=0.3, max_tokens=1024, timeout 120s"]
+    SUMMARIZE["Step 2: Summarize (background goroutine)<br/>Keep last KeepLast=16 messages<br/>safeSplitIndex walks back if cut breaks a tool_call/tool_result pair<br/>collapseToolCallsForSummary replaces tool JSON with semantic sketch<br/>Summarizer model = primary model by default (override via compactionCfg.SummarizerModel)<br/>temp=0.3, max_tokens=1024, timeout 120s"]
     SUMMARIZE --> SAVE
 
-    SAVE["Step 3: Save<br/>SetSummary() + TruncateHistory(4)<br/>IncrementCompaction()"]
+    SAVE["Step 3: Save<br/>SetSummary() + TruncateHistory(KeepLast)<br/>IncrementCompaction()"]
 ```
 
 ### Summary Reuse
@@ -519,6 +527,34 @@ On the next request, the saved summary is injected at the beginning of the messa
 2. `{role: "assistant", content: "I understand the context..."}`
 
 This gives the LLM continuity without replaying the full history. Protected zone: the last 3 assistant messages are never pruned.
+
+### Per-Alias Context Windows (ModelAliasFetcher)
+
+The 85% compact threshold is calculated against the **model's real context window**, not a hardcoded constant. `internal/providers/model_alias_fetcher.go` periodically polls llm-service-web's `GET /v1/models` (every 30s by default) and registers per-alias `context_window`, `max_tokens`, `vision`, and `reasoning` capability into the provider registry.
+
+```
+ModelAliasFetcher (every 30s)
+  └─ GET /v1/models
+  └─ for each response row with alias + context_window > 0:
+       registry.RegisterAlias(alias, ModelSpec{
+         ID: alias, Provider: row.Provider,
+         ContextWindow: row.ContextWindow,
+         MaxTokens: row.MaxTokens,
+         Vision: row.Vision, Reasoning: row.Reasoning,
+       })
+```
+
+Why this matters:
+
+- **default = 1M ctx** (DeepSeek V4 Flash): compact at ~890K, not at 170K (the agent-config hardcoded default of 200K × 0.85). 5× more useful context before summarization.
+- **fast = 131K ctx** (Llama 3.1 8B): compact at ~110K, not at 170K (would never trigger).
+- **vision = 10M ctx** (Llama 4 Scout via OpenRouter): compact at ~8.9M, effectively never under normal use.
+
+If the fetcher hasn't run yet (cold start) or `/v1/models` is unreachable, the agent falls back to `agents.context_window` from the goclaw DB, which is set at tenant-provision time and rarely matches the real model. The fetcher's purpose is to keep that stale config from forcing premature compaction.
+
+The same registry feeds the website's ContextIndicator — when an operator changes a model's `ai_models.model_id` via SQL, the website bar updates within ≤30s without a frontend redeploy.
+
+See [02-providers.md §11. Per-Alias Model Spec Registry](./02-providers.md) for the data path on the provider side.
 
 ---
 
