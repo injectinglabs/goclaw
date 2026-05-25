@@ -53,3 +53,15 @@ func actorHeadersFromCtx(ctx context.Context) map[string]string {
 	v, _ := ctx.Value(actorHeadersKey{}).(map[string]string)
 	return v
 }
+
+// ActorHeadersFromCtx is the exported accessor for the same context map
+// `WithActorHeaders` writes. Lets callers outside the providers package
+// (e.g. internal/mcp) forward goclaw's outbound actor identity to
+// downstream service-token receivers without reinventing the
+// external_org_id → slug resolution that loop_context.go already does.
+//
+// The returned map shares storage with the caller's context value; do
+// NOT mutate it.
+func ActorHeadersFromCtx(ctx context.Context) map[string]string {
+	return actorHeadersFromCtx(ctx)
+}
