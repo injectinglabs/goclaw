@@ -313,7 +313,17 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 	//     silently letting the run start against undurable state
 	// Media refs are attached to this same message later in
 	// makeEnrichMedia via SetLastUserMessageMediaRefs — no double write.
-	if params.Message != "" {
+	//
+	// `hasMedia` covers the image-without-text case (and any other
+	// media-only send): the boundary still needs a fresh user row so that
+	// (a) sessions.list shows the chat after reload, and (b) the upcoming
+	// SetLastUserMessageMediaRefs attaches refs to THIS turn's row instead
+	// of falling back to the most recent prior user message (which would
+	// visually paste the new image onto the previous turn AND let the next
+	// assistant reply merge with the previous one in the SPA's
+	// preview-load accumulator).
+	hasMedia := len(params.parseMedia()) > 0
+	if params.Message != "" || hasMedia {
 		// Stamp identity + channel BEFORE the message + Save. Without
 		// this the row lands in PG with empty user_id / channel, so
 		// sessions.list (which filters by user_id + channel='ws' for
