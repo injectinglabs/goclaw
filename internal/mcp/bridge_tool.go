@@ -182,17 +182,10 @@ func (t *BridgeTool) Execute(ctx context.Context, args map[string]any) *tools.Re
 
 	callCtx, cancel := context.WithTimeout(ctx, time.Duration(t.timeoutSec)*time.Second)
 	defer cancel()
-
-	// Stash actor identity for the HTTPHeaderFunc registered in createClient.
-	// mcp-go calls that function with this context immediately before sending
-	// the outbound HTTP POST, so we get per-call X-Actor-User-ID + X-Actor-Org-ID
-	// headers without per-(user,tenant) connection pools. Sidecars use these
-	// instead of bake-at-connect X-Proxy-* — see comment in actor_headers.go.
-	if userID := store.UserIDFromContext(ctx); userID != "" {
-		if uid, err := uuid.Parse(userID); err == nil {
-			callCtx = WithActorIdentity(callCtx, uid, store.TenantIDFromContext(ctx))
-		}
-	}
+	// Per-call X-Actor-* headers come from providers.WithActorHeaders set
+	// by the agent loop (loop_context.go), read in actorHeadersFromContext
+	// which is registered as mcp-go's HTTPHeaderFunc in createClient.
+	// Nothing to stash here — the inherited ctx carries them.
 
 	// Strip empty-value optional args. LLMs often send "" for optional fields
 	// instead of omitting them, causing MCP servers to reject invalid values
