@@ -4,24 +4,33 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
 
 // Per-call X-Actor-* headers for outbound MCP HTTP calls
 // ─────────────────────────────────────────────────────────
 //
 // Internal sidecars (document-mcp, future workers) need the calling
-// tenant + user identity to scope their work — for example, document-mcp
-// uses these to label S3 objects under {tenant_uuid}/{user_uuid}/created/.
-// Bake-at-connect headers from mcp_servers.headers don't work for this:
-// X-Actor-User-ID changes per call (different chat users share one MCP
-// pool connection), and X-Actor-Org-ID changes per call too on team
-// accounts where multiple members talk to the same agent.
+// tenant + user identity to scope their work — and document-mcp also
+// forwards them to downstream service-token receivers (llm-service-web
+// → web-agent-api) for billing attribution.
 //
-// Solution: use mcp-go's WithHTTPHeaderFunc — invoked per request with
-// the request context — and read the actor IDs we stashed in ctx
-// immediately before invoking the BridgeTool. Same pattern goclaw already
-// uses for outbound /v1/chat/completions (see external_org_id attribution
-// in llm-service-web).
+// Source of truth: the agent loop already calls
+// `providers.WithActorHeaders(ctx, …)` in loop_context.go before any
+// tool runs, with the correct X-Actor-Org-ID resolution (prefer
+// `tenants.settings.external_org_id`, fall back to tenant slug). The
+// MCP bridge therefore reads from the same context map instead of
+// duplicating that logic — keeps the external_org_id/slug source of
+// truth in one place and avoids the previous bug where the bridge
+// forwarded goclaw's internal tenant UUID (rejected by web-agent-api
+// with "Actor is not an active member of the claimed org").
+//
+// Legacy UUID-keyed fallback: `WithActorIdentity` is still exported
+// for the few code paths that build a context outside the agent loop
+// (background workers attach actor headers via
+// `internal/actorheaders.Attach` which already does The Right Thing,
+// but defensive fallback is cheap insurance).
 
 type actorCtxKey int
 
@@ -30,10 +39,12 @@ const (
 	actorOrgIDKey
 )
 
-// WithActorIdentity returns a new context carrying the actor (user + org)
-// that the MCP HTTP header function will surface as X-Actor-User-ID and
-// X-Actor-Org-ID on the next outbound call. Empty UUIDs are skipped so
-// the downstream sidecar can apply its own "anonymous" fallback.
+// WithActorIdentity is the legacy fallback path. Prefer building the
+// context with `actorheaders.Attach` (or `providers.WithActorHeaders`
+// directly) which produces the slug/external_org_id the receiver
+// expects. Kept exported so call sites that haven't migrated still
+// surface an identity; the value is only consulted when the
+// providers' map is empty.
 func WithActorIdentity(ctx context.Context, userID, orgID uuid.UUID) context.Context {
 	if userID != uuid.Nil {
 		ctx = context.WithValue(ctx, actorUserIDKey, userID)
@@ -44,18 +55,37 @@ func WithActorIdentity(ctx context.Context, userID, orgID uuid.UUID) context.Con
 	return ctx
 }
 
-// actorHeadersFromContext extracts the per-call X-Actor-* headers from
-// ctx. Returns an empty map when neither id is present — the caller (the
-// mcp-go HTTPHeaderFunc closure) is expected to merge this on top of the
-// static server-configured headers, so missing values just leave the
-// static map untouched.
+// actorHeadersFromContext is the mcp-go HTTPHeaderFunc invoked per
+// outbound HTTP request. Prefers `providers.ActorHeadersFromCtx` (set
+// by the agent loop with correct external_org_id resolution) and
+// falls back to the legacy UUID-keyed store written by
+// `WithActorIdentity` only when the providers' map has no entries
+// for the corresponding header.
 func actorHeadersFromContext(ctx context.Context) map[string]string {
 	out := map[string]string{}
-	if v, ok := ctx.Value(actorUserIDKey).(uuid.UUID); ok && v != uuid.Nil {
-		out["X-Actor-User-ID"] = v.String()
+
+	// Preferred path: headers stashed by the agent loop /
+	// actorheaders.Attach. These are already in the format the
+	// downstream receiver expects (slug or external_org_id UUID).
+	for k, v := range providers.ActorHeadersFromCtx(ctx) {
+		if k == "" || v == "" {
+			continue
+		}
+		out[k] = v
 	}
-	if v, ok := ctx.Value(actorOrgIDKey).(uuid.UUID); ok && v != uuid.Nil {
-		out["X-Actor-Org-ID"] = v.String()
+
+	// Fallback: legacy UUID-keyed store. Only fill keys the
+	// providers' map didn't already set so the canonical resolution
+	// always wins.
+	if _, ok := out["X-Actor-User-ID"]; !ok {
+		if v, ok2 := ctx.Value(actorUserIDKey).(uuid.UUID); ok2 && v != uuid.Nil {
+			out["X-Actor-User-ID"] = v.String()
+		}
+	}
+	if _, ok := out["X-Actor-Org-ID"]; !ok {
+		if v, ok2 := ctx.Value(actorOrgIDKey).(uuid.UUID); ok2 && v != uuid.Nil {
+			out["X-Actor-Org-ID"] = v.String()
+		}
 	}
 	return out
 }
