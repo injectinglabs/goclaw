@@ -256,10 +256,12 @@ func createClient(transportType, command string, args []string, env map[string]s
 		}
 		// Per-call X-Actor-* injection. Invoked by mcp-go on every
 		// outbound HTTP request with the request context — we read the
-		// actor identity goclaw stashed via WithActorIdentity right
-		// before BridgeTool.Execute. Sidecars (document-mcp etc.) use
-		// these instead of the bake-at-connect X-Proxy-* pattern, which
-		// can't represent per-call identity in a shared pool.
+		// actor identity goclaw set via providers.WithActorHeaders in
+		// loop_context.go (canonical X-Actor-Org-ID = external_org_id
+		// or slug, never the internal tenant UUID). Sidecars
+		// (document-mcp etc.) use these instead of the bake-at-connect
+		// X-Proxy-* pattern, which can't represent per-call identity
+		// in a shared pool.
 		opts = append(opts, transport.WithHTTPHeaderFunc(actorHeadersFromContext))
 		return mcpclient.NewStreamableHttpClient(url, opts...)
 
