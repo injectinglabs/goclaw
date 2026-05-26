@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,16 +28,32 @@ type PoolConfig struct {
 }
 
 // DefaultPoolConfig returns the default pool configuration.
+//
+// Capacity knobs can be overridden via env vars (positive ints only):
+//
+//	GOCLAW_MCP_POOL_MAX       — global max connections      (default 200)
+//	GOCLAW_MCP_POOL_USER_MAX  — per-user conns per server   (default 30)
+//	GOCLAW_MCP_POOL_IDLE      — max idle connections kept   (default 20)
 func DefaultPoolConfig() PoolConfig {
 	return PoolConfig{
-		MaxSize:            200,
-		MaxIdle:            20,
+		MaxSize:            poolEnvInt("GOCLAW_MCP_POOL_MAX", 200),
+		MaxIdle:            poolEnvInt("GOCLAW_MCP_POOL_IDLE", 20),
 		IdleTTL:            20 * time.Minute,
 		AcquireTimeout:     60 * time.Second,
-		MaxUserConns:       30,
+		MaxUserConns:       poolEnvInt("GOCLAW_MCP_POOL_USER_MAX", 30),
 		UserIdleTTL:        15 * time.Minute,
 		UserAcquireTimeout: 10 * time.Second,
 	}
+}
+
+// poolEnvInt reads a positive int from an env var, falling back to defaultVal.
+func poolEnvInt(key string, defaultVal int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultVal
 }
 
 // poolEntry holds a shared connection and its discovered tools.
