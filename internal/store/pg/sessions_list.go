@@ -1,6 +1,7 @@
 package pg
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,28 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
+
+// jsonNullEscape is how encoding/json renders a NUL byte (U+0000) inside a
+// string. PostgreSQL's jsonb type rejects it outright with
+// "unsupported Unicode escape sequence" (SQLSTATE 22P05) — there is no
+// representable jsonb value for an embedded NUL. NUL bytes occasionally slip into
+// chat content (paste from a binary file, certain mobile keyboards, an
+// OAuth-callback artefact pasted into the composer), and without scrubbing
+// they fail the whole session Save with a 5xx the user sees as
+// "failed to persist user message".
+var jsonNullEscape = []byte("\\u0000")
+
+// stripJSONNullEscapes removes any NUL escape that encoding/json emitted
+// for a NUL byte, making the payload safe for a jsonb column. Operating on
+// the marshaled bytes (rather than walking the message structs) catches
+// NULs anywhere in the nested shape — Content, tool-call arguments, tool
+// results, metadata — in one pass, for every caller of Save.
+func stripJSONNullEscapes(b []byte) []byte {
+	if !bytes.Contains(b, jsonNullEscape) {
+		return b
+	}
+	return bytes.ReplaceAll(b, jsonNullEscape, nil)
+}
 
 // buildSessionFilter builds a dynamic WHERE clause from SessionListOpts.
 // Returns the WHERE string (with leading " WHERE ") and the positional args.
@@ -223,9 +246,11 @@ func (s *PGSessionStore) Save(ctx context.Context, key string) error {
 	s.mu.RUnlock()
 
 	msgsJSON, _ := json.Marshal(snapshot.Messages)
+	msgsJSON = stripJSONNullEscapes(msgsJSON)
 	metaJSON := []byte("{}")
 	if len(snapshot.Metadata) > 0 {
 		metaJSON, _ = json.Marshal(snapshot.Metadata)
+		metaJSON = stripJSONNullEscapes(metaJSON)
 	}
 
 	res, err := s.db.ExecContext(ctx,

@@ -118,12 +118,12 @@ func (h *ChatCompletionsHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	// Inject tenant, role, user, and locale into context for downstream stores/tools.
 	r = r.WithContext(enrichContext(r.Context(), r, auth))
 
-	// Rate limit check (per IP or bearer token)
+	// Rate limit check (per-user when authenticated, else per-IP).
+	// Bearer token must NOT be used as the key: in managed deployments the
+	// gateway issues a single shared token for the entire instance, so a
+	// token-keyed bucket collapses all users into one global bucket.
 	if h.rateLimiter != nil {
-		key := r.RemoteAddr
-		if token := extractBearerToken(r); token != "" {
-			key = "token:" + token
-		}
+		key := rateLimitKeyFromRequest(r)
 		if !h.rateLimiter(key) {
 			w.Header().Set("Retry-After", "60")
 			http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"rate_limit_error"}}`, i18n.T(locale, i18n.MsgRateLimitExceeded)), http.StatusTooManyRequests)

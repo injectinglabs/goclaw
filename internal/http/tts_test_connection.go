@@ -60,12 +60,9 @@ func (h *TTSHandler) handleTestConnection(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 	locale := store.LocaleFromContext(ctx)
 
-	// Rate limit (same as synthesize).
+	// Rate limit (same as synthesize — per-user when authenticated, else per-IP).
 	if h.rateLimiter != nil {
-		key := r.RemoteAddr
-		if tok := extractBearerToken(r); tok != "" {
-			key = "token:" + tok
-		}
+		key := rateLimitKeyFromRequest(r)
 		if !h.rateLimiter(key) {
 			w.Header().Set("Retry-After", "60")
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, i18n.T(locale, i18n.MsgRateLimitExceeded)), http.StatusTooManyRequests)
