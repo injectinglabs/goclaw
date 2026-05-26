@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/sessions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
@@ -455,6 +456,15 @@ type ActiveRunSnapshot struct {
 // SPA can rebuild the in-flight chat bubble after a page reload.
 // Empty userID is treated as a no-op (returns nil) — system runs are
 // never surfaced to user clients.
+//
+// Cron-spawned runs (session key shape `agent:<id>:cron:<job_id>`) are
+// scheduler bookkeeping, never user-facing — they're already excluded
+// from sessions.list via SessionListOpts.ExcludeCron. We mirror that
+// here so a reload during a firing cron doesn't surface the scheduler
+// session as an "orphan" synth chat in the SPA sidebar (which would
+// then flip the global `streaming` flag and disable the user's chat
+// composer until the cron finishes). The reminder still reaches the
+// user via the `reminders` table + cron.delivered event.
 func (r *Router) ActiveSessionsForUser(tenantID uuid.UUID, userID string) []ActiveRunSnapshot {
 	if userID == "" {
 		return nil
@@ -463,6 +473,9 @@ func (r *Router) ActiveSessionsForUser(tenantID uuid.UUID, userID string) []Acti
 	r.activeRuns.Range(func(_, val any) bool {
 		run := val.(*ActiveRun)
 		if run.TenantID != tenantID || run.UserID != userID {
+			return true
+		}
+		if sessions.IsCronSession(run.SessionKey) {
 			return true
 		}
 		run.bufMu.Lock()

@@ -156,6 +156,13 @@ func safeSplitIndex(messages []providers.Message, splitIdx int) int {
 			splitIdx--
 			continue
 		}
+		// If the message immediately before the cut is a tool result, it
+		// belongs to a preceding assistant.tool_calls block. Walk left so
+		// the next iteration catches the assistant and moves past it too.
+		if m.Role == "tool" {
+			splitIdx--
+			continue
+		}
 		// If the message AT splitIdx (first kept message) is a tool result,
 		// the kept slice would start with an orphan. Move left.
 		if splitIdx < len(messages) && messages[splitIdx].Role == "tool" {
