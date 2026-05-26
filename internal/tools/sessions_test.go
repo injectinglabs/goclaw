@@ -161,6 +161,10 @@ func (m *mockSessionStore) LastUsedChannel(context.Context, string) (string, str
 	return "", ""
 }
 
+func (m *mockSessionStore) SetLastUserMessageMediaRefs(_ context.Context, _ string, _ []providers.MediaRef) error {
+	return nil
+}
+
 // ============================================================
 // test helpers
 // ============================================================

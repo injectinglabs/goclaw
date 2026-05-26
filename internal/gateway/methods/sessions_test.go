@@ -87,6 +87,10 @@ func (s *stubSessionStore) ListPagedRich(_ context.Context, opts store.SessionLi
 	return store.SessionListRichResult{Sessions: items, Total: len(items)}
 }
 
+func (s *stubSessionStore) SetLastUserMessageMediaRefs(_ context.Context, _ string, _ []providers.MediaRef) error {
+	return nil
+}
+
 // stub EventPublisher (no-op)
 type stubEventPub struct{}
 
@@ -99,7 +103,7 @@ func (s *stubEventPub) Broadcast(_ bus.Event)                    {}
 func buildSessionMethods(t *testing.T, sess *stubSessionStore) *SessionsMethods {
 	t.Helper()
 	cfg := &config.Config{}
-	return NewSessionsMethods(sess, &stubEventPub{}, cfg)
+	return NewSessionsMethods(sess, nil, &stubEventPub{}, cfg)
 }
 
 func sessionReqFrame(t *testing.T, method string, params map[string]any) *protocol.RequestFrame {

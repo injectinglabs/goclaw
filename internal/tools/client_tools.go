@@ -45,34 +45,40 @@ func NewRefreshPageContentTool() Tool {
 }
 
 // NewExecuteActionTool returns the execute_action client tool.
-// The extension performs fill / click / select / press_enter on an element by CSS
-// selector using React-safe native setters + synthetic input/change/keyboard events.
+// The extension performs fill / click / select / press_enter / hover / keyboard / get_value
+// on an element by CSS selector using React-safe native setters + synthetic events.
 func NewExecuteActionTool() Tool {
 	return &clientTool{
 		name: "execute_action",
 		desc: "Performs a single action on the current page by CSS selector. Call refresh_page_content " +
 			"first to see the elements and find the right selector. Actions: " +
-			"'fill' (types into an input/textarea — requires value), " +
-			"'click' (clicks a button/link/checkbox), " +
+			"'fill' (types into an input/textarea/contenteditable — requires value; React/ProseMirror/Tiptap-safe), " +
+			"'click' (clicks a button/link/checkbox — dispatches full pointer→mouse→click sequence), " +
+			"'double_click' (double-clicks an element — use for inline cell editing, row selection in data grids, file manager open), " +
+			"'clear' (clears an input/textarea/contenteditable — React-safe; use before fill when the field has existing content that might interfere), " +
 			"'select' (picks an option in a <select> — requires value), " +
 			"'press_enter' (submits a form by simulating Enter on an input/textarea — preferred " +
 			"over click for search forms like Google/GitHub where a visible submit button may be " +
-			"hidden or non-functional until interaction).",
+			"hidden or non-functional until interaction), " +
+			"'hover' (moves the pointer over the element — opens dropdown menus and tooltips), " +
+			"'keyboard' (dispatches a key event on the element — requires value: key name or combo " +
+			"like 'Escape', 'Tab', 'ArrowDown', 'Control+z', 'Shift+Tab'), " +
+			"'get_value' (returns the current value of an input/textarea/select/contenteditable as a string).",
 		params: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"selector": map[string]any{
 					"type":        "string",
-					"description": "CSS selector of the target element",
+					"description": "CSS selector of the target element. Use ' >> ' to cross shadow DOM boundaries (e.g. 'my-component >> input').",
 				},
 				"action": map[string]any{
 					"type":        "string",
-					"enum":        []string{"fill", "click", "select", "press_enter"},
+					"enum":        []string{"fill", "click", "double_click", "clear", "select", "press_enter", "hover", "keyboard", "get_value"},
 					"description": "The action to perform",
 				},
 				"value": map[string]any{
 					"type":        "string",
-					"description": "Value for 'fill' or 'select'. Not used for 'click' or 'press_enter'.",
+					"description": "Value for 'fill' (text to type), 'select' (option value), or 'keyboard' (key name/combo). Not used for 'click', 'hover', 'press_enter', or 'get_value'.",
 				},
 			},
 			"required": []string{"selector", "action"},
@@ -170,17 +176,88 @@ func NewWaitForElementTool() Tool {
 		name: "wait_for_element",
 		desc: "Waits for an element to appear in the DOM — use after clicking a button that opens a modal, " +
 			"submitting a form that triggers an AJAX response, or navigating to a new page. " +
-			"Polls every 200 ms up to timeout_ms (max 10 000). Returns success when found, error on timeout.",
+			"Polls every 200 ms up to timeout_ms (max 30 000). Returns success when found, error on timeout. " +
+			"Supports ' >> ' shadow/iframe selectors (same syntax as execute_action).",
 		params: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"selector": map[string]any{
 					"type":        "string",
-					"description": "CSS selector to wait for",
+					"description": "CSS selector to wait for. Use ' >> ' to cross shadow DOM or same-origin iframe boundaries.",
 				},
 				"timeout_ms": map[string]any{
 					"type":        "integer",
-					"description": "Max wait in milliseconds (default 5000, capped at 10000)",
+					"description": "Max wait in milliseconds (default 5000, capped at 30000)",
+				},
+			},
+			"required": []string{"selector"},
+		},
+	}
+}
+
+// NewWaitForNavigationTool returns the wait_for_navigation client tool.
+// Polls location.href and document.title until either changes (SPA client-side navigation).
+func NewWaitForNavigationTool() Tool {
+	return &clientTool{
+		name: "wait_for_navigation",
+		desc: "Waits for the active tab's URL or page title to change — use after clicking a router link " +
+			"or submitting a form that triggers SPA client-side navigation. Returns the new URL on success. " +
+			"Polls every 100 ms up to timeout_ms (max 30 000). Follow with refresh_page_content to capture " +
+			"the new page state.",
+		params: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"timeout_ms": map[string]any{
+					"type":        "integer",
+					"description": "Max wait in milliseconds (default 5000, capped at 30000)",
+				},
+			},
+			"required": []string{},
+		},
+	}
+}
+
+// NewWaitForNetworkTool returns the wait_for_network client tool.
+// Monitors fetch/XHR activity and waits for a period of network idle.
+func NewWaitForNetworkTool() Tool {
+	return &clientTool{
+		name: "wait_for_network",
+		desc: "Waits until no fetch or XHR requests are in-flight for at least idle_ms — use after " +
+			"clicking a submit button or triggering an AJAX action, before reading the updated page state. " +
+			"Patches window.fetch and XMLHttpRequest to track pending requests, then restores them. " +
+			"Follow with refresh_page_content to capture the updated DOM.",
+		params: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"timeout_ms": map[string]any{
+					"type":        "integer",
+					"description": "Max total wait in milliseconds (default 5000, capped at 30000)",
+				},
+				"idle_ms": map[string]any{
+					"type":        "integer",
+					"description": "How long network must be idle before returning (default 500, capped at 5000)",
+				},
+			},
+			"required": []string{},
+		},
+	}
+}
+
+// NewScrollIntoViewTool returns the scroll_into_view client tool.
+// Scrolls the viewport to center the matched element.
+func NewScrollIntoViewTool() Tool {
+	return &clientTool{
+		name: "scroll_into_view",
+		desc: "Scrolls the page so the target element is centered in the viewport. More precise than " +
+			"repeated 'scroll down' calls — use when the snapshot shows an element marked [off-screen] " +
+			"or when you know the selector but the element is not visible. Supports ' >> ' shadow selectors. " +
+			"Follow with refresh_page_content or execute_action.",
+		params: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"selector": map[string]any{
+					"type":        "string",
+					"description": "CSS selector of the element to scroll into view",
 				},
 			},
 			"required": []string{"selector"},
@@ -248,6 +325,21 @@ func RegisterClientTools(r *Registry) {
 		IsClient:     true,
 	})
 	r.RegisterWithMetadata(NewUploadFileTool(), ToolMetadata{
+		Group:        "browser",
+		Capabilities: []ToolCapability{CapMutating},
+		IsClient:     true,
+	})
+	r.RegisterWithMetadata(NewWaitForNavigationTool(), ToolMetadata{
+		Group:        "browser",
+		Capabilities: []ToolCapability{CapReadOnly},
+		IsClient:     true,
+	})
+	r.RegisterWithMetadata(NewWaitForNetworkTool(), ToolMetadata{
+		Group:        "browser",
+		Capabilities: []ToolCapability{CapReadOnly},
+		IsClient:     true,
+	})
+	r.RegisterWithMetadata(NewScrollIntoViewTool(), ToolMetadata{
 		Group:        "browser",
 		Capabilities: []ToolCapability{CapMutating},
 		IsClient:     true,
