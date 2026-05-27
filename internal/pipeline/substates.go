@@ -101,7 +101,12 @@ type RunResult struct {
 	Iterations       int
 	ToolCalls        int
 	LoopKilled       bool
-	Duration         time.Duration
+	// MaxIterationsReached is true when the run exited because it exhausted
+	// Config.MaxIterations (the agent's tool-iteration budget) rather than the
+	// model finishing on its own. Surfaced to the client as stop_reason so the
+	// UI can offer a "Continue" action that grants a fresh budget.
+	MaxIterationsReached bool
+	Duration             time.Duration
 	AsyncToolCalls   []string
 	MediaResults     []MediaResult
 	Deliverables     []string
