@@ -641,6 +641,11 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 		if result.Thinking != "" {
 			resp["thinking"] = result.Thinking
 		}
+		// stop_reason lets the client offer "Continue" when the agent ran out of
+		// its per-run tool-iteration budget (vs finishing the task on its own).
+		if result.StopReason != "" {
+			resp["stop_reason"] = result.StopReason
+		}
 		// Combine existing media with TTS audio
 		mediaResults := result.Media
 		if ttsAudio != nil {
