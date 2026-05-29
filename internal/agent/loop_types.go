@@ -669,6 +669,10 @@ type RunResult struct {
 	BlockReplies   int              `json:"blockReplies,omitempty"`   // number of block.reply events emitted
 	LastBlockReply string           `json:"lastBlockReply,omitempty"` // last block reply content (for dedup)
 	LoopKilled     bool             `json:"loopKilled,omitempty"`     // true when run was terminated by loop detector
+	// StopReason explains why the run ended when it's not a normal completion.
+	// "max_steps" means the agent exhausted its per-run tool-iteration budget;
+	// the client surfaces this as a "Continue" affordance. Empty = normal stop.
+	StopReason string `json:"stopReason,omitempty"`
 }
 
 // MediaResult represents a media file produced by a tool during the agent run.

@@ -263,6 +263,10 @@ func convertRunResult(pr *pipeline.RunResult) *RunResult {
 			Filename:    m.Filename,
 		}
 	}
+	stopReason := ""
+	if pr.MaxIterationsReached {
+		stopReason = "max_steps"
+	}
 	return &RunResult{
 		Content:        pr.Content,
 		Thinking:       pr.Thinking,
@@ -274,6 +278,7 @@ func convertRunResult(pr *pipeline.RunResult) *RunResult {
 		BlockReplies:   pr.BlockReplies,
 		LastBlockReply: pr.LastBlockReply,
 		LoopKilled:     pr.LoopKilled,
+		StopReason:     stopReason,
 	}
 }
 

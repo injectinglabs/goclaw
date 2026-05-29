@@ -110,5 +110,12 @@ func (p *Pipeline) Run(ctx context.Context, state *RunState) (*RunResult, error)
 
 	result := state.BuildResult()
 	result.Duration = time.Since(start)
+	// The loop exits one of three ways: BreakLoop (model finished), AbortRun
+	// (error/over-budget), or by running state.Iteration up to MaxIterations
+	// without either signal — that last case leaves ExitCode at its zero value
+	// (Continue) and means the agent ran out of tool-iteration budget.
+	if state.ExitCode == Continue && state.Iteration >= p.Deps.Config.MaxIterations {
+		result.MaxIterationsReached = true
+	}
 	return result, nil
 }
