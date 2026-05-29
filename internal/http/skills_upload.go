@@ -219,7 +219,15 @@ func (h *SkillsHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		Slug:        slug,
 		Description: &desc,
 		OwnerID:     userID,
-		Visibility:  "internal",
+		// Tenant-scoped "public": ListAccessible filters public skills by
+		// tenant_id, so an uploaded skill is usable by every agent in the
+		// uploader's tenant (e.g. the workspace's default agent) without a
+		// per-agent grant. This is the right default for a multi-tenant SaaS
+		// where each workspace has one shared assistant; the prior "internal"
+		// default required an explicit grant the upload path never created,
+		// leaving uploaded skills invisible to the agent. Owners can flip a
+		// skill to "private" (owner-only) via PUT /v1/skills/{id}.
+		Visibility:  "public",
 		Version:     version,
 		FilePath:    destDir,
 		FileSize:    size,
