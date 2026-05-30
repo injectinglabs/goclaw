@@ -56,6 +56,25 @@ func (t *SkillSearchTool) rebuildIndex(ctx context.Context) {
 	slog.Info("skill_search index rebuilt", "docs", len(allSkills), "version", t.lastVersion)
 }
 
+// storeSkillInfosToInfos adapts store.SkillInfo (DB / access store) to
+// skills.Info (BM25 index input). Name + Description feed the ranking; Path /
+// BaseDir / Source carry through so the result's Location lets the agent
+// read_file the SKILL.md.
+func storeSkillInfosToInfos(in []store.SkillInfo) []skills.Info {
+	out := make([]skills.Info, 0, len(in))
+	for _, s := range in {
+		out = append(out, skills.Info{
+			Name:        s.Name,
+			Slug:        s.Slug,
+			Path:        s.Path,
+			BaseDir:     s.BaseDir,
+			Source:      s.Source,
+			Description: s.Description,
+		})
+	}
+	return out
+}
+
 // ensureIndex rebuilds the BM25 index if skills have changed since last build.
 func (t *SkillSearchTool) ensureIndex(ctx context.Context) {
 	current := t.loader.Version()
@@ -98,11 +117,34 @@ func (t *SkillSearchTool) Execute(ctx context.Context, args map[string]any) *Res
 		maxResults = int(mr)
 	}
 
-	// Lazy rebuild: check if skills changed since last index build
-	t.ensureIndex(ctx)
+	// Tenant-correct candidate set. The shared filesystem index (t.index) is
+	// built once from a tenant-less startup context (NewSkillSearchTool) and
+	// only rebuilds on filesystem-watcher version bumps, so it never contains
+	// DB-stored skills — neither seeded system skills nor per-tenant uploads.
+	// Searching it returns nothing for real tenants (every skill lives in the
+	// DB + a per-tenant skills-store dir). When an access store is wired
+	// (PostgreSQL / multi-tenant), build a fresh per-request index from
+	// ListAccessible, which is tenant- and visibility-scoped — the same source
+	// as GET /v1/agents/{id}/skills. Fall back to the shared index when no
+	// access store is configured (single-user / desktop edition).
+	idx := t.index
+	if t.skillAccess != nil {
+		agentID := store.AgentIDFromContext(ctx)
+		userID := store.UserIDFromContext(ctx)
+		if accessible, err := t.skillAccess.ListAccessible(ctx, agentID, userID); err == nil {
+			local := skills.NewIndex()
+			local.Build(storeSkillInfosToInfos(accessible))
+			idx = local
+		} else {
+			slog.Warn("skill_search: ListAccessible failed, using shared index", "error", err)
+			t.ensureIndex(ctx)
+		}
+	} else {
+		t.ensureIndex(ctx)
+	}
 
 	// BM25 search (always available)
-	bm25Results := t.index.Search(query, maxResults*2)
+	bm25Results := idx.Search(query, maxResults*2)
 
 	// If embedding searcher is available, run hybrid search
 	var results []skills.SkillSearchResult
