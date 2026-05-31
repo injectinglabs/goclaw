@@ -510,6 +510,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			AgentToolPolicy:        agentToolPolicyForTeam(agentToolPolicyWithWorkspace(agentToolPolicyWithMCP(ag.ParseToolsConfig(), hasMCPTools), hasTeam), isTeamLead),
 			SkillsLoader:           deps.Skills,
 			SkillAllowList:         skillAllowList,
+			SkillAccessStore:       deps.SkillAccessStore,
 			HasMemory:              hasMemory,
 			ContextFiles:           contextFiles,
 			EnsureUserProfile:      deps.EnsureUserProfile,
