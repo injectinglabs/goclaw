@@ -387,6 +387,14 @@ func (l *Loader) BuildSummary(ctx context.Context, allowList []string) string {
 		}
 	}
 
+	return BuildSummaryFromInfos(filtered)
+}
+
+// BuildSummaryFromInfos renders the <available_skills> XML for a pre-resolved
+// skill set. Extracted from BuildSummary so callers that source skills from the
+// DB (per-tenant access store) rather than the filesystem loader can produce
+// the identical prompt format. Returns "" for an empty set.
+func BuildSummaryFromInfos(filtered []Info) string {
 	if len(filtered) == 0 {
 		return ""
 	}

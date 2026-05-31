@@ -138,6 +138,10 @@ type Loop struct {
 	ownerIDs       []string
 	skillsLoader   *skills.Loader
 	skillAllowList []string // nil = all, [] = none, ["x","y"] = filter
+	// skillAccess sources per-tenant skills (DB) for the prompt summary. The
+	// loader is filesystem-only and never sees DB-stored / per-tenant skills,
+	// so when this is set the summary is built from ListAccessible instead.
+	skillAccess    store.SkillAccessStore
 	hasMemory      bool
 	contextFiles   []bootstrap.ContextFile
 
@@ -347,6 +351,8 @@ type LoopConfig struct {
 	OwnerIDs       []string
 	SkillsLoader   *skills.Loader
 	SkillAllowList []string // nil = all, [] = none, ["x","y"] = filter
+	// SkillAccessStore sources per-tenant skills (DB) for the prompt summary.
+	SkillAccessStore store.SkillAccessStore
 	HasMemory      bool
 	ContextFiles   []bootstrap.ContextFile
 
@@ -536,6 +542,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		ownerIDs:               cfg.OwnerIDs,
 		skillsLoader:           cfg.SkillsLoader,
 		skillAllowList:         cfg.SkillAllowList,
+		skillAccess:            cfg.SkillAccessStore,
 		hasMemory:              cfg.HasMemory,
 		contextFiles:           cfg.ContextFiles,
 		defaultTimezone:        cfg.DefaultTimezone,

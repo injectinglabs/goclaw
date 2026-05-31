@@ -69,22 +69,25 @@ func TestBuildPreviewPrompt_PinnedSkillsHybrid(t *testing.T) {
 	}
 }
 
-func TestBuildPreviewPrompt_SkillAllowList(t *testing.T) {
+func TestBuildPreviewPrompt_SkillsFromAccessStore(t *testing.T) {
 	ag := baseAgent()
+	// Loader summary must NOT be used when an access store is wired — per-tenant
+	// skills live in the DB, not the filesystem loader.
 	loader := &mockSkillsLoader{
-		summary: "<available_skills><skill name=\"allowed\">ok</skill></available_skills>",
+		summary: "<available_skills><skill name=\"loader-must-not-be-used\">x</skill></available_skills>",
 	}
 	r := BuildPreviewPrompt(context.Background(), ag, PromptFull, "user1", PreviewDeps{
 		SkillsLoader: loader,
 		SkillAccessStore: &mockSkillAccessStore{
-			accessible: []store.SkillInfo{{Slug: "allowed-skill"}},
+			accessible: []store.SkillInfo{{Slug: "near", Name: "near", Description: "near token price", Status: "active"}},
 		},
 	})
-	if !strings.Contains(r.Prompt, "<available_skills>") {
-		t.Error("expected filtered skills in prompt")
+	// Summary is sourced from the access store (DB), not the loader.
+	if !strings.Contains(r.Prompt, "near token price") {
+		t.Errorf("expected access-store skill in prompt, got: %s", r.Prompt)
 	}
-	if len(loader.capturedAllow) != 1 || loader.capturedAllow[0] != "allowed-skill" {
-		t.Errorf("expected allow list [allowed-skill], got %v", loader.capturedAllow)
+	if loader.capturedAllow != nil {
+		t.Errorf("loader must not be consulted for skills when an access store is set, got %v", loader.capturedAllow)
 	}
 }
 
@@ -100,8 +103,13 @@ func TestBuildPreviewPrompt_SkillAccessStoreError(t *testing.T) {
 	if r.Prompt == "" {
 		t.Fatal("expected non-empty prompt on SkillAccessStore error")
 	}
-	if loader.capturedAllow == nil || len(loader.capturedAllow) != 0 {
-		t.Errorf("expected empty (non-nil) allow list on error, got %v", loader.capturedAllow)
+	// On access-store error we show no skills and do NOT fall back to the loader
+	// (it can't see per-tenant skills anyway).
+	if strings.Contains(r.Prompt, "<available_skills>") {
+		t.Errorf("expected no skills section on access-store error, got: %s", r.Prompt)
+	}
+	if loader.capturedAllow != nil {
+		t.Errorf("loader must not be consulted when an access store is set, got %v", loader.capturedAllow)
 	}
 }
 
