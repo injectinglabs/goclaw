@@ -54,16 +54,22 @@ func (sm *SubagentManager) Spawn(
 		return "", fmt.Errorf("max concurrent subagents reached (%d/%d)", running, cfg.MaxConcurrent)
 	}
 
-	// Check per-parent children limit
+	// Check per-parent children limit. Only count currently-running children:
+	// sm.tasks keeps completed/failed entries around until scheduleArchive
+	// runs (default ArchiveAfterMinutes window), so counting all-time would
+	// silently start denying spawns after a handful of test runs and the
+	// LLM has no way to tell the limit from a hard refusal — it just falls
+	// back to doing the work itself. The intent of MaxChildrenPerAgent is
+	// to cap concurrent fan-out, not lifetime fan-out.
 	childCount := 0
 	for _, t := range sm.tasks {
-		if t.ParentID == parentID {
+		if t.ParentID == parentID && t.Status == TaskStatusRunning {
 			childCount++
 		}
 	}
 	if childCount >= cfg.MaxChildrenPerAgent {
 		sm.mu.Unlock()
-		return "", fmt.Errorf("max children per agent reached (%d/%d)", childCount, cfg.MaxChildrenPerAgent)
+		return "", fmt.Errorf("max concurrent children per agent reached (%d/%d)", childCount, cfg.MaxChildrenPerAgent)
 	}
 
 	id := generateSubagentID()
