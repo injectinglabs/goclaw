@@ -150,9 +150,14 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *Result
 		}
 	}
 
-	// Sandbox routing (sandboxKey from ctx — thread-safe)
+	// Sandbox routing (sandboxKey from ctx — thread-safe). Skill files and other
+	// allow-listed host locations (skills-store, dataDir/tenants, cli-workspaces,
+	// user-configured paths) are not mounted into the sandbox container, so
+	// absolute reads of them are served host-side — otherwise the
+	// use_skill → read_file SKILL.md flow fails in-sandbox. Workspace-relative
+	// paths still go through the sandbox (the workspace IS mounted there).
 	sandboxKey := ToolSandboxKeyFromCtx(ctx)
-	if t.sandboxMgr != nil && sandboxKey != "" {
+	if t.sandboxMgr != nil && sandboxKey != "" && !isAllowListedHostPath(path, t.allowedPrefixes) {
 		return t.executeInSandbox(ctx, path, sandboxKey, args)
 	}
 
