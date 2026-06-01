@@ -203,10 +203,11 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 	// task-error result so the parent agent can recover instead of crashing
 	// the loop.
 	if activeProvider == nil {
+		sm.mu.Lock()
 		task.Status = TaskStatusFailed
 		task.Result = "subagent: no provider available — tenant context missing or provider not registered for this tenant"
-		sm.recordCompletion(task, taskStart)
-		return
+		sm.mu.Unlock()
+		return 0
 	}
 
 	// Emit running subagent root span (after model resolution so span has correct model).
