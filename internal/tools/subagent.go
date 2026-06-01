@@ -67,6 +67,24 @@ type SubagentTask struct {
 	cancelFunc       context.CancelFunc `json:"-"` // per-task context cancel
 	spawnConfig      SubagentConfig `json:"-"` // resolved config at spawn time (per-agent override merged)
 	dbID             uuid.UUID `json:"-"` // persistent DB UUID (zero if not persisted)
+	// ToolHistory records the tool calls this subagent made during its run.
+	// Surfaced back to the parent via the announce callback so the UI can
+	// show what work the child agent actually did (web_search, web_fetch,
+	// write_file, …) without subscribing to per-tool WS events. Upstream
+	// goclaw doesn't track this — it's a fork-local addition to make
+	// subagent runs less of a black box on the website. Guarded by sm.mu
+	// the same way Status / Result / Token counters are.
+	ToolHistory      []SubagentToolRecord `json:"toolHistory,omitempty"`
+}
+
+// SubagentToolRecord is one tool invocation the subagent made — captured
+// inside the iteration loop in executeTask and rendered as a Markdown table
+// in the announce callback. Duration is wall-clock ms from Execute() start
+// to return. Status mirrors result.IsError ("ok" / "error").
+type SubagentToolRecord struct {
+	Name       string `json:"name"`
+	DurationMs int64  `json:"durationMs"`
+	Status     string `json:"status"` // "ok" | "error"
 }
 
 // SubagentManager manages the lifecycle of spawned subagents.
