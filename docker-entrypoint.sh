@@ -28,6 +28,27 @@ if [ "$(id -u)" = "0" ] && [ -d /app/workspace ]; then
     -exec chown goclaw:goclaw {} + 2>/dev/null || true
 fi
 
+# Sandbox: when the Docker socket is mounted (GOCLAW_SANDBOX_MODE), the goclaw
+# user must be able to reach it to spawn sandbox containers. Compose `group_add`
+# adds the socket's group to the root entrypoint, but `su-exec goclaw` resets
+# supplementary groups to goclaw's own and drops it — so CheckDockerAvailable
+# (`docker info`) fails and goclaw falls back to UNSANDBOXED in-process exec.
+# Add goclaw to the socket's group in /etc/group here; the group then survives
+# su-exec (verified). Skipped when the socket is root-group (gid 0) — we won't
+# grant goclaw the root group.
+if [ "$(id -u)" = "0" ] && [ -S /var/run/docker.sock ]; then
+  SOCK_GID="$(stat -c %g /var/run/docker.sock 2>/dev/null || true)"
+  if [ -n "$SOCK_GID" ] && [ "$SOCK_GID" != "0" ]; then
+    GRP="$(getent group "$SOCK_GID" | cut -d: -f1)"
+    if [ -z "$GRP" ]; then
+      GRP=dockerhost
+      addgroup -g "$SOCK_GID" "$GRP" 2>/dev/null || true
+    fi
+    addgroup goclaw "$GRP" 2>/dev/null || true
+    echo "sandbox: granted goclaw access to docker.sock (group $GRP gid $SOCK_GID)"
+  fi
+fi
+
 # Python: allow agent to pip install to writable target dir
 export PYTHONPATH="$RUNTIME_DIR/pip:${PYTHONPATH:-}"
 export PIP_TARGET="$RUNTIME_DIR/pip"
