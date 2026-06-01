@@ -100,6 +100,10 @@ type Loop struct {
 	// Copied once at Loop construction; used to build AgentAudioSnapshot at tool dispatch.
 	agentOtherConfig json.RawMessage
 	agentType        string    // "open" or "predefined"
+	// customInstructions holds the agent's agents.system_prompt (migration 000063).
+	// Empty for the tenant default agent. Threaded into SystemPromptConfig
+	// on every BuildSystemPrompt call from loop_history.go.
+	customInstructions string
 	defaultTimezone  string    // system default timezone for bootstrap pre-fill
 	provider         providers.Provider
 	model            string
@@ -379,6 +383,11 @@ type LoopConfig struct {
 	AgentType        string           // "open" or "predefined"
 	DisplayName string    // human-readable agent display name (for runtime section)
 	IsTeamLead bool      // agent leads a team (from resolver detection)
+	// CustomInstructions is the agent's own configured system prompt
+	// (agents.system_prompt column from migration 000063). Threaded
+	// through to BuildSystemPrompt so it's injected near the top of the
+	// generated prompt. Empty falls through to the default behaviour.
+	CustomInstructions string
 
 	// Per-user profile + file seeding + dynamic context loading
 	EnsureUserProfile EnsureUserProfileFunc // preferred: separate profile + workspace
@@ -514,6 +523,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		externalOrgID:          cfg.ExternalOrgID,
 		agentOtherConfig:       append([]byte(nil), cfg.AgentOtherConfig...), // defensive copy
 		agentType:              cfg.AgentType,
+		customInstructions:     cfg.CustomInstructions,
 		provider:               cfg.Provider,
 		model:                  cfg.Model,
 		modelRegistry:          cfg.ModelRegistry,

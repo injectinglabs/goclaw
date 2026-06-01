@@ -114,6 +114,14 @@ type SystemPromptConfig struct {
 	ContextFiles  []bootstrap.ContextFile // bootstrap files for # Project Context
 	ExtraPrompt   string                 // extra system prompt (subagent context, etc.)
 	AgentType     string                 // "open" or "predefined" — affects context file framing
+	// CustomInstructions are the agent's own configured system prompt
+	// (agents.system_prompt column, migration 000063). Empty for the
+	// tenant default agent — falls through to the standard prompt. For
+	// user-created or template agents (Researcher/Writer/Coder) this is
+	// the carefully crafted prompt the user typed into the Manage modal.
+	// Injected near the top of the assembled prompt so it carries
+	// authority over the generic "## Tooling" / "## Skills" sections.
+	CustomInstructions string
 
 	HasSkillSearch      bool              // skill_search tool registered? (for search-mode prompt)
 	HasSkillManage      bool              // skill_manage tool registered + skill_evolve enabled for this agent
@@ -274,6 +282,23 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 		}
 		lines = append(lines, fmt.Sprintf("You are a personal assistant running in %s (%s).", channelLabel, chatType))
 		lines = append(lines, "")
+	}
+
+	// 1.2. Custom instructions — the agent's own configured prompt from
+	// agents.system_prompt (migration 000063). Injected ABOVE bootstrap +
+	// tools sections so it shapes how the agent interprets the rest. For
+	// templates (Researcher/Writer/Coder) this is the role-specific
+	// behaviour the user expects; for user-created custom agents it's
+	// whatever they typed into the Manage modal. The generic identity
+	// line above stays so channel context still threads in. Empty
+	// CustomInstructions → no-op (default agent's behaviour unchanged).
+	if cfg.CustomInstructions != "" {
+		lines = append(lines,
+			"## Custom Instructions",
+			"",
+			cfg.CustomInstructions,
+			"",
+		)
 	}
 
 	// 1.5. First-run bootstrap override (must be early so model sees it first)

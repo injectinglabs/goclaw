@@ -45,6 +45,10 @@ var agentAllowedFields = map[string]bool{
 	"self_evolve": true, "skill_evolve": true, "skill_nudge_interval": true,
 	"reasoning_config": true, "workspace_sharing": true, "chatgpt_oauth_routing": true,
 	"shell_deny_groups": true, "kg_dedup_config": true,
+	// Agent's custom instructions (migration 000063). Allowed via PUT so the
+	// website's Manage modal can save edits to existing agents — clone
+	// pre-fills from this same field on the source.
+	"system_prompt": true,
 }
 
 var providerAllowedFields = map[string]bool{

@@ -1,0 +1,12 @@
+-- Custom agents (Researcher / Writer / Coder templates seeded by
+-- auth-proxy + user-created agents from the website's AgentsModal) need
+-- their own system prompt. The schema previously had no column for it
+-- — the prompt got dropped silently on the HTTP create handler's
+-- bindJSON into store.AgentData, and every agent ended up using the
+-- tenant default prompt. Clone broke for the same reason: the form
+-- pre-fills from agents[].system_prompt which was never populated.
+--
+-- Stored as TEXT NULL — empty / NULL means "fall back to the tenant
+-- default" so backwards compatibility holds for every row predating
+-- this migration.
+ALTER TABLE agents ADD COLUMN system_prompt TEXT;

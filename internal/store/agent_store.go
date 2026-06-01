@@ -82,6 +82,11 @@ type AgentData struct {
 	ChatGPTOAuthRouting json.RawMessage `json:"chatgpt_oauth_routing,omitempty" db:"chatgpt_oauth_routing"`
 	ShellDenyGroups     json.RawMessage `json:"shell_deny_groups,omitempty" db:"shell_deny_groups"`
 	KGDedupConfig       json.RawMessage `json:"kg_dedup_config,omitempty" db:"kg_dedup_config"`
+	// SystemPrompt is the agent's custom instructions, injected at the top
+	// of the generated system prompt by BuildSystemPrompt. NULL/empty falls
+	// back to the tenant default — keeps every pre-migration row working
+	// without a backfill step. See migrations/000063_agents_system_prompt.
+	SystemPrompt        string          `json:"system_prompt,omitempty" db:"system_prompt"`
 }
 
 // ParseToolsConfig returns per-agent tool policy, or nil if not configured.
