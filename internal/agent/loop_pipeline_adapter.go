@@ -198,9 +198,11 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 		BootstrapCleanup: cb.bootstrapCleanup,
 		MaybeSummarize:   cb.maybeSummarize,
 		HandleEmptyReply: func(ctx context.Context, history []providers.Message) string {
-			// One tools-disabled retry that forces the model to summarise
-			// the data already in history into a user-facing reply.
-			if rescued := l.rescueEmptyReply(ctx, history); rescued != "" {
+			// One tools-disabled retry that streams text back over the SAME
+			// WS subscription as the primary turn, so the assistant bubble
+			// fills live instead of staying empty until the user reloads.
+			emitChunk := l.makeRescueChunkEmitter(req)
+			if rescued := l.rescueEmptyReply(ctx, history, emitChunk); rescued != "" {
 				return SanitizeAssistantContent(rescued)
 			}
 			// Rescue also empty — return a localised sentence so the user
