@@ -124,14 +124,30 @@ func (m *AgentsMethods) handleList(ctx context.Context, client *gateway.Client, 
 			if a.Status != store.AgentStatusActive {
 				continue
 			}
+			// Keep legacy keys (id/name) for backwards compat with any
+			// existing client; also expose the underlying DB row UUID +
+			// the picker-friendly fields (agent_key, display_name, emoji,
+			// agent_description, is_default, max_tool_iterations) so the
+			// website can render the Agents picker without a per-agent
+			// GET round-trip. Without is_default + emoji here, the website
+			// can't find the Default row or draw the icon grid.
 			infos = append(infos, map[string]any{
-				"id":        a.AgentKey,
-				"name":      a.DisplayName,
-				"model":     a.Model,
-				"provider":  a.Provider,
-				"agentType": a.AgentType,
-				"status":    a.Status,
-				"isRunning": m.agents.IsRunning(ctx, a.AgentKey),
+				"id":                  a.AgentKey, // legacy: agent_key as id
+				"name":                a.DisplayName,
+				"agent_id":            a.ID.String(), // explicit DB row UUID
+				"agent_key":           a.AgentKey,
+				"display_name":        a.DisplayName,
+				"emoji":               a.Emoji,
+				"agent_description":   a.AgentDescription,
+				"is_default":          a.IsDefault,
+				"max_tool_iterations": a.MaxToolIterations,
+				"context_window":      a.ContextWindow,
+				"model":               a.Model,
+				"provider":            a.Provider,
+				"agentType":           a.AgentType,
+				"agent_type":          a.AgentType,
+				"status":              a.Status,
+				"isRunning":           m.agents.IsRunning(ctx, a.AgentKey),
 			})
 		}
 		client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
