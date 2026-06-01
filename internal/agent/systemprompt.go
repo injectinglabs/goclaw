@@ -608,12 +608,24 @@ func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups ma
 		)
 	}
 
-	if tools.IsGroupDenied(shellDenyGroups, "package_install") {
+	switch {
+	case hasSandbox:
+		// Sandboxed exec relaxes the package_install and reverse_shell deny
+		// groups (see internal/tools/shell.go relaxSandboxDenyGroups), so
+		// installs and Python network clients run directly inside the isolated
+		// container. Network reach depends on the sandbox's network setting,
+		// which may be disabled in some environments — a command that can't
+		// reach the network will error, so phrase this network-honestly.
+		lines = append(lines,
+			"",
+			"Inside the sandbox you can install packages at runtime with `pip3 install <pkg>` or `npm install -g <pkg>` (no sudo needed), and use Python network libraries (requests, urllib, httpx, sockets) directly. If the sandbox has no network access these will error — fall back to a bundled/offline approach in that case.",
+		)
+	case tools.IsGroupDenied(shellDenyGroups, "package_install"):
 		lines = append(lines,
 			"",
 			"Package installation (pip, npm, apk) requires admin approval. If you need to install a package, use exec with the install command — it will be routed to the admin for approval. Alternatively, ask the user to install via the Web UI Packages page.",
 		)
-	} else {
+	default:
 		lines = append(lines,
 			"",
 			"You can install packages at runtime with `pip3 install <pkg>` or `npm install -g <pkg>` — no sudo needed.",

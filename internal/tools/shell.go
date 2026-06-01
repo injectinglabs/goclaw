@@ -143,8 +143,23 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 	// Unicode-based pattern bypass while preserving functional command content.
 	normalizedCommand := normalizeCommand(command)
 
+	// Sandbox routing decision, resolved up front so the deny policy can account
+	// for it. When exec runs inside the isolated sandbox container (not on the
+	// host), the container — no host mounts, unprivileged user, cpu/mem caps,
+	// optional network — is the security boundary. The host-protection deny
+	// groups (reverse_shell's python/node/ruby network-import patterns,
+	// package_install's pip/npm/apk) then only block legitimate code skills and
+	// are trivially bypassed inside the sandbox anyway (write the script to a
+	// file, run it — the command string stops matching). So relax exactly those
+	// two for sandboxed exec; the host path keeps every group enabled.
+	sandboxKey := ToolSandboxKeyFromCtx(ctx)
+	willSandbox := t.sandboxMgr != nil && sandboxKey != ""
+
 	// Resolve deny patterns: per-agent overrides from context, fallback to all defaults.
 	denyOverrides := store.ShellDenyGroupsFromContext(ctx)
+	if willSandbox {
+		denyOverrides = relaxSandboxDenyGroups(denyOverrides)
+	}
 	groupPatterns := ResolveDenyPatterns(denyOverrides)
 
 	// Also resolve package_install patterns separately for approval routing.
@@ -240,7 +255,6 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 				cwd = wd
 			}
 		}
-		sandboxKey := ToolSandboxKeyFromCtx(ctx)
 		return t.executeCredentialed(ctx, cred, binary, cmdArgs, cwd, sandboxKey, command)
 	}
 
@@ -286,14 +300,35 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 		}
 	}
 
-	// Sandbox routing (sandboxKey from ctx — thread-safe)
-	sandboxKey := ToolSandboxKeyFromCtx(ctx)
-	if t.sandboxMgr != nil && sandboxKey != "" {
+	// Sandbox routing (willSandbox/sandboxKey resolved above — thread-safe).
+	if willSandbox {
 		return t.executeInSandbox(ctx, command, cwd, sandboxKey)
 	}
 
 	// Host execution
 	return t.executeOnHost(ctx, command, cwd)
+}
+
+// relaxSandboxDenyGroups returns a copy of the per-agent deny-group overrides
+// with the host-protection groups disabled, for exec that runs inside the
+// sandbox container. The sandbox (no host mounts, unprivileged user,
+// resource-capped) is the security boundary there, so these string-matching
+// groups only impede legitimate code skills (Python network clients,
+// pip/npm/apk installs) and are trivially bypassed inside an isolated container.
+// Callers must have confirmed the command is sandbox-routed; the host exec path
+// keeps every group enabled.
+//
+// Only reverse_shell and package_install are relaxed. Groups guarding against
+// secret/host exposure (container_escape, env_dump, env_injection,
+// dangerous_paths, destructive_ops, …) stay enabled even in the sandbox.
+func relaxSandboxDenyGroups(overrides map[string]bool) map[string]bool {
+	relaxed := make(map[string]bool, len(overrides)+2)
+	for k, v := range overrides {
+		relaxed[k] = v
+	}
+	relaxed["reverse_shell"] = false
+	relaxed["package_install"] = false
+	return relaxed
 }
 
 // matchesAny checks if a command matches any pattern in the list.
