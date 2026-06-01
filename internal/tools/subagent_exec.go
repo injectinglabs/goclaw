@@ -194,6 +194,20 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 			}
 		}
 	}
+	// Multi-tenant deployments may construct SubagentManager with a nil
+	// sm.provider (cmd/gateway_agents.setupSubagents — providers are registered
+	// per-tenant, so a tenant-less startup lookup returns nil). In that case
+	// we MUST find a per-tenant provider via ParentProviderFromCtx above;
+	// otherwise activeProvider stays nil and `activeProvider.Name()` below
+	// would NPE inside the subagent execution path. Bail gracefully with a
+	// task-error result so the parent agent can recover instead of crashing
+	// the loop.
+	if activeProvider == nil {
+		task.Status = TaskStatusFailed
+		task.Result = "subagent: no provider available — tenant context missing or provider not registered for this tenant"
+		sm.recordCompletion(task, taskStart)
+		return
+	}
 
 	// Emit running subagent root span (after model resolution so span has correct model).
 	sm.emitSubagentSpanStart(traceCtx, subRootSpanID, taskStart, task, model, activeProvider.Name())
