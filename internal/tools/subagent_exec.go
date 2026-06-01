@@ -333,37 +333,36 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 		// cascades here and to all subsequent tool calls in this iteration.
 		// Do NOT replace ctx with context.Background() here; that would detach abort propagation.
 		//
-		// Stream the LLM reply when the parent has a WS subscription (emitEvent
-		// is set) so the user can watch the subagent think in real time, just
-		// like the parent chat. Each text delta becomes a subagent.chunk event
-		// tagged with parent_tool_call_id + subagent_id, mirroring the existing
-		// tool.call/tool.result fan-out. Non-streaming Chat is the fallback for
-		// sync paths (RunSync) and edition variants that don't advertise the
-		// streaming capability.
-			if task.emitEvent != nil && task.ParentToolCallID != "" {
-				resp, err = activeProvider.ChatStream(ctx, chatReq, func(chunk providers.StreamChunk) {
-					if chunk.Content == "" && chunk.Thinking == "" {
-						return
-					}
-					payload := map[string]any{
-						"parent_tool_call_id": task.ParentToolCallID,
-						"subagent_id":         task.ID,
-						"subagent_label":      task.Label,
-						"iteration":           iteration,
-					}
-					if chunk.Content != "" {
-						payload["content"] = chunk.Content
-					}
-					if chunk.Thinking != "" {
-						payload["thinking"] = chunk.Thinking
-					}
-					task.emitEvent("subagent.chunk", payload)
-				})
-			} else {
-				resp, err = activeProvider.Chat(ctx, chatReq)
-			}
+		// NOTE: We tried ChatStream here originally (so the subagent's tokens
+		// could be streamed into the nested mini-chat just like the parent
+		// bubble), but stage llm-service-web returned HTTP 403 from the
+		// edge NGINX/WAF on streaming requests specifically (parent's
+		// ChatStream works because it goes through a different request
+		// shape / Authorization path). Reverted to non-streaming Chat for
+		// subagents until the LLM-Service routing is fixed; the
+		// subagent.chunk event is emitted once with the full content at
+		// the end of each iteration so the nested chat still gets text —
+		// just not token-by-token. Re-enabling streaming is gated on
+		// llm-service-web stage accepting `stream=true` from goclaw's
+		// subagent code path.
+			resp, err = activeProvider.Chat(ctx, chatReq)
 			if err == nil {
 				break
+			}
+		}
+		// Emit one synthetic chunk per iteration once the response arrives so
+		// the nested mini-chat UI gets text immediately, even without true
+		// token streaming. When ChatStream is re-enabled this block becomes
+		// redundant (real chunks arrive incrementally) but is harmless.
+		if err == nil && resp != nil && task.emitEvent != nil && task.ParentToolCallID != "" {
+			if resp.Content != "" {
+				task.emitEvent("subagent.chunk", map[string]any{
+					"parent_tool_call_id": task.ParentToolCallID,
+					"subagent_id":         task.ID,
+					"subagent_label":      task.Label,
+					"iteration":           iteration,
+					"content":             resp.Content,
+				})
 			}
 		}
 
