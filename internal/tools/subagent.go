@@ -75,6 +75,17 @@ type SubagentTask struct {
 	// subagent runs less of a black box on the website. Guarded by sm.mu
 	// the same way Status / Result / Token counters are.
 	ToolHistory      []SubagentToolRecord `json:"toolHistory,omitempty"`
+	// ParentToolCallID is the LLM-issued spawn tool_call.id this subagent
+	// was created for. Used to tag the nested tool.call/tool.result events
+	// the subagent emits so the website routes them to the parent's spawn
+	// chip and renders a live progress timeline. Empty for sync run paths
+	// (RunSync) that don't have a UI subscriber.
+	ParentToolCallID string `json:"parentToolCallId,omitempty"`
+	// emitEvent (unexported, json:"-") is the parent run's tool-event
+	// emitter, captured from context at spawn time. Lets the subagent's
+	// goroutine publish on the SAME WS subscription the parent is using —
+	// without it there's no canonical channel from child back to UI.
+	emitEvent        ToolEventEmitter `json:"-"`
 }
 
 // SubagentToolRecord is one tool invocation the subagent made — captured

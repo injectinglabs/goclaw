@@ -32,7 +32,24 @@ const (
 	ctxAgentKey    toolContextKey = "tool_agent_key"
 	ctxSessionKey  toolContextKey = "tool_session_key" // origin session key for announce routing
 	ctxRunKind     toolContextKey = "tool_run_kind"    // "notification", "announce", "delegation"
+	// ctxParentToolCallID carries the LLM-issued tool_call.id of the spawn
+	// call that triggered the current subagent run. SubagentManager attaches
+	// it to every nested tool.call / tool.result it emits so the website can
+	// route them to the right parent chip and render a live progress timeline
+	// under the spawn expand body.
+	ctxParentToolCallID toolContextKey = "tool_parent_tool_call_id"
+	// ctxToolEventEmitter carries the parent run's event emit function so the
+	// SubagentManager can broadcast subagent tool events on the SAME WS run
+	// subscription the parent is using. Without this, subagent tool events
+	// can't reach the UI — there's no canonical channel from a child
+	// goroutine back to the parent's tool-event stream.
+	ctxToolEventEmitter toolContextKey = "tool_event_emitter"
 )
+
+// ToolEventEmitter is the function shape the parent loop uses to broadcast
+// tool.call / tool.result events on the run's WS subscription. Decoupled
+// from the agent package to avoid an import cycle: agent depends on tools.
+type ToolEventEmitter func(eventType string, payload map[string]any)
 
 // Well-known channel names used for routing and access control.
 const (
@@ -114,6 +131,33 @@ func WithToolAsyncCB(ctx context.Context, cb AsyncCallback) context.Context {
 
 func ToolAsyncCBFromCtx(ctx context.Context) AsyncCallback {
 	v, _ := ctx.Value(ctxAsyncCB).(AsyncCallback)
+	return v
+}
+
+// WithParentToolCallID stamps the LLM-issued spawn tool_call.id onto context
+// so the subagent's nested tool events can be routed back to the parent UI
+// chip. See ctxParentToolCallID doc.
+func WithParentToolCallID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, ctxParentToolCallID, id)
+}
+
+// ParentToolCallIDFromCtx returns the spawn tool_call.id this subagent was
+// spawned for, or empty string if not in a subagent context.
+func ParentToolCallIDFromCtx(ctx context.Context) string {
+	v, _ := ctx.Value(ctxParentToolCallID).(string)
+	return v
+}
+
+// WithToolEventEmitter stamps the parent run's event-emit function onto
+// context so child goroutines (subagent loop) can publish tool events on
+// the same WS subscription.
+func WithToolEventEmitter(ctx context.Context, emit ToolEventEmitter) context.Context {
+	return context.WithValue(ctx, ctxToolEventEmitter, emit)
+}
+
+// ToolEventEmitterFromCtx returns the emitter or nil. Callers must nil-check.
+func ToolEventEmitterFromCtx(ctx context.Context) ToolEventEmitter {
+	v, _ := ctx.Value(ctxToolEventEmitter).(ToolEventEmitter)
 	return v
 }
 

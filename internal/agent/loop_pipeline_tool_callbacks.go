@@ -60,7 +60,16 @@ func (l *Loop) makeExecuteToolCall(req *RunRequest, bridgeRS *runState) func(ctx
 			// forever. Fork-local fix: closure over emitRun + tc.ID so the
 			// re-emit lands on the same UI element.
 			asyncCB := l.makeAsyncToolCallback(req, emitRun, tc)
-			result = l.tools.ExecuteWithContext(ctx, registryName, tc.Arguments,
+			// Live subagent progress: stamp the spawn tool_call.id +
+			// event emitter onto context so the SubagentManager can
+			// emit tool.call / tool.result events on this same run's
+			// WS subscription, tagged with parent_tool_call_id so the
+			// website routes them to the right spawn chip. See
+			// internal/tools/context_keys.go for the keys and
+			// subagent_exec.go's tool loop for the emit sites.
+			execCtx := tools.WithParentToolCallID(ctx, tc.ID)
+			execCtx = tools.WithToolEventEmitter(execCtx, l.makeToolEventEmitterForRun(req))
+			result = l.tools.ExecuteWithContext(execCtx, registryName, tc.Arguments,
 				req.Channel, req.ChatID, req.PeerKind, req.SessionKey, asyncCB)
 		}
 		toolDuration := time.Since(toolStart)
@@ -126,7 +135,10 @@ func (l *Loop) makeExecuteToolRaw(req *RunRequest) func(ctx context.Context, tc 
 		} else {
 			// See sequential-path comment above for why asyncCB is non-nil here.
 			asyncCB := l.makeAsyncToolCallback(req, emitRun, tc)
-			result = l.tools.ExecuteWithContext(ctx, registryName, tc.Arguments,
+			// Same live-progress ctx stamping as the sequential path.
+			execCtx := tools.WithParentToolCallID(ctx, tc.ID)
+			execCtx = tools.WithToolEventEmitter(execCtx, l.makeToolEventEmitterForRun(req))
+			result = l.tools.ExecuteWithContext(execCtx, registryName, tc.Arguments,
 				req.Channel, req.ChatID, req.PeerKind, req.SessionKey, asyncCB)
 		}
 		dur := time.Since(start)
@@ -242,6 +254,27 @@ func (l *Loop) recordToolMetric(ctx context.Context, sessionKey, toolName string
 			slog.Debug("evolution.metric.record_failed", "tool", toolName, "error", err)
 		}
 	}()
+}
+
+// makeToolEventEmitterForRun returns a tools.ToolEventEmitter that
+// publishes events on the parent run's WS subscription. Used by
+// SubagentManager to surface child tool.call/tool.result events
+// in real time under the parent's spawn chip on the UI.
+//
+// The agent package owns AgentEvent + protocol types; tools is a
+// lower layer and can't import them (would cycle). So the emitter
+// signature is plain (string, map[string]any) and we cast eventType
+// to protocol.AgentEventType right here, at the boundary.
+func (l *Loop) makeToolEventEmitterForRun(req *RunRequest) tools.ToolEventEmitter {
+	emitRun := makeToolEmitRun(l, req)
+	return func(eventType string, payload map[string]any) {
+		emitRun(AgentEvent{
+			Type:    protocol.AgentEventType(eventType),
+			AgentID: l.id,
+			RunID:   req.RunID,
+			Payload: payload,
+		})
+	}
 }
 
 // makeAsyncToolCallback returns an AsyncCallback that re-emits a

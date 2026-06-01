@@ -92,6 +92,8 @@ func (sm *SubagentManager) Spawn(
 		OriginRootSpanID:  tracing.ParentSpanIDFromContext(ctx),
 		CreatedAt:         time.Now().UnixMilli(),
 		spawnConfig:       cfg,
+		ParentToolCallID:  ParentToolCallIDFromCtx(ctx),
+		emitEvent:         ToolEventEmitterFromCtx(ctx),
 	}
 	// Detach from parent's cancellation chain so subagent survives after parent run completes.
 	// WithoutCancel preserves all context values (agent ID, workspace, trace info, etc.)
