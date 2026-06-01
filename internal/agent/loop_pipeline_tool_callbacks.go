@@ -263,13 +263,15 @@ func (l *Loop) recordToolMetric(ctx context.Context, sessionKey, toolName string
 //
 // The agent package owns AgentEvent + protocol types; tools is a
 // lower layer and can't import them (would cycle). So the emitter
-// signature is plain (string, map[string]any) and we cast eventType
-// to protocol.AgentEventType right here, at the boundary.
+// signature is plain (string, map[string]any). AgentEvent.Type is just
+// a string (see loop_types.go) — protocol.AgentEventToolCall et al.
+// are untyped string constants — so we pass the eventType straight
+// through with no cast.
 func (l *Loop) makeToolEventEmitterForRun(req *RunRequest) tools.ToolEventEmitter {
 	emitRun := makeToolEmitRun(l, req)
 	return func(eventType string, payload map[string]any) {
 		emitRun(AgentEvent{
-			Type:    protocol.AgentEventType(eventType),
+			Type:    eventType,
 			AgentID: l.id,
 			RunID:   req.RunID,
 			Payload: payload,
