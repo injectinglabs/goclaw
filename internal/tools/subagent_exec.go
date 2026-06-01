@@ -258,6 +258,22 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 	// Emit running subagent root span (after model resolution so span has correct model).
 	sm.emitSubagentSpanStart(traceCtx, subRootSpanID, taskStart, task, model, activeProvider.Name())
 
+	// Tell the UI a subagent run is starting so it can render an empty mini-
+	// chat bubble immediately, even before the first text chunk arrives.
+	// Without this the spawn chip stays in its "accepted" placeholder state
+	// for the whole first iteration (often a few seconds) while the model
+	// generates its plan — the user sees a frozen indicator and assumes
+	// nothing's happening.
+	if task.emitEvent != nil && task.ParentToolCallID != "" {
+		task.emitEvent("subagent.run.started", map[string]any{
+			"parent_tool_call_id": task.ParentToolCallID,
+			"subagent_id":         task.ID,
+			"subagent_label":      task.Label,
+			"task":                task.Task,
+			"model":               model,
+		})
+	}
+
 	// Build subagent system prompt (matching TS buildSubagentSystemPrompt pattern).
 	workspace := ToolWorkspaceFromCtx(ctx)
 	systemPrompt := sm.buildSubagentSystemPrompt(task, task.spawnConfig, workspace)
@@ -316,7 +332,36 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 		// ctx is the parent agent's run context — cancelling the parent (e.g. agent abort)
 		// cascades here and to all subsequent tool calls in this iteration.
 		// Do NOT replace ctx with context.Background() here; that would detach abort propagation.
-			resp, err = activeProvider.Chat(ctx, chatReq)
+		//
+		// Stream the LLM reply when the parent has a WS subscription (emitEvent
+		// is set) so the user can watch the subagent think in real time, just
+		// like the parent chat. Each text delta becomes a subagent.chunk event
+		// tagged with parent_tool_call_id + subagent_id, mirroring the existing
+		// tool.call/tool.result fan-out. Non-streaming Chat is the fallback for
+		// sync paths (RunSync) and edition variants that don't advertise the
+		// streaming capability.
+			if task.emitEvent != nil && task.ParentToolCallID != "" {
+				resp, err = activeProvider.ChatStream(ctx, chatReq, func(chunk providers.StreamChunk) {
+					if chunk.Content == "" && chunk.Thinking == "" {
+						return
+					}
+					payload := map[string]any{
+						"parent_tool_call_id": task.ParentToolCallID,
+						"subagent_id":         task.ID,
+						"subagent_label":      task.Label,
+						"iteration":           iteration,
+					}
+					if chunk.Content != "" {
+						payload["content"] = chunk.Content
+					}
+					if chunk.Thinking != "" {
+						payload["thinking"] = chunk.Thinking
+					}
+					task.emitEvent("subagent.chunk", payload)
+				})
+			} else {
+				resp, err = activeProvider.Chat(ctx, chatReq)
+			}
 			if err == nil {
 				break
 			}
@@ -480,6 +525,24 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 	sm.mu.Unlock()
 
 	slog.Info("subagent completed", "id", task.ID, "iterations", iteration)
+
+	// Tell the UI the subagent run is done so it can flip the nested
+	// mini-chat bubble from "streaming" to "done", show the final
+	// markdown table from ToolHistory, and stop the typing dots. Fires
+	// regardless of completion status (success / failed / cancelled —
+	// the status string lets the UI pick the right styling).
+	if task.emitEvent != nil && task.ParentToolCallID != "" {
+		task.emitEvent("subagent.run.completed", map[string]any{
+			"parent_tool_call_id": task.ParentToolCallID,
+			"subagent_id":         task.ID,
+			"subagent_label":      task.Label,
+			"status":              task.Status,
+			"content":             task.Result,
+			"iterations":          iteration,
+			"input_tokens":        task.TotalInputTokens,
+			"output_tokens":       task.TotalOutputTokens,
+		})
+	}
 
 	// Persist final status to DB (fire-and-forget).
 	go sm.persistStatus(ctx, task, iteration)
