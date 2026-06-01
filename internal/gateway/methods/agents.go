@@ -148,6 +148,10 @@ func (m *AgentsMethods) handleList(ctx context.Context, client *gateway.Client, 
 				"agent_type":          a.AgentType,
 				"status":              a.Status,
 				"isRunning":           m.agents.IsRunning(ctx, a.AgentKey),
+				// Agent's custom instructions (migration 000063). The website's
+				// Manage modal's Clone button pre-fills the create form from
+				// this field — must round-trip or clones lose the prompt.
+				"system_prompt": a.SystemPrompt,
 			})
 		}
 		client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
