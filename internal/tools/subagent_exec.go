@@ -158,6 +158,19 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 
 // executeTask runs the LLM tool loop for a subagent. Returns iteration count.
 func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) int {
+	// Diagnostic: log the values our live-progress WS events depend on.
+	// If either is empty/nil at this point, the event guards in the
+	// iteration loop will silently skip emission and the website never
+	// receives the events that nest tool.call/tool.result under the
+	// parent's spawn chip. Without this log we couldn't tell from prod
+	// logs whether the spawn-tool ctx was missing the values, or the
+	// goroutine had them but the WS filter dropped them.
+	slog.Info("subagent runtask start",
+		"id", task.ID,
+		"label", task.Label,
+		"parent_tool_call_id", task.ParentToolCallID,
+		"has_emit_event", task.emitEvent != nil)
+
 	// Tracing: generate a root span ID for this subagent execution.
 	// LLM/tool spans will nest under this root span via parent_span_id.
 	// The root span itself links to the parent agent's root span (from ctx).
