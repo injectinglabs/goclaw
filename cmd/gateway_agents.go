@@ -165,12 +165,26 @@ func setupSubagents(providerReg *providers.Registry, cfg *config.Config, msgBus 
 	}
 
 	agentCfg := cfg.ResolveAgent("default")
+	// Try to resolve a "primary" provider at startup. In multi-tenant
+	// deployments providers are registered per-tenant and a tenant-less
+	// `providerReg.Get(context.Background(), …)` returns nil even when names
+	// is non-empty (providers are kept under composite "tenant:name" keys).
+	// Previously the function returned nil here, which killed the spawn tool
+	// registration in cmd/gateway.go — every agent ran with hasSpawn=false,
+	// breaking the subagent system entirely.
+	//
+	// Letting `provider` stay nil is safe: SubagentManager only uses
+	// `sm.provider` as a fallback. `subagent_exec.executeSubagent` re-resolves
+	// the active provider on every run via providerReg.Get(ctx_with_tenant,
+	// ParentProviderFromCtx(ctx)) — loop_context.go:168 stamps both
+	// tenant and parent provider name onto the context before tool execution,
+	// so the per-tenant provider is always found at run time.
 	provider, err := providerReg.Get(context.Background(), agentCfg.Provider)
 	if err != nil {
 		provider, _ = providerReg.Get(context.Background(), names[0])
 	}
 	if provider == nil {
-		return nil
+		slog.Info("subagent system: no global primary provider (multi-tenant mode); per-run resolution will provide one via ParentProviderFromCtx")
 	}
 
 	subCfg := tools.DefaultSubagentConfig()
