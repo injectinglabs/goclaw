@@ -194,8 +194,10 @@ func setupSubagents(providerReg *providers.Registry, cfg *config.Config, msgBus 
 		if sc.MaxSpawnDepth > 0 {
 			subCfg.MaxSpawnDepth = min(sc.MaxSpawnDepth, 5) // TS: max 5
 		}
-		if sc.MaxChildrenPerAgent > 0 {
-			subCfg.MaxChildrenPerAgent = min(sc.MaxChildrenPerAgent, 20) // TS: max 20
+		// Negative → unlimited (skip the spawn-side check). Positive → use
+		// as-is, no 20-clamp — ops control their own ceiling.
+		if sc.MaxChildrenPerAgent != 0 {
+			subCfg.MaxChildrenPerAgent = sc.MaxChildrenPerAgent
 		}
 		if sc.ArchiveAfterMinutes > 0 {
 			subCfg.ArchiveAfterMinutes = sc.ArchiveAfterMinutes
