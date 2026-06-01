@@ -159,32 +159,29 @@ func buildEmbeddingProvider(
 }
 
 func setupSubagents(providerReg *providers.Registry, cfg *config.Config, msgBus *bus.MessageBus, toolsReg *tools.Registry, workspace string, sandboxMgr sandbox.Manager) *tools.SubagentManager {
-	names := providerReg.List(context.Background())
-	if len(names) == 0 {
-		return nil
-	}
-
-	agentCfg := cfg.ResolveAgent("default")
-	// Try to resolve a "primary" provider at startup. In multi-tenant
-	// deployments providers are registered per-tenant and a tenant-less
-	// `providerReg.Get(context.Background(), …)` returns nil even when names
-	// is non-empty (providers are kept under composite "tenant:name" keys).
-	// Previously the function returned nil here, which killed the spawn tool
-	// registration in cmd/gateway.go — every agent ran with hasSpawn=false,
-	// breaking the subagent system entirely.
+	// In multi-tenant deployments providers are registered per-tenant under
+	// composite "tenantID/name" keys; the registry's master-tenant fallback
+	// is empty for our setup (no global default provider). Both
+	// `providerReg.List(context.Background())` and `providerReg.Get(
+	// context.Background(), …)` therefore return empty/nil at startup,
+	// even though there are dozens of valid per-tenant providers in the
+	// table. Previously the function bailed out here, killing
+	// the spawn tool registration in cmd/gateway.go: every agent ran with
+	// hasSpawn=false and the LLM had no subagent affordance to call.
 	//
-	// Letting `provider` stay nil is safe: SubagentManager only uses
-	// `sm.provider` as a fallback. `subagent_exec.executeSubagent` re-resolves
+	// Skip the early-out entirely. SubagentManager only uses `sm.provider`
+	// as a last-resort fallback — `subagent_exec.executeSubagent` re-resolves
 	// the active provider on every run via providerReg.Get(ctx_with_tenant,
-	// ParentProviderFromCtx(ctx)) — loop_context.go:168 stamps both
-	// tenant and parent provider name onto the context before tool execution,
-	// so the per-tenant provider is always found at run time.
-	provider, err := providerReg.Get(context.Background(), agentCfg.Provider)
-	if err != nil {
-		provider, _ = providerReg.Get(context.Background(), names[0])
-	}
+	// ParentProviderFromCtx(ctx)). loop_context.go:168 stamps both tenant ID
+	// and parent provider name onto every tool-execution context before
+	// dispatch, so the per-tenant provider is always found at run time.
+	// `nil` here is safe; the executeSubagent NPE guard catches the
+	// pathological case (config drift, tenant teardown mid-flight) and
+	// fails the task cleanly.
+	agentCfg := cfg.ResolveAgent("default")
+	provider, _ := providerReg.Get(context.Background(), agentCfg.Provider)
 	if provider == nil {
-		slog.Info("subagent system: no global primary provider (multi-tenant mode); per-run resolution will provide one via ParentProviderFromCtx")
+		slog.Info("subagent system: no global primary provider (multi-tenant mode); per-run resolution will pick the parent agent's tenant-scoped provider")
 	}
 
 	subCfg := tools.DefaultSubagentConfig()
