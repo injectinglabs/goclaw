@@ -188,7 +188,9 @@ func setupSubagents(providerReg *providers.Registry, cfg *config.Config, msgBus 
 
 	// Apply config file overrides if present (matching TS agents.defaults.subagents).
 	if sc := agentCfg.Subagents; sc != nil {
-		if sc.MaxConcurrent > 0 {
+		// Non-zero passes through, including negative for explicit "unlimited".
+		// The spawn-side check treats <= 0 as off.
+		if sc.MaxConcurrent != 0 {
 			subCfg.MaxConcurrent = sc.MaxConcurrent
 		}
 		if sc.MaxSpawnDepth > 0 {

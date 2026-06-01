@@ -6,7 +6,7 @@ import "fmt"
 // TS sources: agent-limits.ts, sessions-spawn-tool.ts, subagent-registry.ts.
 func DefaultSubagentConfig() SubagentConfig {
 	return SubagentConfig{
-		MaxConcurrent:       8,  // TS: DEFAULT_SUBAGENT_MAX_CONCURRENT = 8
+		MaxConcurrent:       0,  // 0 = unlimited (tenant-wide cap off by default)
 		MaxSpawnDepth:       1,  // TS: maxSpawnDepth ?? 1
 		MaxChildrenPerAgent: 0,  // 0 = unlimited (per-parent fan-out off by default)
 		ArchiveAfterMinutes: 60, // TS: archiveAfterMinutes ?? 60
