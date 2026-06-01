@@ -309,25 +309,41 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 	return t.executeOnHost(ctx, command, cwd)
 }
 
-// relaxSandboxDenyGroups returns a copy of the per-agent deny-group overrides
-// with the host-protection groups disabled, for exec that runs inside the
-// sandbox container. The sandbox (no host mounts, unprivileged user,
-// resource-capped) is the security boundary there, so these string-matching
-// groups only impede legitimate code skills (Python network clients,
-// pip/npm/apk installs) and are trivially bypassed inside an isolated container.
-// Callers must have confirmed the command is sandbox-routed; the host exec path
-// keeps every group enabled.
+// sandboxRelaxedDenyGroups lists the deny groups that exist to constrain the
+// HOST goclaw process and are the wrong boundary inside the isolated, optionally
+// network-enabled sandbox container. They block legitimate code skills (Python
+// network clients, pip/npm/apk installs, curl/DNS/recon) and are trivially
+// bypassed in-sandbox (write the script to a file, run it — the command string
+// stops matching), while the container (no host mounts, unprivileged user,
+// cpu/mem caps) is the real boundary. With sandbox network egress enabled,
+// outbound network use IS the intended capability, so the network/egress groups
+// (data_exfiltration's curl-POST/DNS-tools, network_recon's nmap/ssh-tunnels)
+// only generate false positives — e.g. data_exfiltration's `\b(nslookup|dig|host)\b`
+// matches the bare word "host" in any print label.
 //
-// Only reverse_shell and package_install are relaxed. Groups guarding against
-// secret/host exposure (container_escape, env_dump, env_injection,
-// dangerous_paths, destructive_ops, …) stay enabled even in the sandbox.
+// Groups guarding against secret/host exposure are deliberately NOT listed and
+// stay enabled even in the sandbox: container_escape, env_dump, env_injection,
+// dangerous_paths, destructive_ops, code_injection, privilege_escalation,
+// persistence, process_control, crypto_mining, filter_bypass.
+var sandboxRelaxedDenyGroups = []string{
+	"reverse_shell",     // python/node/ruby network imports, bind/connect shells
+	"package_install",   // pip/npm/apk install
+	"data_exfiltration", // curl POST/PUT, curl|sh, DNS tools (nslookup/dig/host)
+	"network_recon",     // nmap/masscan, ssh tunnels, ngrok/chisel/cloudflared
+}
+
+// relaxSandboxDenyGroups returns a copy of the per-agent deny-group overrides
+// with the host-era groups in sandboxRelaxedDenyGroups disabled, for exec that
+// runs inside the sandbox container. Callers must have confirmed the command is
+// sandbox-routed; the host exec path keeps every group enabled.
 func relaxSandboxDenyGroups(overrides map[string]bool) map[string]bool {
-	relaxed := make(map[string]bool, len(overrides)+2)
+	relaxed := make(map[string]bool, len(overrides)+len(sandboxRelaxedDenyGroups))
 	for k, v := range overrides {
 		relaxed[k] = v
 	}
-	relaxed["reverse_shell"] = false
-	relaxed["package_install"] = false
+	for _, g := range sandboxRelaxedDenyGroups {
+		relaxed[g] = false
+	}
 	return relaxed
 }
 
