@@ -343,6 +343,39 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 		}
 	}
 
+	// Last-chance synthesis: if the iteration loop terminated without the
+	// model ever producing a tool-call-free text turn (it kept calling
+	// tools, then either hit the max-iterations cap or returned empty
+	// content), give it ONE more shot — same conversation, tools stripped
+	// from the request, plus an explicit nudge to write the deliverable
+	// as text. This catches the common failure mode where the subagent
+	// writes findings to a file with write_file and exits silently: the
+	// "Task completed but no final response was generated" fallback was
+	// being used unnecessarily because the model COULD have answered, it
+	// just didn't realise it was supposed to.
+	if finalContent == "" && activeProvider != nil {
+		messages = append(messages, providers.Message{
+			Role: "user",
+			Content: "Now write the complete deliverable as your final response — plain text only, no tool calls. The parent agent only sees this text; anything you put in files is unreachable to it.",
+		})
+		finalReq := providers.ChatRequest{
+			Model:    model,
+			Messages: messages,
+			// Explicitly omit Tools so the model can ONLY emit text.
+		}
+		if resp, err := activeProvider.Chat(ctx, finalReq); err == nil && resp != nil && resp.Content != "" {
+			finalContent = resp.Content
+			if resp.Usage != nil {
+				sm.mu.Lock()
+				task.TotalInputTokens += int64(resp.Usage.PromptTokens)
+				task.TotalOutputTokens += int64(resp.Usage.CompletionTokens)
+				sm.mu.Unlock()
+			}
+			slog.Info("subagent last-chance synthesis recovered output",
+				"id", task.ID, "chars", len(finalContent))
+		}
+	}
+
 	sm.mu.Lock()
 	if finalContent == "" {
 		finalContent = "Task completed but no final response was generated."
