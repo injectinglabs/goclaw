@@ -371,6 +371,14 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 					}
 					if chunk.Thinking != "" {
 						payload["thinking"] = chunk.Thinking
+						// Accumulate for DB persistence (migration 000065) so
+						// sessions.preview can rebuild the Thoughts block in
+						// the nested mini-chat after page reload. Streaming
+						// is the only place the reasoning text appears — the
+						// provider's final ChatResponse drops it.
+						sm.mu.Lock()
+						task.Thinking += chunk.Thinking
+						sm.mu.Unlock()
 					}
 					task.emitEvent("subagent.chunk", payload)
 				})

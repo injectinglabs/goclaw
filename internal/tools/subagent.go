@@ -86,6 +86,12 @@ type SubagentTask struct {
 	// goroutine publish on the SAME WS subscription the parent is using —
 	// without it there's no canonical channel from child back to UI.
 	emitEvent        ToolEventEmitter `json:"-"`
+	// Thinking accumulates the streamed chain-of-thought from reasoning
+	// providers (MiniMax / DeepSeek-R1 / Kimi) for persistence — so the
+	// website's nested mini-chat can rebuild the Thoughts block after
+	// page reload via sessions.preview. Empty for non-reasoning models.
+	// Guarded by sm.mu like Status / Result / Token counters.
+	Thinking         string `json:"thinking,omitempty"`
 }
 
 // SubagentToolRecord is one tool invocation the subagent made — captured

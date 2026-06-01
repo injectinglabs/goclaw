@@ -52,21 +52,33 @@ func (sm *SubagentManager) persistCreate(ctx context.Context, task *SubagentTask
 		originUserID = &task.OriginUserID
 	}
 
+	// Persist the parent's spawn tool_call.id so the website's
+	// sessions.preview can JOIN this row back to the corresponding
+	// spawn ToolCall entry in the session history (migration 000065).
+	// NULL for sync subagents (RunSync path leaves ParentToolCallID
+	// empty).
+	var parentToolCallID *string
+	if task.ParentToolCallID != "" {
+		p := task.ParentToolCallID
+		parentToolCallID = &p
+	}
+
 	data := &store.SubagentTaskData{
-		BaseModel:      store.BaseModel{ID: task.dbID},
-		TenantID:       task.OriginTenantID,
-		ParentAgentKey: task.ParentID,
-		SessionKey:     sessionKey,
-		Subject:        task.Label,
-		Description:    task.Task,
-		Status:         task.Status,
-		Depth:          task.Depth,
-		Model:          model,
-		Provider:       provider,
-		OriginChannel:  originChannel,
-		OriginChatID:   originChatID,
-		OriginPeerKind: originPeerKind,
-		OriginUserID:   originUserID,
+		BaseModel:        store.BaseModel{ID: task.dbID},
+		TenantID:         task.OriginTenantID,
+		ParentAgentKey:   task.ParentID,
+		SessionKey:       sessionKey,
+		Subject:          task.Label,
+		Description:      task.Task,
+		Status:           task.Status,
+		Depth:            task.Depth,
+		Model:            model,
+		Provider:         provider,
+		OriginChannel:    originChannel,
+		OriginChatID:     originChatID,
+		OriginPeerKind:   originPeerKind,
+		OriginUserID:     originUserID,
+		ParentToolCallID: parentToolCallID,
 	}
 
 	if err := sm.taskStore.Create(dbCtx, data); err != nil {
@@ -93,5 +105,26 @@ func (sm *SubagentManager) persistStatus(ctx context.Context, task *SubagentTask
 		task.TotalInputTokens, task.TotalOutputTokens,
 	); err != nil {
 		slog.Warn("subagent_persist: update status failed", "id", task.ID, "error", err)
+	}
+
+	// Persist the structured nested state (migration 000065). Best-effort:
+	// failure here is logged but doesn't roll back the status update, so the
+	// audit row stays consistent even if the JSONB write trips on a stale
+	// binary that lacks the column.
+	history := make([]store.SubagentToolHistoryEntry, 0, len(task.ToolHistory))
+	for _, h := range task.ToolHistory {
+		history = append(history, store.SubagentToolHistoryEntry{
+			Name:       h.Name,
+			Status:     h.Status,
+			DurationMs: h.DurationMs,
+		})
+	}
+	var thinking *string
+	if task.Thinking != "" {
+		t := task.Thinking
+		thinking = &t
+	}
+	if err := sm.taskStore.UpdateNestedState(dbCtx, task.dbID, history, thinking); err != nil {
+		slog.Warn("subagent_persist: update nested state failed", "id", task.ID, "error", err)
 	}
 }

@@ -14,7 +14,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
-func registerAllMethods(server *gateway.Server, agents *agent.Router, sessStore store.SessionStore, cronStore store.CronStore, pairingStore store.PairingStore, cfg *config.Config, cfgPath, workspace, dataDir string, msgBus *bus.MessageBus, execApprovalMgr *tools.ExecApprovalManager, agentStore store.AgentStore, skillStore store.SkillStore, configSecretsStore store.ConfigSecretsStore, teamStore store.TeamStore, contextFileInterceptor *tools.ContextFileInterceptor, logTee *gateway.LogTee, heartbeatStore store.HeartbeatStore, configPermStore store.ConfigPermissionStore, sysConfigStore store.SystemConfigStore, tenantStore store.TenantStore, skillTenantCfgStore store.SkillTenantConfigStore, audioMgr *audio.Manager, reminderStore store.ReminderStore) (*methods.PairingMethods, *methods.HeartbeatMethods, *methods.ChatMethods) {
+func registerAllMethods(server *gateway.Server, agents *agent.Router, sessStore store.SessionStore, cronStore store.CronStore, pairingStore store.PairingStore, cfg *config.Config, cfgPath, workspace, dataDir string, msgBus *bus.MessageBus, execApprovalMgr *tools.ExecApprovalManager, agentStore store.AgentStore, skillStore store.SkillStore, configSecretsStore store.ConfigSecretsStore, teamStore store.TeamStore, contextFileInterceptor *tools.ContextFileInterceptor, logTee *gateway.LogTee, heartbeatStore store.HeartbeatStore, configPermStore store.ConfigPermissionStore, sysConfigStore store.SystemConfigStore, tenantStore store.TenantStore, skillTenantCfgStore store.SkillTenantConfigStore, audioMgr *audio.Manager, reminderStore store.ReminderStore, subagentTaskStore store.SubagentTaskStore) (*methods.PairingMethods, *methods.HeartbeatMethods, *methods.ChatMethods) {
 	router := server.Router()
 
 	// Phase 1: Core methods
@@ -22,7 +22,15 @@ func registerAllMethods(server *gateway.Server, agents *agent.Router, sessStore 
 	chatMethods.SetAudioManager(audioMgr) // Wire TTS auto-apply for WS responses
 	chatMethods.Register(router)
 	methods.NewAgentsMethods(agents, cfg, cfgPath, workspace, agentStore, contextFileInterceptor, msgBus).Register(router)
-	methods.NewSessionsMethods(sessStore, agents, msgBus, cfg).Register(router)
+	sessionsMethods := methods.NewSessionsMethods(sessStore, agents, msgBus, cfg)
+	// Migration 000065 wiring: lets sessions.preview JOIN persisted spawn
+	// ToolCalls back to their structured subagent task rows so the website
+	// rebuilds the nested mini-chat after page reload. nil-safe at the
+	// callsite — preview falls back to history-only when the store is absent.
+	if subagentTaskStore != nil {
+		sessionsMethods.SetSubagentTaskStore(subagentTaskStore)
+	}
+	sessionsMethods.Register(router)
 	configMethods := methods.NewConfigMethods(cfg, cfgPath, configSecretsStore, msgBus)
 	if sysConfigStore != nil {
 		configMethods.SetSystemConfigSync(func(ctx context.Context, c *config.Config) {
