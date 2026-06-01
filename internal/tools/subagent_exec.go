@@ -15,6 +15,17 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/tracing"
 )
 
+// truncateStrSub trims a string to maxLen runes, appending "…" if it was
+// cut. Used for live-progress event payloads so a chatty tool result
+// (a 50k web_fetch dump) doesn't fill the WS buffer. The full result
+// still flows through the existing ToolHistory + announce paths.
+func truncateStrSub(s string, maxLen int) string {
+	if maxLen <= 0 || len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "…"
+}
+
 // formatSubagentToolHistory renders the subagent's tool calls as a compact
 // Markdown table so the parent UI can show what the child did without a
 // custom protocol — the result string round-trips through MessageContent
@@ -352,6 +363,24 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 			argsJSON, _ := json.Marshal(tc.Arguments)
 			toolStart := time.Now().UTC()
 			toolSpanID := sm.emitToolSpanStart(subTraceCtx, toolStart, tc.Name, tc.ID, string(argsJSON))
+
+			// LIVE progress: emit tool.call on the parent run's WS subscription,
+			// tagged with parent_tool_call_id + subagent_id so the website
+			// routes it under the right spawn chip and renders a running
+			// indicator. emitEvent is captured from the spawn context — nil
+			// when the subagent runs from a sync path (RunSync) that has no
+			// UI subscriber.
+			if task.emitEvent != nil && task.ParentToolCallID != "" {
+				task.emitEvent("tool.call", map[string]any{
+					"name":                 tc.Name,
+					"id":                   tc.ID,
+					"arguments":            tc.Arguments,
+					"parent_tool_call_id":  task.ParentToolCallID,
+					"subagent_id":          task.ID,
+					"subagent_label":       task.Label,
+				})
+			}
+
 			result := toolsReg.Execute(ctx, tc.Name, tc.Arguments)
 			sm.emitToolSpanEnd(subTraceCtx, toolSpanID, toolStart, result.ForLLM, result.IsError)
 
@@ -371,6 +400,20 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 				Status:     recStatus,
 			})
 			sm.mu.Unlock()
+
+			// LIVE progress: emit tool.result so the website flips the
+			// nested chip from running to done/error in real time.
+			if task.emitEvent != nil && task.ParentToolCallID != "" {
+				task.emitEvent("tool.result", map[string]any{
+					"name":                tc.Name,
+					"id":                  tc.ID,
+					"is_error":            result.IsError,
+					"result":              truncateStrSub(result.ForLLM, 2000),
+					"parent_tool_call_id": task.ParentToolCallID,
+					"subagent_id":         task.ID,
+					"subagent_label":      task.Label,
+				})
+			}
 
 			// Capture media file paths from tool results (e.g. image generation).
 			if len(result.Media) > 0 {
