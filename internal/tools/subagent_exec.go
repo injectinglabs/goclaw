@@ -15,6 +15,34 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/tracing"
 )
 
+// formatSubagentToolHistory renders the subagent's tool calls as a compact
+// Markdown table so the parent UI can show what the child did without a
+// custom protocol — the result string round-trips through MessageContent
+// (markdown renderer) on the frontend. Returns an empty string when the
+// history is empty (subagent run never called any tools), so the existing
+// callers don't have to special-case the zero-row table.
+func formatSubagentToolHistory(history []SubagentToolRecord) string {
+	if len(history) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\nTools used:\n\n")
+	b.WriteString("| # | Tool | Duration | Status |\n")
+	b.WriteString("|---|------|----------|--------|\n")
+	for i, rec := range history {
+		statusIcon := "✓"
+		if rec.Status == "error" {
+			statusIcon = "✗"
+		}
+		dur := fmt.Sprintf("%dms", rec.DurationMs)
+		if rec.DurationMs >= 1000 {
+			dur = fmt.Sprintf("%.1fs", float64(rec.DurationMs)/1000.0)
+		}
+		fmt.Fprintf(&b, "| %d | `%s` | %s | %s |\n", i+1, rec.Name, dur, statusIcon)
+	}
+	return b.String()
+}
+
 // runTask executes the subagent in a goroutine.
 func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, callback AsyncCallback) {
 	iterations := sm.executeTask(ctx, task)
@@ -105,8 +133,14 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 
 	// Call completion callback
 	if callback != nil {
-		result := NewResult(fmt.Sprintf("Subagent '%s' completed in %d iterations.\n\nResult:\n%s",
-			task.Label, iterations, task.Result))
+		// Prepend a compact "Tools used" timeline before the final result
+		// text so the parent's UI (which renders the spawn tool call's
+		// result through MessageContent markdown) shows what the
+		// subagent actually did — instead of a single opaque blob.
+		// Skipped when the run made zero tool calls (pure text turn).
+		toolsBlock := formatSubagentToolHistory(task.ToolHistory)
+		result := NewResult(fmt.Sprintf("Subagent '%s' completed in %d iterations.%s\n\nResult:\n%s",
+			task.Label, iterations, toolsBlock, task.Result))
 		callback(ctx, result)
 	}
 }
@@ -320,6 +354,23 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 			toolSpanID := sm.emitToolSpanStart(subTraceCtx, toolStart, tc.Name, tc.ID, string(argsJSON))
 			result := toolsReg.Execute(ctx, tc.Name, tc.Arguments)
 			sm.emitToolSpanEnd(subTraceCtx, toolSpanID, toolStart, result.ForLLM, result.IsError)
+
+			// Track this tool call in the task's history so the announce
+			// callback can surface "what the subagent actually did" back to
+			// the parent's UI without subscribing to per-call WS events.
+			// Status = "error" if the tool returned an is_error result,
+			// "ok" otherwise. Duration is wall-clock ms across Execute().
+			recStatus := "ok"
+			if result.IsError {
+				recStatus = "error"
+			}
+			sm.mu.Lock()
+			task.ToolHistory = append(task.ToolHistory, SubagentToolRecord{
+				Name:       tc.Name,
+				DurationMs: time.Since(toolStart).Milliseconds(),
+				Status:     recStatus,
+			})
+			sm.mu.Unlock()
 
 			// Capture media file paths from tool results (e.g. image generation).
 			if len(result.Media) > 0 {
