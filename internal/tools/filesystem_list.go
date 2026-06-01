@@ -84,9 +84,13 @@ func (t *ListFilesTool) Execute(ctx context.Context, args map[string]any) *Resul
 		}
 	}
 
-	// Sandbox routing (sandboxKey from ctx — thread-safe)
+	// Sandbox routing (sandboxKey from ctx — thread-safe). Allow-listed host
+	// locations (skills-store, dataDir/tenants, cli-workspaces, user paths) are
+	// not mounted into the sandbox container, so absolute listings of them are
+	// served host-side — e.g. listing a skill's bundled files. Workspace-relative
+	// paths still go through the sandbox (the workspace IS mounted there).
 	sandboxKey := ToolSandboxKeyFromCtx(ctx)
-	if t.sandboxMgr != nil && sandboxKey != "" {
+	if t.sandboxMgr != nil && sandboxKey != "" && !isAllowListedHostPath(path, t.allowedPrefixes) {
 		return t.executeInSandbox(ctx, path, sandboxKey)
 	}
 
