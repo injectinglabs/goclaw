@@ -82,6 +82,45 @@ func (m *ChatMethods) Register(router *gateway.MethodRouter) {
 	router.Register(protocol.MethodChatSessionStatus, m.handleSessionStatus)
 	router.Register(protocol.MethodChatActiveSessions, m.handleActiveSessions)
 	router.Register(protocol.MethodChatToolResult, m.handleToolResult)
+	router.Register(protocol.MethodRunsSubscribe, m.handleRunsSubscribe)
+}
+
+// handleRunsSubscribe is the resumable-stream replay endpoint. The
+// client supplies (runId, sinceSeq); we return every buffered event for
+// that run whose Seq is greater than sinceSeq, in emit order. Live
+// events arriving after the response continue through the normal
+// broadcast → WS fan-out, so the client receives the gap-fill AND the
+// live tail seamlessly.
+//
+// When the run is no longer in the in-memory map (already evicted /
+// never existed), we return an empty `events` array. The caller's UI
+// state machine still has whatever it accumulated, plus the saved
+// final assistant content from sessions.preview if it wants more.
+//
+// No ownership check: the WS gateway only delivers events the client
+// would already be allowed to see (per clientCanReceiveEvent). Sub-
+// scribing to someone else's run just returns nothing — events are
+// filtered by user/tenant on broadcast.
+func (m *ChatMethods) handleRunsSubscribe(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
+	var params struct {
+		RunID    string `json:"runId"`
+		SinceSeq int64  `json:"sinceSeq"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.RunID == "" {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "runId")))
+		return
+	}
+	events := m.agents.EventsSince(params.RunID, params.SinceSeq)
+	// Always emit a (possibly empty) array — null would force a special
+	// case on the client.
+	if events == nil {
+		events = []agent.BufferedEvent{}
+	}
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
+		"runId":  params.RunID,
+		"events": events,
+	}))
 }
 
 // handleActiveSessions returns the calling user's currently-running agent

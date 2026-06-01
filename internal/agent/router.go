@@ -273,7 +273,37 @@ type ActiveRun struct {
 	Content   string
 	Thinking  string
 	ToolCalls []ToolCallSnapshot
+
+	// nextSeq is the monotonic sequence assigned to the NEXT outbound
+	// event. Read/written under bufMu. Used by StampAndBufferEvent to
+	// give every emitted AgentEvent a per-run order so the client can
+	// detect gaps and call runs.subscribe(runId, sinceSeq) to fill them.
+	nextSeq int64
+	// EventLog is a capped ring of every event that left this run, in
+	// emit order. Sized to fit a typical multi-iteration run with all
+	// chunks (~5000 events). Replayed verbatim on runs.subscribe so the
+	// UI can heal partial streams from any point without a sessions.
+	// preview detour.
+	EventLog []BufferedEvent
 }
+
+// BufferedEvent is one entry in ActiveRun.EventLog. We keep the whole
+// AgentEvent rather than a typed subset so runs.subscribe can replay any
+// event the client cares about (chunk / thinking / tool.call / tool.result /
+// subagent.* / run.completed) through the same code path that the live
+// emit uses.
+type BufferedEvent struct {
+	Seq   int64      `json:"seq"`
+	Event AgentEvent `json:"event"`
+}
+
+// maxRunEventLog caps each run's buffered event log. Hit only on
+// pathological multi-thousand-iteration runs; the ring drops oldest to
+// stay under this bound. Live-stream clients never lose anything (events
+// dispatch immediately); only post-hoc reconnect resume might miss the
+// very-earliest events on a marathon run — acceptable trade-off vs
+// unbounded growth.
+const maxRunEventLog = 5000
 
 // ToolCallSnapshot is the per-tool entry attached to ActiveRun so a
 // reconnecting client can rebuild the streaming bubble's tool indicators
@@ -395,6 +425,79 @@ func (r *Router) AppendToolResult(runID, callID string, isErr bool, result strin
 		}
 	}
 	run.bufMu.Unlock()
+}
+
+// StampAndBufferEvent assigns the next monotonic Seq to an outbound event
+// and appends it to the run's capped EventLog. The (stamped) event is
+// returned for the caller to broadcast as-is. Off-router code paths that
+// emit events (channel handlers, tests) can skip this — the resulting
+// Seq=0 means "untracked", and runs.subscribe simply finds no entry for
+// the run.
+//
+// Eviction policy: when the log exceeds maxRunEventLog we drop the
+// oldest. This only affects reconnect-resume on marathon runs; live
+// streaming clients never miss anything because they receive the event
+// at broadcast time, before it enters the ring.
+//
+// Returns the same event (with Seq set) so the caller can write through:
+//
+//	event = router.StampAndBufferEvent(event)
+//	msgBus.Broadcast(bus.Event{Payload: event, ...})
+func (r *Router) StampAndBufferEvent(event AgentEvent) AgentEvent {
+	if event.RunID == "" {
+		return event
+	}
+	val, ok := r.activeRuns.Load(event.RunID)
+	if !ok {
+		return event
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	run.nextSeq++
+	event.Seq = run.nextSeq
+	run.EventLog = append(run.EventLog, BufferedEvent{Seq: event.Seq, Event: event})
+	if len(run.EventLog) > maxRunEventLog {
+		// Drop oldest: shift the slice forward. Allocates a fresh backing
+		// array so we don't keep the head events alive through the slice
+		// header (the dropped events become eligible for GC).
+		drop := len(run.EventLog) - maxRunEventLog
+		next := make([]BufferedEvent, maxRunEventLog)
+		copy(next, run.EventLog[drop:])
+		run.EventLog = next
+	}
+	run.bufMu.Unlock()
+	return event
+}
+
+// EventsSince returns every buffered event for runID whose Seq > sinceSeq,
+// in emit order. The returned slice is a defensive copy so callers can
+// iterate without holding bufMu. Empty slice = nothing missed (or run
+// unknown / already evicted).
+//
+// Used by the runs.subscribe WS method: client supplies its lastSeq, we
+// reply with everything newer, and the live broadcast continues to fan
+// out subsequent events as they happen.
+func (r *Router) EventsSince(runID string, sinceSeq int64) []BufferedEvent {
+	val, ok := r.activeRuns.Load(runID)
+	if !ok {
+		return nil
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	defer run.bufMu.Unlock()
+	if len(run.EventLog) == 0 {
+		return nil
+	}
+	// Linear scan — the log is bounded by maxRunEventLog and clients
+	// typically ask for sinceSeq close to the tail (last received was
+	// just a few events back).
+	out := make([]BufferedEvent, 0, len(run.EventLog))
+	for _, ev := range run.EventLog {
+		if ev.Seq > sinceSeq {
+			out = append(out, ev)
+		}
+	}
+	return out
 }
 
 // AppendThinking mirrors AppendContent for chain-of-thought chunks emitted

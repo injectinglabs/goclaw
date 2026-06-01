@@ -333,6 +333,14 @@ func wireExtras(
 					m["media"] = signed
 				}
 			}
+			// Stamp the event with the per-run monotonic Seq and push to
+			// the run's ring buffer BEFORE broadcast. The client tracks
+			// the last Seq it received and calls runs.subscribe(runID,
+			// sinceSeq) on reconnect to replay anything it missed. This
+			// is the single source of truth for "what did the server
+			// emit for this run" — no separate sessions.preview /
+			// activeSessions reconciliation needed.
+			event = agentRouter.StampAndBufferEvent(event)
 			msgBus.Broadcast(bus.Event{
 				Name:     protocol.EventAgent,
 				Payload:  event,
