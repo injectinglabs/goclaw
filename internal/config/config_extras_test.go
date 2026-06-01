@@ -162,8 +162,8 @@ func TestResolveDefaultAgentID_Explicit(t *testing.T) {
 func TestResolveDisplayName_Default(t *testing.T) {
 	cfg := Default()
 	got := cfg.ResolveDisplayName("nonexistent")
-	if got != "GoClaw" {
-		t.Errorf("expected GoClaw fallback, got %q", got)
+	if got != "Agentic OS" {
+		t.Errorf("expected Agentic OS fallback, got %q", got)
 	}
 }
 
