@@ -389,14 +389,14 @@ func (c *Config) ResolveDefaultAgentID() string {
 }
 
 // ResolveDisplayName returns the display name for an agent.
-// Falls back to "GoClaw" if not configured.
+// Falls back to "Agentic OS" if not configured.
 func (c *Config) ResolveDisplayName(agentID string) string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if spec, ok := c.Agents.List[agentID]; ok && spec.DisplayName != "" {
 		return spec.DisplayName
 	}
-	return "GoClaw"
+	return "Agentic OS"
 }
 
 // ApplyEnvOverrides re-applies environment variable overrides onto the config.
