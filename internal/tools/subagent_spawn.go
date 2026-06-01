@@ -41,17 +41,22 @@ func (sm *SubagentManager) Spawn(
 		return "", fmt.Errorf("spawn depth limit reached (%d/%d)", depth, cfg.MaxSpawnDepth)
 	}
 
-	// Check concurrent limit (scoped per tenant for isolation).
-	tenantID := store.TenantIDFromContext(ctx)
-	running := 0
-	for _, t := range sm.tasks {
-		if t.Status == TaskStatusRunning && t.OriginTenantID == tenantID {
-			running++
+	// Tenant-scoped concurrent limit. <= 0 disables the check entirely —
+	// same convention as MaxChildrenPerAgent below. Per-tenant scoping
+	// stays even when off so a future operator turning it back on doesn't
+	// have to also revisit the loop body.
+	if cfg.MaxConcurrent > 0 {
+		tenantID := store.TenantIDFromContext(ctx)
+		running := 0
+		for _, t := range sm.tasks {
+			if t.Status == TaskStatusRunning && t.OriginTenantID == tenantID {
+				running++
+			}
 		}
-	}
-	if running >= cfg.MaxConcurrent {
-		sm.mu.Unlock()
-		return "", fmt.Errorf("max concurrent subagents reached (%d/%d)", running, cfg.MaxConcurrent)
+		if running >= cfg.MaxConcurrent {
+			sm.mu.Unlock()
+			return "", fmt.Errorf("max concurrent subagents reached (%d/%d)", running, cfg.MaxConcurrent)
+		}
 	}
 
 	// Per-parent children limit. MaxChildrenPerAgent <= 0 disables the check

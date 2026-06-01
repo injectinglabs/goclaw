@@ -143,7 +143,8 @@ func overlaySubagents(dst *subagentDefaultsJSON, src *config.SubagentsConfig) {
 	if src == nil {
 		return
 	}
-	if src.MaxConcurrent > 0 {
+	// Non-zero passes through (negative = explicit unlimited).
+	if src.MaxConcurrent != 0 {
 		dst.MaxConcurrent = src.MaxConcurrent
 	}
 	// Mirror runtime clamps in cmd/gateway_agents.go so UI placeholders reflect
