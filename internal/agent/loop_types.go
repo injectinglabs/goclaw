@@ -298,6 +298,14 @@ type AgentEvent struct {
 	RunID   string `json:"runId"`
 	RunKind string `json:"runKind,omitempty"` // "delegation", "announce" — omitted for user-initiated runs
 	Payload any    `json:"payload,omitempty"`
+	// Seq is the monotonic per-run sequence number assigned by the router
+	// at emit time (see Router.StampAndBufferEvent). The client stores the
+	// last seq it received and asks for events.since(N) on reconnect via
+	// the runs.subscribe method, so the UI can heal a partial stream
+	// without falling back to a full sessions.preview reload. Zero when
+	// the event was emitted on a code path that bypasses the router
+	// (legacy / tests / channel handlers).
+	Seq     int64 `json:"seq,omitempty"`
 
 	// Delegation context (omitempty — only present when agent runs inside a delegation)
 	DelegationID  string `json:"delegationId,omitempty"`

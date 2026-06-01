@@ -19,6 +19,13 @@ const (
 	MethodChatActiveSessions = "chat.activeSessions"
 	MethodChatToolResult    = "chat.toolResult"
 
+	// MethodRunsSubscribe is the resumable-stream entry point. Client
+	// sends `{runId, sinceSeq}` and receives all buffered events with
+	// Seq > sinceSeq (in a single response), then continues to receive
+	// live events through the normal broadcast path. Replaces the
+	// activeSessions + sessions.preview hybrid for in-flight recovery.
+	MethodRunsSubscribe = "runs.subscribe"
+
 	// Agents management
 	MethodAgentsList     = "agents.list"
 	MethodAgentsCreate   = "agents.create"
