@@ -194,6 +194,7 @@ func (s *SQLiteSessionStore) ListPagedRich(ctx context.Context, opts store.Sessi
 		s.label, s.channel, s.user_id, COALESCE(s.metadata, '{}'),
 		s.model, s.provider, s.input_tokens, s.output_tokens,
 		COALESCE(a.display_name, ''),
+		COALESCE(a.agent_key, ''),
 		COALESCE(s.last_prompt_tokens, length(s.messages) / 4 + 12000),
 		COALESCE(a.context_window, 200000),
 		s.compaction_count`
@@ -218,10 +219,10 @@ func (s *SQLiteSessionStore) ListPagedRich(ctx context.Context, opts store.Sessi
 		var metaJSON []byte
 		var model, provider *string
 		var inputTokens, outputTokens int64
-		var agentName string
+		var agentName, agentKey string
 		var estimatedTokens, contextWindow, compactionCount int
 		if err := rows.Scan(&key, &msgCount, stCreated, stUpdated, &label, &channel, &userID, &metaJSON,
-			&model, &provider, &inputTokens, &outputTokens, &agentName,
+			&model, &provider, &inputTokens, &outputTokens, &agentName, &agentKey,
 			&estimatedTokens, &contextWindow, &compactionCount); err != nil {
 			continue
 		}
@@ -245,6 +246,7 @@ func (s *SQLiteSessionStore) ListPagedRich(ctx context.Context, opts store.Sessi
 			InputTokens:     inputTokens,
 			OutputTokens:    outputTokens,
 			AgentName:       agentName,
+			AgentKey:        agentKey,
 			EstimatedTokens: estimatedTokens,
 			ContextWindow:   contextWindow,
 			CompactionCount: compactionCount,

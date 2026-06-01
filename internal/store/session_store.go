@@ -91,6 +91,11 @@ type SessionInfoRich struct {
 	InputTokens     int64  `json:"inputTokens,omitempty" db:"input_tokens"`
 	OutputTokens    int64  `json:"outputTokens,omitempty" db:"output_tokens"`
 	AgentName       string `json:"agentName,omitempty" db:"agent_name"`
+	// AgentKey is the agent's slug ("researcher", "default", ...). The website
+	// uses this as activeChat.agentId so the picker survives page reloads —
+	// loop.Run already writes the UUID via SetAgentInfo, the LEFT JOIN in
+	// ListPagedRich just surfaces the slug back.
+	AgentKey        string `json:"agentKey,omitempty" db:"agent_key"`
 	EstimatedTokens int    `json:"estimatedTokens,omitempty" db:"-"` // estimated current context tokens (messages bytes/4 + 12k system prompt)
 	ContextWindow   int    `json:"contextWindow,omitempty" db:"context_window"` // agent's context window size
 	CompactionCount int    `json:"compactionCount,omitempty" db:"compaction_count"` // number of compactions performed
