@@ -151,8 +151,11 @@ func overlaySubagents(dst *subagentDefaultsJSON, src *config.SubagentsConfig) {
 	if src.MaxSpawnDepth > 0 {
 		dst.MaxSpawnDepth = min(src.MaxSpawnDepth, 5)
 	}
-	if src.MaxChildrenPerAgent > 0 {
-		dst.MaxChildrenPerAgent = min(src.MaxChildrenPerAgent, 20)
+	// Mirror gateway_agents.go: any non-zero value passes through; the spawn
+	// check itself treats <=0 as "unlimited". No 20-clamp — ops own their
+	// ceiling now.
+	if src.MaxChildrenPerAgent != 0 {
+		dst.MaxChildrenPerAgent = src.MaxChildrenPerAgent
 	}
 	if src.ArchiveAfterMinutes > 0 {
 		dst.ArchiveAfterMinutes = src.ArchiveAfterMinutes

@@ -54,16 +54,19 @@ func (sm *SubagentManager) Spawn(
 		return "", fmt.Errorf("max concurrent subagents reached (%d/%d)", running, cfg.MaxConcurrent)
 	}
 
-	// Check per-parent children limit
-	childCount := 0
-	for _, t := range sm.tasks {
-		if t.ParentID == parentID {
-			childCount++
+	// Per-parent children limit. MaxChildrenPerAgent <= 0 disables the check
+	// entirely (intent: ops can turn it off without removing the field).
+	if cfg.MaxChildrenPerAgent > 0 {
+		childCount := 0
+		for _, t := range sm.tasks {
+			if t.ParentID == parentID {
+				childCount++
+			}
 		}
-	}
-	if childCount >= cfg.MaxChildrenPerAgent {
-		sm.mu.Unlock()
-		return "", fmt.Errorf("max children per agent reached (%d/%d)", childCount, cfg.MaxChildrenPerAgent)
+		if childCount >= cfg.MaxChildrenPerAgent {
+			sm.mu.Unlock()
+			return "", fmt.Errorf("max children per agent reached (%d/%d)", childCount, cfg.MaxChildrenPerAgent)
+		}
 	}
 
 	id := generateSubagentID()
