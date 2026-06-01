@@ -77,8 +77,16 @@ func SanitizeAssistantContent(content string) string {
 
 // garbledToolXMLPattern matches XML-like tool call artifacts that some models
 // (DeepSeek, GLM, etc.) emit as text content instead of proper tool calls.
+//
+// Includes DeepSeek's DSML (DeepSeek Markup Language, introduced V3.2 / V4):
+// `<｜DSML｜...>` markers whose pipe character is U+FF5C (fullwidth bar).
+// Some serializers double the bar to `<｜｜DSML｜｜...>`. Closing tags slot
+// the `/` between `<` and the first pipe, e.g. `</｜DSML｜tool_calls>`.
+// All four variants strip here so the empty-reply rescue chain doesn't ship
+// them to the user.
 var garbledToolXMLPattern = regexp.MustCompile(
-	`(?s)</?(?:function_calls?|functioninvoke|invoke|invfunction_calls|tool_call|tool_use|parameter|minimax:tool_call)[^>]*>`,
+	`(?s)</?(?:function_calls?|functioninvoke|invoke|invfunction_calls|tool_call|tool_use|parameter|minimax:tool_call)[^>]*>` +
+		`|<\s*/?\s*\x{ff5c}\x{ff5c}?\s*DSML\s*\x{ff5c}\x{ff5c}?[^>]*>`,
 )
 
 var garbledToolXMLIndicators = []string{
@@ -90,6 +98,11 @@ var garbledToolXMLIndicators = []string{
 	"<tool_call",
 	"<tool_use",
 	"<minimax:tool_call",
+	// DSML markers — see garbledToolXMLPattern comment above.
+	"『DSML",   // not used in real traffic but covers a common mis-encoding
+	"｜DSML｜",
+	"<｜DSML｜",
+	"<｜｜DSML｜｜",
 }
 
 func stripGarbledToolXML(content string) string {
