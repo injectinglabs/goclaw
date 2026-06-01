@@ -376,22 +376,22 @@ func (s *PGAgentStore) ListShares(ctx context.Context, agentID uuid.UUID) ([]sto
 }
 
 func (s *PGAgentStore) CanAccess(ctx context.Context, agentID uuid.UUID, userID string) (bool, string, error) {
-	// Check ownership + default flag
-	var ownerID string
+	// Check ownership + default flag + agent_type (for predefined-system tenant-wide branch)
+	var ownerID, agentType string
 	var isDefault bool
 	var err error
 	if store.IsCrossTenant(ctx) {
 		err = s.db.QueryRowContext(ctx,
-			"SELECT owner_id, is_default FROM agents WHERE id = $1 AND deleted_at IS NULL", agentID,
-		).Scan(&ownerID, &isDefault)
+			"SELECT owner_id, is_default, agent_type FROM agents WHERE id = $1 AND deleted_at IS NULL", agentID,
+		).Scan(&ownerID, &isDefault, &agentType)
 	} else {
 		tid := store.TenantIDFromContext(ctx)
 		if tid == uuid.Nil {
 			return false, "", fmt.Errorf("agent not found")
 		}
 		err = s.db.QueryRowContext(ctx,
-			"SELECT owner_id, is_default FROM agents WHERE id = $1 AND deleted_at IS NULL AND tenant_id = $2", agentID, tid,
-		).Scan(&ownerID, &isDefault)
+			"SELECT owner_id, is_default, agent_type FROM agents WHERE id = $1 AND deleted_at IS NULL AND tenant_id = $2", agentID, tid,
+		).Scan(&ownerID, &isDefault, &agentType)
 	}
 	if err != nil {
 		return false, "", fmt.Errorf("agent not found")
@@ -404,6 +404,12 @@ func (s *PGAgentStore) CanAccess(ctx context.Context, agentID uuid.UUID, userID 
 	}
 	if ownerID == userID {
 		return true, "owner", nil
+	}
+	// System-owned predefined templates (seeded by auth-proxy) are tenant-wide
+	// siblings of the default agent — every member of the tenant can chat with
+	// them. Mirrors the predefined-system branch in ListAccessible above.
+	if agentType == "predefined" && ownerID == "system" {
+		return true, "user", nil
 	}
 	// Check shares
 	var role string
@@ -434,6 +440,7 @@ func (s *PGAgentStore) ListAccessible(ctx context.Context, userID string) ([]sto
 			 WHERE deleted_at IS NULL AND (
 			     owner_id = $1
 			     OR is_default = true
+			     OR (agent_type = 'predefined' AND owner_id = 'system')
 			     OR id IN (SELECT agent_id FROM agent_shares WHERE user_id = $1)
 			     OR (
 			         agent_type = 'predefined'
@@ -464,6 +471,7 @@ func (s *PGAgentStore) ListAccessible(ctx context.Context, userID string) ([]sto
 		 WHERE deleted_at IS NULL AND tenant_id = $2 AND (
 		     owner_id = $1
 		     OR is_default = true
+		     OR (agent_type = 'predefined' AND owner_id = 'system')
 		     OR id IN (SELECT agent_id FROM agent_shares WHERE user_id = $1 AND tenant_id = $2)
 		     OR (
 		         agent_type = 'predefined'
