@@ -334,6 +334,22 @@ func wireExtras(
 					}
 					m["media"] = signed
 				}
+				// Sign live tool.result `media` (PR #205 wire shape):
+				// []map[string]string with raw `path` keys from
+				// buildLiveMediaPayload. Same /v1/files/...?ft=... shape as
+				// the persisted MediaRef path so the SPA's existing
+				// rendering code (mediaRefToAttachment / liveMediaToAttachment)
+				// works unchanged. Skip items already containing ?ft=  for
+				// safety against double-sign on retried events.
+				if liveMedia, ok := m["media"].([]map[string]string); ok {
+					for _, item := range liveMedia {
+						p := item["path"]
+						if p == "" || strings.Contains(p, "?ft=") {
+							continue
+						}
+						item["path"] = httpapi.SignMediaPath(p, secret)
+					}
+				}
 			}
 			// Stamp the event with the per-run monotonic Seq and push to
 			// the run's ring buffer BEFORE broadcast. The client tracks
