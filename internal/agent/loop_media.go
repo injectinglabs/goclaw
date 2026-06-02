@@ -2,6 +2,7 @@ package agent
 
 import (
 	"path/filepath"
+	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 )
