@@ -11,6 +11,10 @@ func DefaultSubagentConfig() SubagentConfig {
 		MaxChildrenPerAgent: 0,  // 0 = unlimited (per-parent fan-out off by default)
 		ArchiveAfterMinutes: 60, // TS: archiveAfterMinutes ?? 60
 		MaxRetries:          2,
+		// 8K (was 4K) so a Gemini-flavoured subagent has answer headroom
+		// after hidden reasoning eats part of the budget — Gemini counts
+		// thinking + content against the same max_tokens, unlike o-series.
+		MaxTokens: 8192,
 	}
 }
 
