@@ -63,14 +63,27 @@ func (p *OpenAIProvider) doRequest(ctx context.Context, body any) (io.ReadCloser
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		retryAfter := ParseRetryAfter(resp.Header.Get("Retry-After"))
-		// DIAG: dump the request body (truncated) and the actor headers so we
-		// can correlate WAF/upstream 403s with the actual payload the model
-		// produced. Common offenders: long prompts with strings that look
-		// like SQL injection, base64 blobs that trip content filters, or
-		// model-override fields the upstream doesn't recognise.
+		// DIAG: dump every header we sent + the request body (longer cap)
+		// + response headers so we can pinpoint which WAF/proxy returned
+		// the 403 (look for `server: ...` or `x-amzn-...` markers).
+		// Authorization value is masked to len only — never log token bytes.
+		sentHeaders := make(map[string]string, len(httpReq.Header))
+		for k, vs := range httpReq.Header {
+			if strings.EqualFold(k, "Authorization") || strings.EqualFold(k, "api-key") {
+				if len(vs) > 0 {
+					sentHeaders[k] = fmt.Sprintf("<set:len=%d>", len(vs[0]))
+				}
+				continue
+			}
+			sentHeaders[k] = strings.Join(vs, ", ")
+		}
+		respHeaders := make(map[string]string, len(resp.Header))
+		for k, vs := range resp.Header {
+			respHeaders[k] = strings.Join(vs, ", ")
+		}
 		reqBodyPreview := string(data)
-		if len(reqBodyPreview) > 1500 {
-			reqBodyPreview = reqBodyPreview[:1500] + "…(truncated)"
+		if len(reqBodyPreview) > 8000 {
+			reqBodyPreview = reqBodyPreview[:8000] + "…(truncated)"
 		}
 		actorPreview := actorHeadersFromCtx(ctx)
 		slog.Warn("provider: http error",
@@ -78,7 +91,9 @@ func (p *OpenAIProvider) doRequest(ctx context.Context, body any) (io.ReadCloser
 			"status", resp.StatusCode,
 			"url", p.apiBase+p.chatPath,
 			"resp_body", string(respBody),
-			"req_body_preview", reqBodyPreview,
+			"resp_headers", respHeaders,
+			"req_body_full", reqBodyPreview,
+			"req_headers", sentHeaders,
 			"actor_user", actorPreview["X-Actor-User-ID"],
 			"actor_org", actorPreview["X-Actor-Org-ID"],
 		)
