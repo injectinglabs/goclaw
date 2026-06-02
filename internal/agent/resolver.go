@@ -142,6 +142,10 @@ type ResolverDeps struct {
 	// HookDispatcher fires lifecycle hook events (Issue #875). Nil = noop.
 	HookDispatcher hooks.Dispatcher
 
+	// SubagentMgr is forwarded to every Loop so Loop.Run can drain spawned
+	// children on the pre-finalize barrier. Nil = legacy announce queue path.
+	SubagentMgr *tools.SubagentManager
+
 	// Vault hook: called when a text file is uploaded by user (nil = no vault registration)
 	OnTextUploaded func(ctx context.Context, path, content string)
 }
@@ -500,6 +504,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			DataDir:                dataDir,
 			RestrictToWs:           &restrictVal,
 			SubagentsCfg:           ag.ParseSubagentsConfig(),
+			SubagentMgr:            deps.SubagentMgr,
 			MemoryCfg:              ag.ParseMemoryConfig(),
 			SandboxCfg:             sandboxCfgOverride,
 			Bus:                    deps.Bus,

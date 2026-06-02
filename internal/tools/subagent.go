@@ -118,6 +118,16 @@ type SubagentManager struct {
 	createTools   func() *Registry
 	announceQueue *AnnounceQueue          // optional: batches announces with debounce
 	taskStore     store.SubagentTaskStore // optional: persists tasks to DB (fire-and-forget)
+
+	// barrierMode, when true, suppresses the announceQueue.Enqueue path in
+	// runTask after a subagent finishes. The expectation is that the agent
+	// loop's pre-finalize barrier (agent.Loop.Run) calls WaitForChildren and
+	// consumes the results into the parent's own run via a second pipeline
+	// pass — so we don't want the announce queue to ALSO schedule a separate
+	// pseudo-run with the same content (duplicate synthesis + double bubble).
+	// Off by default to preserve legacy fire-and-forget behavior for tests +
+	// any tenant the operator hasn't migrated yet.
+	barrierMode bool
 }
 
 // NewSubagentManager creates a new subagent manager.
@@ -149,6 +159,16 @@ func (sm *SubagentManager) SetAnnounceQueue(q *AnnounceQueue) {
 // SetTaskStore sets the persistent store for subagent tasks (write-through, fire-and-forget).
 func (sm *SubagentManager) SetTaskStore(s store.SubagentTaskStore) {
 	sm.taskStore = s
+}
+
+// SetBarrierMode toggles barrier-mode announce suppression. See SubagentManager.barrierMode.
+func (sm *SubagentManager) SetBarrierMode(v bool) {
+	sm.barrierMode = v
+}
+
+// BarrierMode reports whether barrier-mode announce suppression is on.
+func (sm *SubagentManager) BarrierMode() bool {
+	return sm.barrierMode
 }
 
 // effectiveConfig returns the per-agent context override merged with defaults,

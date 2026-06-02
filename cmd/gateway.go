@@ -264,7 +264,15 @@ func runGateway() {
 		}
 
 		toolsReg.Register(tools.NewSpawnTool(subagentMgr, "default", 0))
-		slog.Info("subagent system enabled", "tools", []string{"spawn"})
+		// Barrier mode: announce-queue is suppressed inside runTask; the
+		// agent Loop.Run drains finished children via WaitForChildren before
+		// emitting run.completed and synthesizes their results in the SAME
+		// run (same RunID, single WS stream, working Stop button). The
+		// announce queue stays wired above as a safety net for legacy team
+		// delegation paths that don't go through Loop.Run barrier — those
+		// publish via direct callback in makeDelegateAnnounceCallback.
+		subagentMgr.SetBarrierMode(true)
+		slog.Info("subagent system enabled", "tools", []string{"spawn"}, "barrier_mode", true)
 	}
 
 	skillsLoader, skillSearchTool, globalSkillsDir, bundledSkillsDir, builtinSkillsDir := setupSkillsSystem(cfg, workspace, dataDir, pgStores, toolsReg, providerRegistry, msgBus)
@@ -302,7 +310,7 @@ func runGateway() {
 	var mcpPool *mcpbridge.Pool
 	var mediaStore *media.Store
 	var postTurn tools.PostTurnProcessor
-	contextFileInterceptor, mcpPool, mediaStore, postTurn = wireExtras(pgStores, agentRouter, providerRegistry, modelReg, msgBus, pgStores.Sessions, toolsReg, toolPE, skillsLoader, hasMemory, traceCollector, workspace, cfg.Gateway.InjectionAction, cfg, sandboxMgr, redisClient, domainBus)
+	contextFileInterceptor, mcpPool, mediaStore, postTurn = wireExtras(pgStores, agentRouter, providerRegistry, modelReg, msgBus, pgStores.Sessions, toolsReg, toolPE, skillsLoader, hasMemory, traceCollector, workspace, cfg.Gateway.InjectionAction, cfg, sandboxMgr, redisClient, domainBus, subagentMgr)
 	if mcpPool != nil {
 		defer mcpPool.Stop()
 	}
