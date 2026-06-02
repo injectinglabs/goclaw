@@ -183,6 +183,17 @@ func (c *Channel) Start(ctx context.Context) error {
 		username = me.Username
 	}
 
+	// A bot token may have a webhook registered from prior use (another tool or
+	// environment). Telegram then rejects getUpdates with 409 "can't use
+	// getUpdates while webhook is active", so long-polling never receives any
+	// message and the bot silently never replies. Clear any webhook before
+	// polling so re-used tokens self-heal. Best-effort: log and continue.
+	delCtx, delCancel := context.WithTimeout(ctx, probeOverallTimeout)
+	if delErr := c.bot.DeleteWebhook(delCtx, &telego.DeleteWebhookParams{}); delErr != nil {
+		slog.Warn("telegram: deleteWebhook before polling failed (continuing)", "err", delErr)
+	}
+	delCancel()
+
 	// Create a cancellable context for the polling goroutine.
 	// Stop() cancels this context to cleanly shut down long polling.
 	pollCtx, cancel := context.WithCancel(ctx)
