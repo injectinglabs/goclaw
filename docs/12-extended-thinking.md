@@ -208,6 +208,20 @@ Anthropic requires thinking blocks (including their cryptographic signatures) to
 
 This is critical for correctness: if thinking blocks are dropped or modified, the Anthropic API may reject the request or produce degraded responses.
 
+### Gemini (Vertex) Thought-Signature Handling
+
+Gemini 2.5+ uses an opaque `thought_signature` token to preserve reasoning continuity across tool-call cycles — analogous to Anthropic's signed thinking blocks, but at the tool-call granularity. The wire shape and group semantics differ from every other provider; both ends of our pipeline normalise it:
+
+* **Where Vertex emits it.** Streaming chunks land the signature at `tool_call.extra_content.google.thought_signature` (a per-tool_call extra), NOT inside `tool_call.function`. The OpenAI Python SDK preserves the extra field but goclaw's parser reads `tool_call.function.thought_signature` (the canonical OpenAI slot). `llm-service-web`'s `VertexClient.transform_stream_chunk` lifts the value into the canonical slot on every streamed chunk so the parser here finds it where expected.
+
+* **Group semantics — one signature per thought.** When a single reasoning step produces several parallel tool_calls (e.g. three concurrent `spawn()` calls), Gemini emits the signature on the **first** tool_call only. The siblings (`index=1`, `index=2`, …) are members of the same signed thought-group and carry no individual signature. Presence of any signature in the assistant message is sufficient evidence the cycle is signed.
+
+* **Echo-back via `collapseToolCallsWithoutSig`.** `internal/providers/openai_gemini.go` rewrites assistant tool-call cycles that are fully unsigned (folds the tool results into a single user message), preserving context without triggering tool-call imitation on legacy Gemini variants that reject unsigned echo-back. The rule is "**all** tool_calls in the message lack signature" — partial groups (where the first tool_call carries a signature and siblings do not) pass through untouched.
+
+  A previous "any-empty triggers collapse" rule fired on every parallel-spawn turn, stripped the tool_calls, and re-folded the tool results as plain user messages. Gemini, on the next iteration, saw a sequence like `user(prompt) → user(three reports)` with no tool-call record connecting them, re-derived the same plan from the original prompt, and re-spawned the same N subagents — an infinite loop hit in production by the 3-subagent research prompt. Live probe of gemini-3.5-flash confirms mixed-sig cycles 200 cleanly end-to-end on echo-back; the model synthesises from the tool results instead of re-spawning.
+
+* **Detection.** `supportsThoughtSignature` (in `openai_request.go`) matches on providerType, name, apiBase, OR model containing "gemini" — robust to provider names like "llm-service" that proxy Vertex but don't expose Gemini in their identity.
+
 ### Other Providers
 
 OpenAI-compatible providers handle thinking/reasoning content as metadata. The `reasoning_content` is accumulated during streaming but does not require special passback handling — each turn's reasoning is independent.
