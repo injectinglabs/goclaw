@@ -586,6 +586,22 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 		finalReq := providers.ChatRequest{
 			Model:    model,
 			Messages: messages,
+			Options: map[string]any{
+				// Synthesis turn — the model only needs to repackage already-
+				// collected tool results into prose. On Gemini routes a
+				// dynamic thinking budget (the new default after we lifted
+				// VERTEX_THINKING_BUDGET to "let the model decide") could eat
+				// the whole response window on reasoning and leave the
+				// content empty — goclaw then surfaces "Task completed but no
+				// final response was generated" because last-chance synthesis
+				// itself returned blank. Capping the thinking level "low" on
+				// just this call keeps iter loops dynamic but guarantees the
+				// recovery pass has room for actual text. For non-Gemini
+				// providers this is either honoured natively or ignored (see
+				// `openAIWireAssistantReasoningContent` allow-list and
+				// `OptThinkingLevel` mapping in each provider).
+				providers.OptThinkingLevel: "low",
+			},
 			// Explicitly omit Tools so the model can ONLY emit text.
 		}
 		var resp *providers.ChatResponse
