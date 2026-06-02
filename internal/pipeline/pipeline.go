@@ -91,6 +91,21 @@ func (p *Pipeline) Run(ctx context.Context, state *RunState) (*RunResult, error)
 			}
 		}
 		if state.ExitCode == BreakLoop {
+			// Pre-exit barrier: when subagents were spawned this turn the
+			// pipeline owes the parent one more synthesis iteration before
+			// finalizing. The callback waits for any pending children,
+			// appends a synthetic [System Message] with their results to
+			// the message buffer, and returns true to ask the loop for one
+			// more pass. Keeping the barrier here (not in agent.Loop) means
+			// the entire turn is finalized exactly once — single
+			// FinalizeStage, single DB row, single bubble on reload.
+			//
+			// nil-safe: no callback wired (older configs / no subagent
+			// manager) means the loop exits as before.
+			if p.Deps.WaitForChildren != nil && p.Deps.WaitForChildren(ctx, state) {
+				state.ExitCode = Continue
+				continue
+			}
 			break
 		}
 		if ctx.Err() != nil {
