@@ -377,6 +377,16 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 					}
 					if chunk.Content != "" {
 						payload["content"] = chunk.Content
+						// Accumulate streamed content into task.Result so
+						// chat.activeSessions can hydrate the nested mini-
+						// chat with in-progress text on page reload (Path B,
+						// goclaw PR #203). Without this the snapshot view
+						// would only carry the FINAL Result (set at end of
+						// executeTask), and a reload mid-stream would show
+						// the subagent's tool history but empty body text.
+						sm.mu.Lock()
+						task.Result += chunk.Content
+						sm.mu.Unlock()
 					}
 					if chunk.Thinking != "" {
 						payload["thinking"] = chunk.Thinking
@@ -543,6 +553,14 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 	// "Task completed but no final response was generated" fallback was
 	// being used unnecessarily because the model COULD have answered, it
 	// just didn't realise it was supposed to.
+	//
+	// Streamed (not .Chat) so the website's nested mini-chat sees the
+	// final deliverable arrive token-by-token instead of as one 18k-char
+	// block at completion. emitEvent / parent_tool_call_id are the same
+	// the per-iteration ChatStream uses above, so chunks route to the
+	// existing subagent.chunk handler on the SPA without any wire-format
+	// change. iteration is reported as iteration+1 to make it obvious in
+	// telemetry that this was the recovery pass, not a normal loop turn.
 	if finalContent == "" && activeProvider != nil {
 		messages = append(messages, providers.Message{
 			Role: "user",
@@ -553,7 +571,37 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 			Messages: messages,
 			// Explicitly omit Tools so the model can ONLY emit text.
 		}
-		if resp, err := activeProvider.Chat(ctx, finalReq); err == nil && resp != nil && resp.Content != "" {
+		var resp *providers.ChatResponse
+		var err error
+		if task.emitEvent != nil && task.ParentToolCallID != "" {
+			resp, err = activeProvider.ChatStream(ctx, finalReq, func(chunk providers.StreamChunk) {
+				if chunk.Content == "" && chunk.Thinking == "" {
+					return
+				}
+				payload := map[string]any{
+					"parent_tool_call_id": task.ParentToolCallID,
+					"subagent_id":         task.ID,
+					"subagent_label":      task.Label,
+					"iteration":           iteration + 1,
+				}
+				if chunk.Content != "" {
+					payload["content"] = chunk.Content
+					sm.mu.Lock()
+					task.Result += chunk.Content
+					sm.mu.Unlock()
+				}
+				if chunk.Thinking != "" {
+					payload["thinking"] = chunk.Thinking
+					sm.mu.Lock()
+					task.Thinking += chunk.Thinking
+					sm.mu.Unlock()
+				}
+				task.emitEvent("subagent.chunk", payload)
+			})
+		} else {
+			resp, err = activeProvider.Chat(ctx, finalReq)
+		}
+		if err == nil && resp != nil && resp.Content != "" {
 			finalContent = resp.Content
 			if resp.Usage != nil {
 				sm.mu.Lock()
@@ -563,6 +611,10 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 			}
 			slog.Info("subagent last-chance synthesis recovered output",
 				"id", task.ID, "chars", len(finalContent))
+		} else if err != nil {
+			slog.Warn("subagent last-chance synthesis failed",
+				"id", task.ID, "provider", activeProvider.Name(),
+				"model", model, "error", err)
 		}
 	}
 
