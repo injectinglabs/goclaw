@@ -63,6 +63,25 @@ func (p *OpenAIProvider) doRequest(ctx context.Context, body any) (io.ReadCloser
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		retryAfter := ParseRetryAfter(resp.Header.Get("Retry-After"))
+		// DIAG: dump the request body (truncated) and the actor headers so we
+		// can correlate WAF/upstream 403s with the actual payload the model
+		// produced. Common offenders: long prompts with strings that look
+		// like SQL injection, base64 blobs that trip content filters, or
+		// model-override fields the upstream doesn't recognise.
+		reqBodyPreview := string(data)
+		if len(reqBodyPreview) > 1500 {
+			reqBodyPreview = reqBodyPreview[:1500] + "…(truncated)"
+		}
+		actorPreview := actorHeadersFromCtx(ctx)
+		slog.Warn("provider: http error",
+			"provider", p.name,
+			"status", resp.StatusCode,
+			"url", p.apiBase+p.chatPath,
+			"resp_body", string(respBody),
+			"req_body_preview", reqBodyPreview,
+			"actor_user", actorPreview["X-Actor-User-ID"],
+			"actor_org", actorPreview["X-Actor-Org-ID"],
+		)
 		return nil, &HTTPError{
 			Status:     resp.StatusCode,
 			Body:       fmt.Sprintf("%s: %s", p.name, string(respBody)),

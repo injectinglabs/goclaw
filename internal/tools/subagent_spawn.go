@@ -181,6 +181,15 @@ func (sm *SubagentManager) RunSync(
 		OriginRootSpanID: tracing.ParentSpanIDFromContext(ctx),
 		CreatedAt:        time.Now().UnixMilli(),
 		spawnConfig:      cfg,
+		// Wire the parent's WS subscriber + spawn tool_call.id so the
+		// sync path also surfaces subagent.run.started / subagent.chunk /
+		// subagent.run.completed events to the UI. Without these the
+		// nested mini-chat under the spawn chip renders empty for sync
+		// subagents and the user sees no progress until the parent's
+		// tool.result arrives (which for a 60s research task is way too
+		// late). Mirror of what Spawn() does in the async path.
+		ParentToolCallID: ParentToolCallIDFromCtx(ctx),
+		emitEvent:        ToolEventEmitterFromCtx(ctx),
 	}
 	if sm.taskStore != nil {
 		subTask.dbID = store.GenNewID()
