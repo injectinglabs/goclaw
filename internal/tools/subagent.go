@@ -81,6 +81,16 @@ type SubagentTask struct {
 	// chip and renders a live progress timeline. Empty for sync run paths
 	// (RunSync) that don't have a UI subscriber.
 	ParentToolCallID string `json:"parentToolCallId,omitempty"`
+	// ParentRunID is the agent Loop.Run that issued this spawn. Stored so
+	// the barrier (loop_barrier.go) can wait on ONLY the children of the
+	// current run instead of every task under the parent agent. Without
+	// this scope two parallel chats on the same agent share a global task
+	// list and each chat's barrier blocks on the other chat's children —
+	// breaks multi-chat parallelism even though chat.send itself permits
+	// concurrent runs per session. Mirrors the structured-concurrency
+	// convention LangGraph / Temporal / Claude Agent SDK use: children
+	// scoped to the parent execution, not to the agent definition.
+	ParentRunID string `json:"parentRunId,omitempty"`
 	// emitEvent (unexported, json:"-") is the parent run's tool-event
 	// emitter, captured from context at spawn time. Lets the subagent's
 	// goroutine publish on the SAME WS subscription the parent is using —

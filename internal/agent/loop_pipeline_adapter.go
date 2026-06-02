@@ -232,7 +232,7 @@ func (l *Loop) makePipelineBarrier(req *RunRequest) func(ctx context.Context, st
 		if passes >= barrierMaxPasses {
 			return false
 		}
-		systemMsg, newConsumed, drained := l.drainSpawnedChildren(ctx, consumedIDs)
+		systemMsg, newConsumed, drained := l.drainSpawnedChildren(ctx, req.RunID, consumedIDs)
 		if !drained {
 			return false
 		}

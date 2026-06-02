@@ -44,6 +44,11 @@ const (
 	// can't reach the UI — there's no canonical channel from a child
 	// goroutine back to the parent's tool-event stream.
 	ctxToolEventEmitter toolContextKey = "tool_event_emitter"
+	// ctxToolRunID carries the current agent Loop.Run id so spawn-class
+	// tools can record it on the spawned SubagentTask. Without this the
+	// barrier defaults to agent-scope waits and parallel chats on the
+	// same agent block each other's children — see SubagentTask.ParentRunID.
+	ctxToolRunID toolContextKey = "tool_run_id"
 )
 
 // ToolEventEmitter is the function shape the parent loop uses to broadcast
@@ -212,6 +217,23 @@ func WithRunKind(ctx context.Context, kind string) context.Context {
 // RunKindFromCtx returns the run kind from context, or empty string.
 func RunKindFromCtx(ctx context.Context) string {
 	v, _ := ctx.Value(ctxRunKind).(string)
+	return v
+}
+
+// WithToolRunID stamps the current agent Loop.Run id onto the tool
+// execution context so spawn-class tools can record it on the spawned
+// subagent. Lets the barrier wait on ONLY this run's children instead
+// of the agent's global task pool — see SubagentTask.ParentRunID for
+// motivation. Always set by the agent layer (loop_pipeline_tool_callbacks.go
+// stamping seam) before tools execute.
+func WithToolRunID(ctx context.Context, runID string) context.Context {
+	return context.WithValue(ctx, ctxToolRunID, runID)
+}
+
+// ToolRunIDFromCtx returns the agent run id from context, or empty string
+// when the caller is a non-agent path (cron / announce / HTTP).
+func ToolRunIDFromCtx(ctx context.Context) string {
+	v, _ := ctx.Value(ctxToolRunID).(string)
 	return v
 }
 

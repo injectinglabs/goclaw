@@ -69,6 +69,13 @@ func (l *Loop) makeExecuteToolCall(req *RunRequest, bridgeRS *runState) func(ctx
 			// subagent_exec.go's tool loop for the emit sites.
 			execCtx := tools.WithParentToolCallID(ctx, tc.ID)
 			execCtx = tools.WithToolEventEmitter(execCtx, l.makeToolEventEmitterForRun(req))
+			// Stamp the agent run id so spawn-class tools can record it on
+			// the spawned SubagentTask. The barrier (loop_barrier.go) then
+			// waits on ONLY this run's children, not every task under the
+			// agent — required for parallel chats on the same agent
+			// (otherwise each chat's barrier blocks on the other chat's
+			// in-flight subagents).
+			execCtx = tools.WithToolRunID(execCtx, req.RunID)
 			result = l.tools.ExecuteWithContext(execCtx, registryName, tc.Arguments,
 				req.Channel, req.ChatID, req.PeerKind, req.SessionKey, asyncCB)
 		}
@@ -138,6 +145,13 @@ func (l *Loop) makeExecuteToolRaw(req *RunRequest) func(ctx context.Context, tc 
 			// Same live-progress ctx stamping as the sequential path.
 			execCtx := tools.WithParentToolCallID(ctx, tc.ID)
 			execCtx = tools.WithToolEventEmitter(execCtx, l.makeToolEventEmitterForRun(req))
+			// Stamp the agent run id so spawn-class tools can record it on
+			// the spawned SubagentTask. The barrier (loop_barrier.go) then
+			// waits on ONLY this run's children, not every task under the
+			// agent — required for parallel chats on the same agent
+			// (otherwise each chat's barrier blocks on the other chat's
+			// in-flight subagents).
+			execCtx = tools.WithToolRunID(execCtx, req.RunID)
 			result = l.tools.ExecuteWithContext(execCtx, registryName, tc.Arguments,
 				req.Channel, req.ChatID, req.PeerKind, req.SessionKey, asyncCB)
 		}

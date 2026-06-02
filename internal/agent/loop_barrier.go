@@ -39,21 +39,24 @@ const barrierWaitTimeoutSec = 600
 // queue path.
 func (l *Loop) drainSpawnedChildren(
 	ctx context.Context,
+	runID string,
 	consumedIDs map[string]struct{},
 ) (systemMessage string, newConsumed []string, drained bool) {
 	if l.subagentMgr == nil || !l.subagentMgr.BarrierMode() {
 		return "", nil, false
 	}
 
-	// Fast path: when no tasks were ever registered for this parent we
-	// skip the WaitForChildren call entirely. Its first poll tick is
+	// Fast path: when no tasks were ever registered for THIS RUN we skip
+	// the WaitForChildrenByRunID call entirely. Its first poll tick is
 	// 500 ms, which would otherwise add unconditional latency to every
-	// chat turn that doesn't use spawn (the common case).
-	if len(l.subagentMgr.ListTasks(l.id)) == 0 {
+	// chat turn that doesn't use spawn (the common case). Run-scoped
+	// list — not agent-scoped — so parallel chats on the same agent
+	// don't make each other appear "has children to wait on".
+	if len(l.subagentMgr.ListTasksByRunID(runID)) == 0 {
 		return "", nil, false
 	}
 
-	tasks, _ := l.subagentMgr.WaitForChildren(ctx, l.id, barrierWaitTimeoutSec)
+	tasks, _ := l.subagentMgr.WaitForChildrenByRunID(ctx, runID, barrierWaitTimeoutSec)
 	if len(tasks) == 0 {
 		return "", nil, false
 	}
