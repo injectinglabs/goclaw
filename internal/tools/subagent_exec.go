@@ -325,7 +325,7 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 			Tools:    toolsReg.ProviderDefs(),
 			Model:    model,
 			Options: map[string]any{
-				"max_tokens":  4096,
+				"max_tokens":  task.spawnConfig.MaxTokens,
 				"temperature": 0.5,
 			},
 		}
