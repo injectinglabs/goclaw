@@ -406,6 +406,13 @@ func runGateway() {
 	if mediaStore != nil {
 		chatMethods.SetMediaStore(mediaStore)
 	}
+	// Wire subagent manager so chat.activeSessions can enrich each
+	// run snapshot with live in-memory subagent state (text + thinking
+	// + tool history). Without this the SPA's nested mini-chat shows
+	// empty after a page reload until the next live event arrives.
+	if subagentMgr != nil {
+		chatMethods.SetSubagentManager(subagentMgr)
+	}
 
 	// Phase 3: Agent hooks RPC methods (hooks.list/create/update/delete/toggle/test/history).
 	if hs, ok := pgStores.Hooks.(hooks.HookStore); ok && hs != nil {
