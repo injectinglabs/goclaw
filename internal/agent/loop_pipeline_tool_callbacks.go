@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -311,6 +312,25 @@ func (l *Loop) makeAsyncToolCallback(req *RunRequest, emitRun func(AgentEvent), 
 			// same key for the unsanitised full result); keep both for
 			// symmetry so the chip's body shows the full deliverable.
 			payload["content"] = result.ForLLM
+		}
+		// Mirror the live-media attach the sync tool-result path does
+		// (loop_tools.go). For spawn this is the canonical "subagent
+		// produced N files" delivery — parent's nested chip updates to
+		// include the actual download buttons instead of just text.
+		if len(result.Media) > 0 {
+			live := make([]map[string]string, 0, len(result.Media))
+			for _, mf := range result.Media {
+				ct := mf.MimeType
+				if ct == "" {
+					ct = mimeFromExt(filepath.Ext(mf.Path))
+				}
+				live = append(live, map[string]string{
+					"path":      mf.Path,
+					"filename":  mf.Filename,
+					"mime_type": ct,
+				})
+			}
+			payload["media"] = live
 		}
 		emitRun(AgentEvent{
 			Type:    protocol.AgentEventToolResult,
