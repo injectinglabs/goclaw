@@ -101,6 +101,7 @@ func (sm *SubagentManager) Spawn(
 		CreatedAt:         time.Now().UnixMilli(),
 		spawnConfig:       cfg,
 		ParentToolCallID:  ParentToolCallIDFromCtx(ctx),
+		ParentRunID:       ToolRunIDFromCtx(ctx),
 		emitEvent:         ToolEventEmitterFromCtx(ctx),
 	}
 	// Detach from parent's cancellation chain so subagent survives after parent run completes.

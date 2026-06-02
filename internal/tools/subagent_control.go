@@ -247,6 +247,66 @@ func (sm *SubagentManager) WaitForChildren(ctx context.Context, parentID string,
 	}
 }
 
+// ListTasksByRunID returns every task spawned under the given agent run.
+// Mirrors ListTasks(parentID) but matches the structured-concurrency
+// scope: one Loop.Run owns its children, so parallel runs on the same
+// agent (multi-chat per user) don't interfere with each other's
+// barriers. Empty runID returns no tasks — callers should fall back to
+// ListTasks(parentID) when the run id isn't known (announce / cron /
+// HTTP callers that don't propagate ctxToolRunID).
+func (sm *SubagentManager) ListTasksByRunID(runID string) []*SubagentTask {
+	if runID == "" {
+		return nil
+	}
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	var result []*SubagentTask
+	for _, t := range sm.tasks {
+		if t.ParentRunID == runID {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+// WaitForChildrenByRunID is the run-scoped variant of WaitForChildren.
+// Used by the agent loop's pre-finalize barrier so a parent run waits
+// for ONLY the subagents it itself spawned, not every task under the
+// same parent agent. Without this scope two parallel chats on the
+// same agent share a global task list and each chat's barrier
+// blocks on the other chat's children. Same poll cadence + timeout
+// semantics as the legacy WaitForChildren — only the task filter
+// differs.
+func (sm *SubagentManager) WaitForChildrenByRunID(ctx context.Context, runID string, timeoutSec int) ([]*SubagentTask, error) {
+	if timeoutSec <= 0 {
+		timeoutSec = 300
+	}
+	deadline := time.After(time.Duration(timeoutSec) * time.Second)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return sm.ListTasksByRunID(runID), ctx.Err()
+		case <-deadline:
+			return sm.ListTasksByRunID(runID), fmt.Errorf("timeout after %ds waiting for children", timeoutSec)
+		case <-ticker.C:
+			tasks := sm.ListTasksByRunID(runID)
+			allDone := true
+			for _, t := range tasks {
+				if t.Status == TaskStatusRunning {
+					allDone = false
+					break
+				}
+			}
+			if allDone {
+				return tasks, nil
+			}
+		}
+	}
+}
+
 func generateSubagentID() string {
 	b := make([]byte, 8)
 	rand.Read(b)
