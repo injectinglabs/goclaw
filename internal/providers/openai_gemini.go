@@ -3,12 +3,22 @@ package providers
 import "strings"
 
 // collapseToolCallsWithoutSig rewrites tool_call cycles that lack thought_signature
-// (required by Gemini 2.5+). Gemini requires thought_signature echoed back on every
-// tool_call; models that don't return it cause HTTP 400 if sent as-is.
+// (required by Gemini 2.5+). Some Gemini variants reject tool_call echo-back unless
+// the cycle is at least partially signed; the assistant's tool_calls are stripped
+// and the corresponding tool-result messages folded into a single user message with
+// the tool output content. This preserves context without using a format that
+// triggers tool-call imitation.
 //
-// The assistant's tool_calls are stripped, and the corresponding tool-result messages
-// are folded into a single user message with the tool output content. This preserves
-// context for the model without using a format that triggers tool-call imitation.
+// Group semantics: Gemini emits the signature once per "thought" — when a single
+// thought produces several parallel tool_calls (e.g. three concurrent spawn() calls
+// after one reasoning step), only the FIRST tool_call carries the signature; the
+// siblings are part of the same signed group. So we collapse only when the assistant
+// message has NO signed tool_call at all. The previous "any-empty triggers collapse"
+// rule fired on every parallel-spawn turn and stripped the tool_calls — Gemini
+// then saw the tool reports arriving as plain user messages out of nowhere and
+// re-spawned indefinitely (the infinite-loop bug hit by the 3-subagent research
+// prompt; live probe of gemini-3.5-flash confirms the API now accepts mixed-sig
+// cycles end-to-end).
 func collapseToolCallsWithoutSig(msgs []Message) []Message {
 	// Collect tool_call IDs that need collapsing.
 	collapseIDs := make(map[string]bool)
@@ -16,8 +26,8 @@ func collapseToolCallsWithoutSig(msgs []Message) []Message {
 		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
 			continue
 		}
+		hasAnySig := false
 		for _, tc := range m.ToolCalls {
-			// If meta is nil or signature is empty/whitespace, collapse the whole message's tool cycle.
 			// Checks both snake_case and camelCase for cross-proxy reliability.
 			sig := ""
 			if tc.Metadata != nil {
@@ -26,12 +36,14 @@ func collapseToolCallsWithoutSig(msgs []Message) []Message {
 					sig = tc.Metadata["thoughtSignature"]
 				}
 			}
-
-			if strings.TrimSpace(sig) == "" {
-				for _, tc2 := range m.ToolCalls {
-					collapseIDs[tc2.ID] = true
-				}
+			if strings.TrimSpace(sig) != "" {
+				hasAnySig = true
 				break
+			}
+		}
+		if !hasAnySig {
+			for _, tc := range m.ToolCalls {
+				collapseIDs[tc.ID] = true
 			}
 		}
 	}
