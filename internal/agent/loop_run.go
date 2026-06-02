@@ -162,9 +162,75 @@ func (l *Loop) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 		l.traceCollector.SetTraceStatus(ctx, traceID, store.TraceStatusRunning)
 	}
 
-	// V3 pipeline path (always enabled)
+	// V3 pipeline path (always enabled).
+	//
+	// Barrier mode (when l.subagentMgr.BarrierMode() is true): we call the
+	// pipeline up to `barrierMaxPasses + 1` times to drain spawned children
+	// into the parent's run before finalizing. Pass 0 is the original user
+	// request; passes 1+ inject a synthetic [System Message] block carrying
+	// each batch of newly-completed subagent results. This replaces the
+	// legacy announce-queue pseudo-run (separate RunID, separate stream) —
+	// keeping everything under one RunID so the website's chunk handler,
+	// Stop button, and resumable-stream replay all line up naturally.
+	//
+	// drainSpawnedChildren is nil-safe and returns drained=false on the
+	// first call when no subagents were spawned, so the legacy path is the
+	// fast default for prompts that don't use spawn at all.
 	{
-		result, err := l.runViaPipeline(ctx, req)
+		var result *RunResult
+		var err error
+		consumedIDs := map[string]struct{}{}
+		runReq := req
+		for pass := 0; pass <= barrierMaxPasses; pass++ {
+			var passResult *RunResult
+			passResult, err = l.runViaPipeline(ctx, runReq)
+			if err != nil {
+				break
+			}
+			if pass == 0 {
+				result = passResult
+			} else if result != nil && passResult != nil {
+				// Synthesis pass: take new content/thinking; sum usage
+				// across passes so billing reflects total LLM work.
+				result.Content = passResult.Content
+				result.Thinking = passResult.Thinking
+				result.Iterations += passResult.Iterations
+				if len(passResult.Media) > 0 {
+					result.Media = append(result.Media, passResult.Media...)
+				}
+				if passResult.Usage != nil {
+					if result.Usage == nil {
+						u := *passResult.Usage
+						result.Usage = &u
+					} else {
+						result.Usage.PromptTokens += passResult.Usage.PromptTokens
+						result.Usage.CompletionTokens += passResult.Usage.CompletionTokens
+						result.Usage.TotalTokens += passResult.Usage.TotalTokens
+						result.Usage.CacheCreationTokens += passResult.Usage.CacheCreationTokens
+						result.Usage.CacheReadTokens += passResult.Usage.CacheReadTokens
+					}
+				}
+			}
+			if pass >= barrierMaxPasses {
+				break
+			}
+			systemMsg, newConsumed, drained := l.drainSpawnedChildren(ctx, consumedIDs)
+			if !drained {
+				break
+			}
+			for _, id := range newConsumed {
+				consumedIDs[id] = struct{}{}
+			}
+			logBarrierPass(req.RunID, pass+1, len(newConsumed), len(consumedIDs))
+			// Next-pass request: same SessionKey + RunID + tenancy; just
+			// swap the user message for the synthetic [System Message] block
+			// and suppress its persistence as a visible user-role row.
+			runReq = req
+			runReq.Message = systemMsg
+			runReq.HideInput = true
+			runReq.Media = nil
+			runReq.ForwardMedia = nil
+		}
 		// Tracing + events handled below via the same finalize path
 		if err != nil {
 			if agentSpanID != uuid.Nil {

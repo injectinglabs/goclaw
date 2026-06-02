@@ -61,7 +61,16 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 	// Announce result to parent via bus (matching TS subagent-announce.ts pattern).
 	// The announce goes through the parent agent's session so the agent can
 	// reformulate the result for the user.
-	if sm.msgBus != nil && task.OriginChannel != "" {
+	//
+	// Barrier-mode skip: when the agent loop is configured to consume children
+	// via a pre-finalize WaitForChildren pass (sm.barrierMode), the announce
+	// queue would duplicate that synthesis as a separate run. The barrier owns
+	// reformulation in that mode — finished tasks stay in sm.tasks until the
+	// barrier drains them.
+	if sm.barrierMode {
+		// Still invoke the callback below so the spawn tool's pending
+		// "accepted" chip can flip to its final result in the parent UI.
+	} else if sm.msgBus != nil && task.OriginChannel != "" {
 		elapsed := time.Since(time.UnixMilli(task.CreatedAt))
 
 		item := AnnounceQueueItem{

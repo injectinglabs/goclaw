@@ -122,6 +122,13 @@ type Loop struct {
 	memoryCfg    *config.MemoryConfig
 	sandboxCfg   *sandbox.Config
 
+	// subagentMgr is the in-process SubagentManager so Loop.Run can drain
+	// spawned children before emitting run.completed. Nil-safe: when the
+	// manager isn't wired (older configurations, lite edition) the run still
+	// completes normally and the legacy announce queue handles the async
+	// fan-out fallback.
+	subagentMgr *tools.SubagentManager
+
 	// v3 memory/retrieval flags removed — always true at runtime.
 	// Memory flush runs if callback != nil; auto-inject runs if AutoInjector != nil.
 	autoInjector memory.AutoInjector // v3 L0 memory auto-inject (nil = disabled)
@@ -346,6 +353,11 @@ type LoopConfig struct {
 	MemoryCfg    *config.MemoryConfig
 	SandboxCfg   *sandbox.Config
 
+	// SubagentMgr is required when the pre-finalize barrier is in use
+	// (BarrierMode on the manager). When nil the loop skips the barrier
+	// entirely and falls back to the legacy announce queue path.
+	SubagentMgr *tools.SubagentManager
+
 	// ModelRegistry resolves provider/model → ModelSpec for per-run context
 	// window lookup. Nil = fall back to static LoopConfig.ContextWindow.
 	ModelRegistry providers.ModelRegistry
@@ -546,6 +558,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		autoInjector:           cfg.AutoInjector,
 		restrictToWs:           cfg.RestrictToWs,
 		subagentsCfg:           cfg.SubagentsCfg,
+		subagentMgr:            cfg.SubagentMgr,
 		memoryCfg:              cfg.MemoryCfg,
 		sandboxCfg:             cfg.SandboxCfg,
 		eventPub:               cfg.Bus,
