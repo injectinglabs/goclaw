@@ -270,13 +270,6 @@ func (l *Loop) recordToolMetric(ctx context.Context, sessionKey, toolName string
 func (l *Loop) makeToolEventEmitterForRun(req *RunRequest) tools.ToolEventEmitter {
 	emitRun := makeToolEmitRun(l, req)
 	return func(eventType string, payload map[string]any) {
-		// Sign media URLs before broadcast. The tools package can't
-		// import internal/http (would cycle: http → tools), so subagent
-		// emit sites ship raw object keys in `media[].path` and the
-		// agent-layer emitter is the canonical seam where signing
-		// happens. Same /v1/files/...?ft=... shape as sessions.preview
-		// so the SPA's existing rendering code works unchanged.
-		signMediaPathsInPayload(payload)
 		emitRun(AgentEvent{
 			Type:    eventType,
 			AgentID: l.id,
