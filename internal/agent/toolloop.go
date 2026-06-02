@@ -27,9 +27,15 @@ const (
 	// Uniqueness ratio threshold: above this = exploration, below = stuck.
 	readOnlyUniquenessThreshold = 0.6
 
-	// Same-result: same tool returning identical results with different args.
-	sameResultWarning  = 4
-	sameResultCritical = 6
+	// Same-result: same tool returning identical results with DIFFERENT args.
+	// This is a strong futile-loop signal (varying input, same output) — legit
+	// flows rarely hit it (refresh_page_content, the known exception, is skipped
+	// in detectSameResult). Kept tight so a model that ignores a tool's "stop"
+	// result (e.g. spamming generate_image past its cooldown) is halted after a
+	// few calls instead of ~6. Does NOT affect same-args repeats (those use the
+	// separate toolLoop*Threshold in detect()).
+	sameResultWarning  = 2
+	sameResultCritical = 3
 )
 
 // mutatingTools are tools that indicate real progress (write/create/action).
