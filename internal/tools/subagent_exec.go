@@ -509,8 +509,13 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 
 			// LIVE progress: emit tool.result so the website flips the
 			// nested chip from running to done/error in real time.
+			// Carries `media` (path + filename + mime) when the subagent's
+			// tool created files, so the SPA can render attachment chips
+			// on the streaming bubble live — same wire shape as parent's
+			// tool.result (see loop_tools.go). Without it, files created
+			// inside the subagent only appear after run.completed.
 			if task.emitEvent != nil && task.ParentToolCallID != "" {
-				task.emitEvent("tool.result", map[string]any{
+				payload := map[string]any{
 					"name":                tc.Name,
 					"id":                  tc.ID,
 					"is_error":            result.IsError,
@@ -518,7 +523,19 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 					"parent_tool_call_id": task.ParentToolCallID,
 					"subagent_id":         task.ID,
 					"subagent_label":      task.Label,
-				})
+				}
+				if len(result.Media) > 0 {
+					live := make([]map[string]string, 0, len(result.Media))
+					for _, mf := range result.Media {
+						live = append(live, map[string]string{
+							"path":      mf.Path,
+							"filename":  mf.Filename,
+							"mime_type": mf.MimeType,
+						})
+					}
+					payload["media"] = live
+				}
+				task.emitEvent("tool.result", payload)
 			}
 
 			// Capture media file paths from tool results (e.g. image generation).
