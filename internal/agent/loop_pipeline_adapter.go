@@ -241,11 +241,16 @@ func (l *Loop) makePipelineBarrier(req *RunRequest) func(ctx context.Context, st
 		}
 		passes++
 		logBarrierPass(req.RunID, passes, len(newConsumed), len(consumedIDs))
-		// Append the synthetic [System Message] to the pipeline's pending
-		// message buffer. ThinkStage will pick it up on the next
-		// iteration and feed it to the LLM, which then synthesizes a
-		// final user-facing reply.
-		state.Messages.AppendPending(providers.Message{
+		// Append the synthetic [System Message] to the EPHEMERAL buffer:
+		// visible to the LLM via state.Messages.All() on the synthesis
+		// iteration, but excluded from FlushPending → never reaches the
+		// session store. Persisting it would leave a stray `role:user`
+		// row in DB between the assistant's spawn turn and its synthesis
+		// turn, which breaks UI grouping on page reload (history loader
+		// renders user-role rows as separate user bubbles, so the model's
+		// reply gets split into two assistant bubbles around the fake
+		// user turn).
+		state.Messages.AppendEphemeral(providers.Message{
 			Role:    "user",
 			Content: systemMsg,
 		})
