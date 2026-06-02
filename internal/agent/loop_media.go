@@ -3,7 +3,79 @@ package agent
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
 )
+
+// buildLiveMediaPayload converts tool-result MediaFiles into the
+// shipping shape used by live tool.result events. Paths are signed to
+// /v1/files/...?ft=... (same as sessions.preview / chat.history) so the
+// SPA can hit them with no extra round-trip. Returns nil when the input
+// is empty — callers should skip the map key entirely in that case so
+// the omitempty contract on the wire stays clean.
+//
+// Used by the parent agent loop's tool-result sites. The subagent
+// (lives in internal/tools) can't import http to sign — it ships raw
+// paths instead and signMediaPathsInPayload rewrites them at the
+// agent's ToolEventEmitter seam before broadcast.
+func buildLiveMediaPayload(media []bus.MediaFile) []map[string]string {
+	if len(media) == 0 {
+		return nil
+	}
+	secret := httpapi.FileSigningKey()
+	out := make([]map[string]string, 0, len(media))
+	for _, mf := range media {
+		ct := mf.MimeType
+		if ct == "" {
+			ct = mimeFromExt(filepath.Ext(mf.Path))
+		}
+		out = append(out, map[string]string{
+			"path":      httpapi.SignMediaPath(mf.Path, secret),
+			"filename":  mf.Filename,
+			"mime_type": ct,
+		})
+	}
+	return out
+}
+
+// signMediaPathsInPayload looks for a `media` array of objects with a
+// `path` key on the event payload and signs each path in-place. Used by
+// makeToolEventEmitterForRun so subagent tool.result events (emitted
+// from internal/tools, which can't import http) still ship signed
+// URLs. No-op when the payload has no media or it's already signed
+// (SignMediaPath strips stale ?ft= and re-signs, so double-sign is
+// safe but skipping is cheaper).
+func signMediaPathsInPayload(payload map[string]any) {
+	if payload == nil {
+		return
+	}
+	raw, ok := payload["media"]
+	if !ok {
+		return
+	}
+	list, ok := raw.([]map[string]string)
+	if !ok {
+		return
+	}
+	if len(list) == 0 {
+		return
+	}
+	secret := httpapi.FileSigningKey()
+	for _, item := range list {
+		p := item["path"]
+		if p == "" {
+			continue
+		}
+		// Skip if already signed — parent's tool.result events come in
+		// pre-signed via buildLiveMediaPayload. Subagent's path starts
+		// raw (no /v1/files/ prefix yet).
+		if strings.Contains(p, "?ft=") {
+			continue
+		}
+		item["path"] = httpapi.SignMediaPath(p, secret)
+	}
+}
 
 // parseMediaResult extracts a MediaResult from a tool result string containing "MEDIA:" prefix.
 // Handles formats: "MEDIA:/path/to/file" and "[[audio_as_voice]]\nMEDIA:/path/to/file".
