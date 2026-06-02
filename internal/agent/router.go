@@ -552,6 +552,39 @@ type ActiveRunSnapshot struct {
 	Content    string             `json:"content,omitempty"`
 	Thinking   string             `json:"thinking,omitempty"`
 	ToolCalls  []ToolCallSnapshot `json:"toolCalls,omitempty"`
+	// Subagents carries in-memory state for any subagents this run has
+	// spawned, keyed by parent spawn tool_call.id. Populated by the chat
+	// methods handler after ActiveSessionsForUser returns — Router itself
+	// stays decoupled from the subagent layer. Lets the SPA rehydrate the
+	// nested mini-chat (text + thinking + tool history) on page reload
+	// without waiting for new live events.
+	Subagents map[string]SubagentSnapshot `json:"subagents,omitempty"`
+}
+
+// SubagentSnapshot mirrors the GoclawSubagentPreviewEntry shape the
+// website already consumes from sessions.preview, so the SPA can reuse
+// one hydration path for both live-active and finalised subagents.
+type SubagentSnapshot struct {
+	ID           string                     `json:"id"`
+	Label        string                     `json:"label,omitempty"`
+	Task         string                     `json:"task,omitempty"`
+	Model        string                     `json:"model,omitempty"`
+	Status       string                     `json:"status"`
+	Content      string                     `json:"content,omitempty"`
+	Thinking     string                     `json:"thinking,omitempty"`
+	ToolHistory  []SubagentToolHistoryEntry `json:"tool_history,omitempty"`
+	Iterations   int                        `json:"iterations,omitempty"`
+	InputTokens  int64                      `json:"input_tokens,omitempty"`
+	OutputTokens int64                      `json:"output_tokens,omitempty"`
+}
+
+// SubagentToolHistoryEntry is one step in SubagentSnapshot.ToolHistory.
+// Snake-case tags match sessions.preview's emitted shape so the website
+// reuses one TS type for both transports.
+type SubagentToolHistoryEntry struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
 }
 
 // ActiveSessionsForUser returns the active runs owned by the given user

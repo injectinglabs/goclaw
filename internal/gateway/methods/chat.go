@@ -42,6 +42,12 @@ type ChatMethods struct {
 	// Nil on single-instance/FSBackend deploys — boundary still strips
 	// signed-URL wrappers, just skips the S3 fetch step.
 	mediaStore *mediastore.Store
+	// subagentMgr is consulted by handleActiveSessions to enrich the
+	// reload-snapshot with in-memory state for any subagents still
+	// streaming under each active run. Nil-safe; when unset the
+	// snapshot ships without the .subagents map (back-compat with
+	// pre-Path-B clients/servers).
+	subagentMgr *tools.SubagentManager
 }
 
 func NewChatMethods(agents *agent.Router, sess store.SessionStore, cfg *config.Config, rl *gateway.RateLimiter, eventBus bus.EventPublisher) *ChatMethods {
@@ -71,6 +77,14 @@ func (m *ChatMethods) SetPostTurnProcessor(pt tools.PostTurnProcessor) {
 // current "ENOENT on sibling-instance upload" behaviour.
 func (m *ChatMethods) SetMediaStore(s *mediastore.Store) {
 	m.mediaStore = s
+}
+
+// SetSubagentManager wires the subagent manager so handleActiveSessions
+// can attach live in-memory subagent state to each ActiveRunSnapshot
+// (text + thinking + tool history per parent spawn tool_call.id).
+// Nil-safe; without it the snapshot ships without a .subagents map.
+func (m *ChatMethods) SetSubagentManager(sm *tools.SubagentManager) {
+	m.subagentMgr = sm
 }
 
 // Register adds chat methods to the router.
@@ -138,9 +152,74 @@ func (m *ChatMethods) handleActiveSessions(ctx context.Context, client *gateway.
 	if snapshots == nil {
 		snapshots = []agent.ActiveRunSnapshot{}
 	}
+
+	// Path B reload-recovery: attach in-memory subagent state to each
+	// run's snapshot so the SPA can rehydrate the nested mini-chat
+	// (text + thinking + tool steps) symmetrically with the parent's
+	// own bubble. Without this, after a page reload the parent's bubble
+	// shows but the subagent panel is empty until the next live event
+	// from each child arrives (sometimes never, if the child already
+	// finished mid-stream). Keyed by parent spawn tool_call.id so the
+	// frontend can attach each snapshot to its existing chip.
+	//
+	// One pass over the in-memory task map per call — bounded by the
+	// active-subagent budget and only fires on WS connect/reconnect,
+	// so the cost is negligible.
+	if m.subagentMgr != nil && len(snapshots) > 0 {
+		viewsByPTC := m.subagentMgr.SnapshotsByParentToolCallID()
+		if len(viewsByPTC) > 0 {
+			for i := range snapshots {
+				snap := &snapshots[i]
+				var subagents map[string]agent.SubagentSnapshot
+				for _, tc := range snap.ToolCalls {
+					view, ok := viewsByPTC[tc.ID]
+					if !ok {
+						continue
+					}
+					if subagents == nil {
+						subagents = make(map[string]agent.SubagentSnapshot, len(snap.ToolCalls))
+					}
+					subagents[tc.ID] = toAgentSubagentSnapshot(view)
+				}
+				if len(subagents) > 0 {
+					snap.Subagents = subagents
+				}
+			}
+		}
+	}
+
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"runs": snapshots,
 	}))
+}
+
+// toAgentSubagentSnapshot maps the tools-package value view onto the
+// agent-package wire type. Kept in chat.go (not agent.go) so the agent
+// package doesn't have to know about tools internals — Router stays
+// decoupled from the subagent layer and this handler is the only seam.
+func toAgentSubagentSnapshot(view tools.SubagentSnapshotView) agent.SubagentSnapshot {
+	out := agent.SubagentSnapshot{
+		ID:           view.ID,
+		Label:        view.Label,
+		Task:         view.Task,
+		Model:        view.Model,
+		Status:       view.Status,
+		Content:      view.Result,
+		Thinking:     view.Thinking,
+		InputTokens:  view.TotalInputTokens,
+		OutputTokens: view.TotalOutputTokens,
+	}
+	if len(view.ToolHistory) > 0 {
+		out.ToolHistory = make([]agent.SubagentToolHistoryEntry, 0, len(view.ToolHistory))
+		for _, rec := range view.ToolHistory {
+			out.ToolHistory = append(out.ToolHistory, agent.SubagentToolHistoryEntry{
+				Name:       rec.Name,
+				Status:     rec.Status,
+				DurationMs: rec.DurationMs,
+			})
+		}
+	}
+	return out
 }
 
 // handleSessionStatus returns the running state and activity for a session.
