@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -271,6 +270,13 @@ func (l *Loop) recordToolMetric(ctx context.Context, sessionKey, toolName string
 func (l *Loop) makeToolEventEmitterForRun(req *RunRequest) tools.ToolEventEmitter {
 	emitRun := makeToolEmitRun(l, req)
 	return func(eventType string, payload map[string]any) {
+		// Sign media URLs before broadcast. The tools package can't
+		// import internal/http (would cycle: http → tools), so subagent
+		// emit sites ship raw object keys in `media[].path` and the
+		// agent-layer emitter is the canonical seam where signing
+		// happens. Same /v1/files/...?ft=... shape as sessions.preview
+		// so the SPA's existing rendering code works unchanged.
+		signMediaPathsInPayload(payload)
 		emitRun(AgentEvent{
 			Type:    eventType,
 			AgentID: l.id,
@@ -317,19 +323,7 @@ func (l *Loop) makeAsyncToolCallback(req *RunRequest, emitRun func(AgentEvent), 
 		// (loop_tools.go). For spawn this is the canonical "subagent
 		// produced N files" delivery — parent's nested chip updates to
 		// include the actual download buttons instead of just text.
-		if len(result.Media) > 0 {
-			live := make([]map[string]string, 0, len(result.Media))
-			for _, mf := range result.Media {
-				ct := mf.MimeType
-				if ct == "" {
-					ct = mimeFromExt(filepath.Ext(mf.Path))
-				}
-				live = append(live, map[string]string{
-					"path":      mf.Path,
-					"filename":  mf.Filename,
-					"mime_type": ct,
-				})
-			}
+		if live := buildLiveMediaPayload(result.Media); live != nil {
 			payload["media"] = live
 		}
 		emitRun(AgentEvent{

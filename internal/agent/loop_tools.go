@@ -81,22 +81,9 @@ func (l *Loop) processToolResult(
 	// message's media_refs gets loaded — which is why a mid-stream chat
 	// shows "wrote 3 files" in text but no actual download buttons until
 	// you reload the page (the load path reads from sessions.preview).
-	// Path / Filename / MimeType only; SPA resolves to a signed URL via
-	// /v1/files/...?ft=... per fetch (re-signed each time, per
-	// reference_lambda_build_time_env / Media flow memory).
-	if len(result.Media) > 0 {
-		live := make([]map[string]string, 0, len(result.Media))
-		for _, mf := range result.Media {
-			ct := mf.MimeType
-			if ct == "" {
-				ct = mimeFromExt(filepath.Ext(mf.Path))
-			}
-			live = append(live, map[string]string{
-				"path":      mf.Path,
-				"filename":  mf.Filename,
-				"mime_type": ct,
-			})
-		}
+	// Paths are signed to /v1/files/...?ft=... here so the SPA can hit
+	// them with no extra round-trip — same shape sessions.preview emits.
+	if live := buildLiveMediaPayload(result.Media); live != nil {
 		toolResultPayload["media"] = live
 	}
 	emitRun(AgentEvent{
