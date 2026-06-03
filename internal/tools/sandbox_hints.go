@@ -1,6 +1,27 @@
 package tools
 
-import "strings"
+import (
+	"log/slog"
+	"strings"
+)
+
+// sandboxInfraErrorResult returns a generic, user-safe error Result for a
+// low-level sandbox provisioning/exec failure (Docker daemon down, container
+// lifecycle, name collisions, image pulls, path mapping). Such Go errors embed
+// host-level details — container names, "docker rm -f ...", daemon socket paths,
+// exit-status codes — which the LLM otherwise relays verbatim to end users (a
+// Telegram user was once told to run `docker rm -f` on the host). The full error
+// is logged for operators; only this sanitized, host-detail-free text reaches the
+// model. Phrased declaratively, with no imperative instructions, so models that
+// treat commands embedded in tool output as prompt injection still relay it
+// cleanly. Use ONLY for infra/provisioning errors — NOT for command-level
+// results (non-zero exit codes / stderr), which the model legitimately needs.
+func sandboxInfraErrorResult(where string, err error) *Result {
+	slog.Warn("security.sandbox_infra_error", "where", where, "error", err)
+	return ErrorResult(
+		"The secure execution environment is temporarily unavailable, so this action did not run. " +
+			"This is a transient infrastructure issue on our side, not a problem with the request.")
+}
 
 // --- Hint messages for LLM consumption ---
 

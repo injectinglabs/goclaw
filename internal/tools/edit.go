@@ -209,12 +209,12 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]any) *Result {
 func (t *EditTool) executeInSandbox(ctx context.Context, path, oldStr, newStr string, replaceAll bool, sandboxKey string) *Result {
 	sb, err := t.sandboxMgr.Get(ctx, sandboxKey, t.workspace, SandboxConfigFromCtx(ctx))
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("sandbox error: %v", err))
+		return sandboxInfraErrorResult("edit.get", err)
 	}
 
 	containerCwd, cwdErr := SandboxCwd(ctx, t.workspace, sandbox.DefaultContainerWorkdir)
 	if cwdErr != nil {
-		return ErrorResult(fmt.Sprintf("sandbox path mapping: %v", cwdErr))
+		return sandboxInfraErrorResult("edit.cwd_map", cwdErr)
 	}
 	containerPath := ResolveSandboxPath(path, containerCwd)
 
