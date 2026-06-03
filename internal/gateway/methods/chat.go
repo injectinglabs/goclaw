@@ -466,7 +466,7 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 
 	// Create cancellable context for abort support (matching TS AbortController pattern).
 	runCtx, cancel := context.WithCancel(runCtxBase)
-	injectCh := m.agents.RegisterRun(runCtxBase, runID, sessionKey, params.AgentID, userID, cancel)
+	injectCh := m.agents.RegisterRun(runCtxBase, runID, sessionKey, params.AgentID, userID, "ws", cancel)
 
 	// Run agent asynchronously - events are broadcast via the event system
 	//

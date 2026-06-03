@@ -44,7 +44,7 @@ func makeSchedulerRunFunc(agents *agent.Router, cfg *config.Config) scheduler.Ru
 		// external channel sender. They never need to surface in the WS
 		// chat.activeSessions response (different sessions altogether),
 		// but the field is plumbed for consistency.
-		injectCh := agents.RegisterRun(runCtx, req.RunID, req.SessionKey, agentID, req.UserID, cancel)
+		injectCh := agents.RegisterRun(runCtx, req.RunID, req.SessionKey, agentID, req.UserID, req.Channel, cancel)
 		defer agents.UnregisterRun(req.RunID)
 		defer cancel()
 

@@ -256,6 +256,13 @@ type ActiveRun struct {
 	SessionKey string
 	AgentID    string
 	UserID     string // owning user; lets chat.activeSessions filter to caller's runs without joining sessions
+	// Channel the run came in on: "ws" (web/extension chat), "telegram",
+	// "slack", "discord", "feishu", etc. Captured at RegisterRun so
+	// chat.activeSessions can filter by channel — symmetric with
+	// sessions.list's default `channelName=ws`. Without this, an
+	// in-flight Telegram bot reply would briefly synthesize a chat row
+	// in the web sidebar via reload-recovery, then vanish.
+	Channel    string
 	Cancel     context.CancelFunc
 	StartedAt  time.Time
 	InjectCh   chan InjectedMessage // buffered channel for mid-run user message injection
@@ -343,13 +350,14 @@ func safeClose(ch chan struct{}) {
 // userID is the run's owning user — empty for tenant-system runs (cron,
 // title-gen) which never need to surface in chat.activeSessions.
 // Returns a receive-only channel for mid-run message injection.
-func (r *Router) RegisterRun(ctx context.Context, runID, sessionKey, agentID, userID string, cancel context.CancelFunc) <-chan InjectedMessage {
+func (r *Router) RegisterRun(ctx context.Context, runID, sessionKey, agentID, userID, channel string, cancel context.CancelFunc) <-chan InjectedMessage {
 	injectCh := make(chan InjectedMessage, injectBufferSize)
 	r.activeRuns.Store(runID, &ActiveRun{
 		RunID:      runID,
 		SessionKey: sessionKey,
 		AgentID:    agentID,
 		UserID:     userID,
+		Channel:    channel,
 		Cancel:     cancel,
 		StartedAt:  time.Now(),
 		InjectCh:   injectCh,
@@ -609,6 +617,16 @@ func (r *Router) ActiveSessionsForUser(tenantID uuid.UUID, userID string) []Acti
 	r.activeRuns.Range(func(_, val any) bool {
 		run := val.(*ActiveRun)
 		if run.TenantID != tenantID || run.UserID != userID {
+			return true
+		}
+		// Channel filter — only return runs that originated from the WS
+		// chat path. Telegram / Slack / Discord runs would otherwise leak
+		// into the website's sidebar via reload-recovery and flash as a
+		// "ghost" chat for a second before the sessions.list response
+		// (which IS channel-scoped) replaces the array. Empty channel
+		// covers legacy ActiveRun entries created before the field
+		// existed — treat as ws for safety.
+		if run.Channel != "" && run.Channel != "ws" {
 			return true
 		}
 		if sessions.IsCronSession(run.SessionKey) {
