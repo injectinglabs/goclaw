@@ -336,7 +336,7 @@ type LoopConfig struct {
 	Provider         providers.Provider
 	Model            string
 	ContextWindow    int
-	MaxTokens        int // explicit upstream output-tokens clamp; 0 = no cap, provider's natural per-model limit applies
+	MaxTokens        int // max output tokens per LLM call (0 = default 8192)
 	MaxIterations    int
 	MaxToolCalls     int
 	Workspace        string
@@ -501,20 +501,14 @@ type LoopConfig struct {
 	UserResolver UserIdentityResolver
 }
 
-// effectiveMaxTokens returns the explicit upstream output-tokens clamp, or 0
-// when none is configured. 0 means "do not send max_tokens upstream — let the
-// provider's natural per-model limit apply" (~24K on Gemini Flash 3.5,
-// ~16K on Codex, etc.).
-//
-// We used to default to 8192 here, which on non-reasoning models was a sane
-// "fits any reasonable answer" cap. On Gemini routes with a dynamic thinking
-// budget that cap became actively harmful: reasoning and visible content
-// share the same allowance, so the model could spend the entire 8K window on
-// hidden CoT and return finish_reason=length with empty content. Removing
-// the default lets natural per-model limits do the right thing; an explicit
-// clamp is still respected when callers configure one.
+const defaultMaxTokens = config.DefaultMaxTokens
+
+// effectiveMaxTokens returns the configured max output tokens, defaulting to 8192.
 func (l *Loop) effectiveMaxTokens() int {
-	return l.maxTokens
+	if l.maxTokens > 0 {
+		return l.maxTokens
+	}
+	return defaultMaxTokens
 }
 
 func NewLoop(cfg LoopConfig) *Loop {
