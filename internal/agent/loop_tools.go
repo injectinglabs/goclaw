@@ -149,8 +149,11 @@ func (l *Loop) processToolResult(
 		if level, msg := rs.loopDetector.detectSameResult(registryName, rh); level != "" {
 			if level == "critical" {
 				slog.Warn("tool loop critical: same result",
-					"tool", registryName, "agent", l.id, "run", req.RunID)
-				rs.finalContent = msg
+					"tool", registryName, "agent", l.id, "run", req.RunID, "detail", msg)
+				// Don't surface the raw "CRITICAL ... runaway loop" debug string to
+				// the user (the same-args path above uses a friendly message too).
+				// Any artifact already produced is still attached via deliverables.
+				rs.finalContent = "I've stopped because I was repeating the same step without getting a new result. If something's missing or you'd like me to adjust it, let me know."
 				rs.loopKilled = true
 				return toolMsg, nil, toolResultBreak
 			}
