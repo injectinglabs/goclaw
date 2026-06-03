@@ -55,6 +55,12 @@ type AgentData struct {
 	RestrictToWorkspace bool      `json:"restrict_to_workspace" db:"restrict_to_workspace"`
 	AgentType           string    `json:"agent_type" db:"agent_type"` // "open" or "predefined"
 	IsDefault           bool      `json:"is_default" db:"is_default"`
+	// IsLocked marks an agent as immutable via the public API — Update/Delete
+	// return 409, the SPA hides Edit/Delete affordances. Set only by the
+	// tenant-bootstrap path on the canonical fallback agent (owner_id='system',
+	// agent_key='default'). API consumers cannot set this field — it's filtered
+	// out of POST/PUT bodies via the agentAllowedFields allowlist.
+	IsLocked            bool      `json:"is_locked" db:"is_locked"`
 	Status              string    `json:"status" db:"status"`
 
 	// Budget: optional monthly spending limit in cents (nil = unlimited)

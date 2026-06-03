@@ -185,6 +185,16 @@ func (h *AgentsHandler) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// First-visit template seeding: if the caller has no personally-owned
+	// agents yet, drop researcher / writer / coder into their account as
+	// editable starters. They used to be tenant-shared system rows — but
+	// users couldn't customise prompts without affecting their team-mates,
+	// so we moved them per-user. The locked tenant default stays system-
+	// owned and visible regardless.
+	if !h.isOwnerUser(userID) {
+		h.maybeSeedStarterTemplates(r.Context(), userID)
+	}
+
 	var agents []store.AgentData
 	var err error
 	if h.isOwnerUser(userID) {
@@ -200,6 +210,62 @@ func (h *AgentsHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
+}
+
+// maybeSeedStarterTemplates creates one personal copy of every entry in
+// starterAgentTemplates for the caller, but only when they have zero personal
+// agents. Idempotent across re-visits — the user-owned count guard makes
+// re-runs cheap (one indexed COUNT query) and safe (no duplicates after a user
+// renames or deletes their starters). The function is best-effort: a failure
+// to seed never blocks the list — the user still sees the tenant default plus
+// whatever shared agents the legacy bootstrap left behind.
+func (h *AgentsHandler) maybeSeedStarterTemplates(ctx context.Context, userID string) {
+	owned, err := h.agents.List(ctx, userID)
+	if err != nil {
+		slog.Warn("agents.starter_seed.list_owner_failed", "user_id", userID, "error", err)
+		return
+	}
+	if len(owned) > 0 {
+		return
+	}
+
+	tenantID := store.TenantIDFromContext(ctx)
+	if tenantID == uuid.Nil {
+		return
+	}
+
+	for _, tmpl := range starterAgentTemplates {
+		newID := uuid.Must(uuid.NewV7())
+		suffix := newID.String()[:8]
+		agent := &store.AgentData{
+			AgentKey:          fmt.Sprintf("%s-%s", tmpl.Key, suffix),
+			DisplayName:       tmpl.DisplayName,
+			Emoji:             tmpl.Emoji,
+			OwnerID:           userID,
+			TenantID:          tenantID,
+			Provider:          "llm-service",
+			Model:             "gemini-3.5-flash",
+			AgentType:         store.AgentTypePredefined,
+			MaxToolIterations: tmpl.MaxIter,
+			Status:            store.AgentStatusActive,
+			Workspace:         fmt.Sprintf("%s/%s-%s", h.defaultWorkspace, tmpl.Key, suffix),
+			SystemPrompt:      tmpl.SystemPrompt,
+			MemoryConfig:      json.RawMessage(`{"enabled":true}`),
+			CompactionConfig:  json.RawMessage(`{}`),
+			OtherConfig:       json.RawMessage(`{"bootstrapMaxChars":24000}`),
+		}
+		agent.ID = newID
+		agent.RestrictToWorkspace = true
+		if err := h.agents.Create(ctx, agent); err != nil {
+			slog.Warn("agents.starter_seed.create_failed",
+				"user_id", userID, "tenant_id", tenantID,
+				"template", tmpl.Key, "error", err)
+			continue
+		}
+		slog.Info("agents.starter_seed.created",
+			"user_id", userID, "tenant_id", tenantID,
+			"agent_key", agent.AgentKey, "template", tmpl.Key)
+	}
 }
 
 func (h *AgentsHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -454,6 +520,16 @@ func (h *AgentsHandler) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Locked system agents (canonical tenant default) are immutable end-to-end.
+	// The flag is set only by the bootstrap path, never by API mutations, and
+	// it survives RegisterAlias-style overwrites because it's a real column.
+	// Reject here BEFORE allowlist filtering so the response is a clean 409
+	// rather than a silent no-op on an empty diff.
+	if ag.IsLocked {
+		writeError(w, http.StatusConflict, protocol.ErrFailedPrecondition, "this agent is locked and cannot be edited")
+		return
+	}
+
 	var updates map[string]any
 	if !bindJSON(w, r, locale, &updates) {
 		return
@@ -610,6 +686,14 @@ func (h *AgentsHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	if userID != "" && ag.OwnerID != userID && !h.isOwnerUser(userID) {
 		writeError(w, http.StatusForbidden, protocol.ErrUnauthorized, i18n.T(locale, i18n.MsgOwnerOnly, "delete agent"))
+		return
+	}
+
+	// Locked agents (tenant's canonical default) can't be deleted, even by
+	// the tenant owner — chats, channels, and crons fall back to this agent
+	// when no other is specified, so losing it would orphan running flows.
+	if ag.IsLocked {
+		writeError(w, http.StatusConflict, protocol.ErrFailedPrecondition, "this agent is locked and cannot be deleted")
 		return
 	}
 

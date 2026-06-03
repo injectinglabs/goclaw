@@ -95,7 +95,7 @@ const agentSelectCols = `id, agent_key, display_name, frontmatter, owner_id, pro
 		 reasoning_config, workspace_sharing, chatgpt_oauth_routing,
 		 shell_deny_groups, kg_dedup_config,
 		 COALESCE(system_prompt, '') AS system_prompt,
-		 agent_type, is_default, status, budget_monthly_cents, created_at, updated_at, tenant_id`
+		 agent_type, is_default, is_locked, status, budget_monthly_cents, created_at, updated_at, tenant_id`
 
 func (s *PGAgentStore) Create(ctx context.Context, agent *store.AgentData) error {
 	if agent.ID == uuid.Nil {
@@ -107,6 +107,15 @@ func (s *PGAgentStore) Create(ctx context.Context, agent *store.AgentData) error
 	tenantID := agent.TenantID
 	if tenantID == uuid.Nil {
 		tenantID = store.MasterTenantID
+	}
+	// Server-side invariant: the canonical tenant default (system-owned
+	// `default`) is always locked. Callers (auth-proxy provisioning) cannot
+	// turn it off because the API allowlist already excludes is_locked, and
+	// they cannot turn it on because the column isn't in the wire schema.
+	// Folding the rule into Create keeps the source-of-truth here, not
+	// scattered across every caller.
+	if agent.AgentKey == "default" && agent.OwnerID == "system" {
+		agent.IsLocked = true
 	}
 	// system_prompt persists the agent's custom instructions (migration 000063).
 	// NULL when caller omits it — falls back to tenant default in BuildSystemPrompt.
@@ -123,9 +132,9 @@ func (s *PGAgentStore) Create(ctx context.Context, agent *store.AgentData) error
 		 self_evolve, skill_evolve, skill_nudge_interval,
 		 reasoning_config, workspace_sharing, chatgpt_oauth_routing,
 		 shell_deny_groups, kg_dedup_config, system_prompt,
-		 agent_type, is_default, status, budget_monthly_cents, created_at, updated_at, tenant_id)
+		 agent_type, is_default, is_locked, status, budget_monthly_cents, created_at, updated_at, tenant_id)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-		         $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)`,
+		         $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39)`,
 		agent.ID, agent.AgentKey, agent.DisplayName, sql.NullString{String: agent.Frontmatter, Valid: agent.Frontmatter != ""}, agent.OwnerID, agent.Provider, agent.Model,
 		agent.ContextWindow, agent.MaxToolIterations, agent.Workspace, agent.RestrictToWorkspace,
 		jsonOrEmpty(agent.ToolsConfig), jsonOrNull(agent.SandboxConfig), jsonOrNull(agent.SubagentsConfig), jsonOrNull(agent.MemoryConfig),
@@ -134,7 +143,7 @@ func (s *PGAgentStore) Create(ctx context.Context, agent *store.AgentData) error
 		agent.SelfEvolve, agent.SkillEvolve, agent.SkillNudgeInterval,
 		jsonOrEmpty(agent.ReasoningConfig), jsonOrEmpty(agent.WorkspaceSharing), jsonOrEmpty(agent.ChatGPTOAuthRouting),
 		jsonOrEmpty(agent.ShellDenyGroups), jsonOrEmpty(agent.KGDedupConfig), sysPrompt,
-		agent.AgentType, agent.IsDefault, agent.Status, agent.BudgetMonthlyCents, now, now, tenantID,
+		agent.AgentType, agent.IsDefault, agent.IsLocked, agent.Status, agent.BudgetMonthlyCents, now, now, tenantID,
 	)
 	if err != nil {
 		return err
@@ -520,7 +529,7 @@ func scanAgentRow(row agentRowScanner) (*store.AgentData, error) {
 		&d.Emoji, &d.AgentDescription, &d.ThinkingLevel, &d.MaxTokens,
 		&d.SelfEvolve, &d.SkillEvolve, &d.SkillNudgeInterval,
 		&reasoningCfg, &wsCfg, &oauthCfg, &shellCfg, &kgCfg, &d.SystemPrompt,
-		&d.AgentType, &d.IsDefault, &d.Status, &d.BudgetMonthlyCents, &d.CreatedAt, &d.UpdatedAt, &d.TenantID)
+		&d.AgentType, &d.IsDefault, &d.IsLocked, &d.Status, &d.BudgetMonthlyCents, &d.CreatedAt, &d.UpdatedAt, &d.TenantID)
 	if err != nil {
 		return nil, err
 	}
