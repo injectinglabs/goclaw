@@ -220,10 +220,32 @@ func (h *AgentsHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for duplicate agent_key before creating
-	if existing, _ := h.agents.GetByKey(r.Context(), req.AgentKey); existing != nil {
-		writeError(w, http.StatusConflict, protocol.ErrAlreadyExists, i18n.T(locale, i18n.MsgAlreadyExists, "agent", req.AgentKey))
-		return
+	// agent_key is UNIQUE per (tenant, agent_key) — routing-critical
+	// (sessions / channel allow_from / agent_links all key on it). In a
+	// team-org tenant every member shares the same tenant_id, so a member
+	// trying to create "test" would collide with a teammate's "test" they
+	// can't even see (List filters by owner). Returning 409 here forced
+	// the user to invent suffixes manually, which is poor UX.
+	//
+	// Auto-suffix instead: probe `key`, `key-2`, `key-3` … until we find
+	// a free slot. We cap at 50 attempts to stop pathological loops; the
+	// DB UNIQUE index is the final safety net against races. The chosen
+	// key comes back in the response so the client can show "created as
+	// `test-3`" or similar.
+	requestedKey := req.AgentKey
+	for i := 1; i <= 50; i++ {
+		candidate := requestedKey
+		if i > 1 {
+			candidate = fmt.Sprintf("%s-%d", requestedKey, i)
+		}
+		if existing, _ := h.agents.GetByKey(r.Context(), candidate); existing == nil {
+			req.AgentKey = candidate
+			break
+		}
+		if i == 50 {
+			writeError(w, http.StatusConflict, protocol.ErrAlreadyExists, i18n.T(locale, i18n.MsgAlreadyExists, "agent", requestedKey))
+			return
+		}
 	}
 
 	req.OwnerID = userID
