@@ -294,6 +294,45 @@ func (h *AgentsHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("failed to seed context files for new agent", "agent", req.AgentKey, "error", err)
 	}
 
+	// Inherit MCP grants from the tenant's default agent so the freshly-
+	// created agent can see Gmail / Calendar / Slack / Drive / Docs / etc.
+	// out of the box — matching the user's mental model "I connected Gmail
+	// to my account, all my agents should see it."
+	//
+	// Skipped when:
+	//   - the new agent IS the default agent (no source to copy from);
+	//   - the tenant has no default yet (first-time provisioning is still
+	//     in flight — auth-proxy's provisionStandardMCPServers will grant
+	//     the default a few seconds later, and operators can re-run the
+	//     copy via `POST /v1/agents/:id/mcp/grants/copy-from/default` if
+	//     a race left the new agent grant-less).
+	//   - the default has zero grants — the INSERT...SELECT just inserts
+	//     nothing, which is fine.
+	//
+	// Idempotent: ON CONFLICT (server_id, agent_id) DO NOTHING keeps re-
+	// running this safe.
+	if req.AgentKey != "default" && req.TenantID != uuid.Nil {
+		if _, copyErr := h.db.ExecContext(r.Context(),
+			`INSERT INTO mcp_agent_grants
+				(id, server_id, agent_id, enabled, tool_allow, tool_deny,
+				 config_overrides, granted_by, created_at, tenant_id)
+			 SELECT
+				gen_random_uuid(), g.server_id, $1, g.enabled, g.tool_allow,
+				g.tool_deny, g.config_overrides, $2, NOW(), g.tenant_id
+			 FROM mcp_agent_grants g
+			 JOIN agents a ON a.id = g.agent_id
+			 WHERE a.agent_key = 'default' AND a.tenant_id = $3
+			 ON CONFLICT (server_id, agent_id) DO NOTHING`,
+			req.ID, userID, req.TenantID,
+		); copyErr != nil {
+			// Soft-fail: the agent is created and usable; missing grants
+			// can be re-applied via the dashboard or by re-running this
+			// query. Log so operators notice if this becomes a pattern.
+			slog.Warn("agents.create: copy MCP grants from default failed",
+				"agent_key", req.AgentKey, "agent_id", req.ID, "error", copyErr)
+		}
+	}
+
 	// Start LLM summoning in background if applicable
 	if req.Status == store.AgentStatusSummoning {
 		go h.summoner.SummonAgent(req.ID, req.TenantID, req.Provider, req.Model, description)
