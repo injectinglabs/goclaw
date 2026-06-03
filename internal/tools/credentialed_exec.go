@@ -328,14 +328,14 @@ func (t *ExecTool) executeCredentialedSandbox(ctx context.Context, absPath strin
 	if err != nil {
 		slog.Warn("security.credentialed_exec_sandbox_unavailable",
 			"binary", absPath, "error", err)
-		return ErrorResult("credentialed exec requires sandbox but sandbox is unavailable: " + err.Error())
+		return sandboxInfraErrorResult("credentialed_exec.get", err)
 	}
 
 	// Direct exec inside sandbox: [absPath, args...] with env injection
 	command := append([]string{absPath}, args...)
 	result, err := sb.Exec(ctx, command, cwd, sandbox.WithEnv(envMap))
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("credentialed sandbox exec: %v", err))
+		return sandboxInfraErrorResult("credentialed_exec.run", err)
 	}
 
 	output := result.Stdout

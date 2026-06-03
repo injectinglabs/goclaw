@@ -451,18 +451,18 @@ func (t *ExecTool) executeInSandbox(ctx context.Context, command, cwd, sandboxKe
 			"error", err,
 			"command", truncateCmd(command, 80),
 		)
-		return ErrorResult(fmt.Sprintf("sandbox unavailable: %v (will not fall back to unsandboxed host execution)", err))
+		return sandboxInfraErrorResult("exec.get", err)
 	}
 
 	// Map host workdir to container workdir via SandboxCwd helper.
 	containerCwd, cwdErr := SandboxCwd(ctx, t.workspace, sandbox.DefaultContainerWorkdir)
 	if cwdErr != nil {
-		return ErrorResult(fmt.Sprintf("sandbox path mapping: %v", cwdErr))
+		return sandboxInfraErrorResult("exec.cwd_map", cwdErr)
 	}
 
 	result, err := sb.Exec(ctx, []string{"sh", "-c", command}, containerCwd) //nolint: no ExecOption for normal exec
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("sandbox exec: %v", err))
+		return sandboxInfraErrorResult("exec.run", err)
 	}
 
 	// Format output same as host execution
