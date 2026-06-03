@@ -21,6 +21,27 @@ func (p *OpenAIProvider) buildRequestBody(model string, req ChatRequest, stream 
 		strings.Contains(strings.ToLower(p.apiBase), "generativelanguage") ||
 		strings.Contains(strings.ToLower(model), "gemini")
 
+	// Alias-aware detection: when the request goes through an LLM gateway that
+	// resolves a non-Gemini-looking alias (e.g. "default") to a Gemini upstream,
+	// the substring check above misses it. The model-alias fetcher records the
+	// gateway's true UpstreamProvider/UpstreamModel per alias on the shared
+	// registry — consult it before treating the request as non-Gemini.
+	// Without this, user-created agents pinned to such aliases never echo
+	// thought_signature back, and Vertex rejects the next tool_call with
+	// INVALID_ARGUMENT ("missing thought_signature in functionCall parts").
+	if !supportsThoughtSignature && p.registry != nil {
+		if spec := p.registry.Resolve("", model); spec != nil {
+			up := strings.ToLower(spec.UpstreamProvider)
+			um := strings.ToLower(spec.UpstreamModel)
+			if strings.Contains(up, "vertex") ||
+				strings.Contains(up, "gemini") ||
+				strings.Contains(up, "google") ||
+				strings.Contains(um, "gemini") {
+				supportsThoughtSignature = true
+			}
+		}
+	}
+
 	if supportsThoughtSignature {
 		inputMessages = collapseToolCallsWithoutSig(inputMessages)
 	}
