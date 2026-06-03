@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/eventbus"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
@@ -63,19 +62,7 @@ func (s *PruneStage) Execute(ctx context.Context, state *RunState) error {
 	if contextWindow == 0 {
 		contextWindow = s.deps.Config.ContextWindow
 	}
-	// outputReservation is the headroom we deduct from contextWindow to leave
-	// room for the model's response before pruning more history. When the
-	// caller didn't set an explicit upstream cap (Config.MaxTokens == 0,
-	// which means "no max_tokens sent upstream — let the provider pick"),
-	// we still need a conservative reservation here, otherwise short-context
-	// models would let input fill the window and get truncated mid-reply.
-	// Falls back to config.DefaultMaxTokens (8192) — same value we used to
-	// send as the upstream cap, just now used locally for budget math instead.
-	outputReservation := s.deps.Config.MaxTokens
-	if outputReservation <= 0 {
-		outputReservation = config.DefaultMaxTokens
-	}
-	budget := contextWindow - state.Context.OverheadTokens - outputReservation - s.deps.Config.ReserveTokens
+	budget := contextWindow - state.Context.OverheadTokens - s.deps.Config.MaxTokens - s.deps.Config.ReserveTokens
 	if budget <= 0 {
 		return nil // no history budget, nothing to prune
 	}

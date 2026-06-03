@@ -41,23 +41,14 @@ func (s *ThinkStage) Execute(ctx context.Context, state *RunState) error {
 		}
 	}
 
-	// 3. Construct ChatRequest. max_tokens is only forwarded upstream when an
-	// explicit clamp is configured (Config.MaxTokens > 0). The default is 0
-	// = "no cap" — the provider's natural per-model output limit applies.
-	// Sending an explicit cap on Gemini routes is actively harmful with
-	// dynamic thinking budget: reasoning + visible content share the same
-	// allowance, so a tight cap turned into empty content (finish_reason=
-	// length with no body). prune_stage still uses its own fallback to
-	// reserve input pruning headroom — see prune_stage.go.
-	chatOpts := map[string]any{}
-	if s.deps.Config.MaxTokens > 0 {
-		chatOpts[providers.OptMaxTokens] = s.deps.Config.MaxTokens
-	}
+	// 3. Construct ChatRequest
 	req := providers.ChatRequest{
 		Messages: state.Messages.All(),
 		Tools:    toolDefs,
 		Model:    state.Model,
-		Options:  chatOpts,
+		Options: map[string]any{
+			providers.OptMaxTokens: s.deps.Config.MaxTokens,
+		},
 	}
 
 	// 4. Call LLM (stream or sync — delegated to callback)
