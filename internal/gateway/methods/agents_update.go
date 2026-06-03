@@ -23,6 +23,7 @@ func (m *AgentsMethods) handleUpdate(ctx context.Context, client *gateway.Client
 	locale := store.LocaleFromContext(ctx)
 	var params struct {
 		AgentID           string `json:"agentId"`
+		ID                string `json:"id"` // some clients (web UI) send the agent UUID as `id`
 		Name              string `json:"name"`
 		Workspace         string `json:"workspace"`
 		Provider          string `json:"provider"`
@@ -60,18 +61,28 @@ func (m *AgentsMethods) handleUpdate(ctx context.Context, client *gateway.Client
 		json.Unmarshal(req.Params, &params)
 	}
 
-	if params.AgentID == "" {
+	// Accept the agent reference under either `agentId` or `id` (some clients,
+	// e.g. the web UI, send the UUID as `id`).
+	agentRef := params.AgentID
+	if agentRef == "" {
+		agentRef = params.ID
+	}
+	if agentRef == "" {
 		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "agentId")))
 		return
 	}
+	params.AgentID = agentRef // non-store path uses this; store path canonicalizes to agent_key below
 
 	if m.agentStore != nil {
-		// --- DB-backed: update agent in store ---
-		ag, err := m.agentStore.GetByKey(ctx, params.AgentID)
+		// --- DB-backed: update agent in store. Resolve by UUID or agent_key,
+		// then canonicalize params.AgentID to the agent_key so the rest of the
+		// handler (cache invalidation, IDENTITY.md paths, response) is unchanged.
+		ag, err := resolveAgentInfo(ctx, m.agentStore, agentRef)
 		if err != nil {
-			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound, i18n.T(locale, i18n.MsgAgentNotFound, params.AgentID)))
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound, i18n.T(locale, i18n.MsgAgentNotFound, agentRef)))
 			return
 		}
+		params.AgentID = ag.AgentKey
 
 		updates := map[string]any{}
 		if params.Name != "" {
