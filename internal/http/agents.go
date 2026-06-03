@@ -215,37 +215,58 @@ func (h *AgentsHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// agent_key is the routing slug (session keys, channel allow_from,
+	// agent_links, delegate(name=...)) — it must be unique per tenant. We
+	// treat it as an *implementation detail*, never something the user
+	// types or sees:
+	//
+	//   - System bootstrap (auth-proxy `seedAgentTemplates`) sends stable
+	//     human keys like "default" / "researcher" / "writer" / "coder"
+	//     that downstream code references by string. We accept those
+	//     verbatim and let the DB UNIQUE catch a re-bootstrap attempt
+	//     (idempotency is the caller's responsibility).
+	//
+	//   - User-created agents send the *display_name* and either omit
+	//     agent_key or send a slugified version of the name. We always
+	//     suffix it with a short hex derived from the row's own UUID,
+	//     so collisions are mathematically impossible (16^8 ≈ 4B per
+	//     base slug) and the user is free to create as many "Test"
+	//     agents as they want. The full agent_key is never surfaced in
+	//     the UI — it's only an internal routing handle.
+	//
+	// `isValidSlug` still gates the *base* portion so we never emit
+	// something with `/`, whitespace, or other URL-unfriendly chars
+	// into channel allow_from / session keys.
+	if req.AgentKey == "" {
+		if req.DisplayName == "" {
+			writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidRequest, "display_name or agent_key required"))
+			return
+		}
+		req.AgentKey = slugify(req.DisplayName)
+		if req.AgentKey == "" {
+			req.AgentKey = "agent"
+		}
+	}
 	if !isValidSlug(req.AgentKey) {
 		writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidSlug, "agent_key"))
 		return
 	}
 
-	// agent_key is UNIQUE per (tenant, agent_key) — routing-critical
-	// (sessions / channel allow_from / agent_links all key on it). In a
-	// team-org tenant every member shares the same tenant_id, so a member
-	// trying to create "test" would collide with a teammate's "test" they
-	// can't even see (List filters by owner). Returning 409 here forced
-	// the user to invent suffixes manually, which is poor UX.
-	//
-	// Auto-suffix instead: probe `key`, `key-2`, `key-3` … until we find
-	// a free slot. We cap at 50 attempts to stop pathological loops; the
-	// DB UNIQUE index is the final safety net against races. The chosen
-	// key comes back in the response so the client can show "created as
-	// `test-3`" or similar.
-	requestedKey := req.AgentKey
-	for i := 1; i <= 50; i++ {
-		candidate := requestedKey
-		if i > 1 {
-			candidate = fmt.Sprintf("%s-%d", requestedKey, i)
-		}
-		if existing, _ := h.agents.GetByKey(r.Context(), candidate); existing == nil {
-			req.AgentKey = candidate
-			break
-		}
-		if i == 50 {
-			writeError(w, http.StatusConflict, protocol.ErrAlreadyExists, i18n.T(locale, i18n.MsgAlreadyExists, "agent", requestedKey))
-			return
-		}
+	// Non-system, non-reserved keys get the UUID suffix. Reserved keys
+	// ("default" et al.) bypass — they're system-owned and only one
+	// instance can exist per tenant. Anyone else trying to create
+	// "default" falls through to the suffix path, so a user creating
+	// "Default" gets "default-019e8e88" rather than colliding with the
+	// system agent.
+	isSystemReserved := userID == "system" && (req.AgentKey == "default" ||
+		req.AgentKey == "researcher" || req.AgentKey == "writer" || req.AgentKey == "coder")
+	if !isSystemReserved {
+		newID := uuid.Must(uuid.NewV7())
+		req.ID = newID
+		// 8 hex chars from the UUID time-low portion. Stable for the
+		// row's lifetime, unique across the tenant by birthday math.
+		suffix := newID.String()[:8]
+		req.AgentKey = fmt.Sprintf("%s-%s", req.AgentKey, suffix)
 	}
 
 	req.OwnerID = userID

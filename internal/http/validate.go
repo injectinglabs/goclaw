@@ -3,6 +3,7 @@ package http
 import (
 	"log/slog"
 	"regexp"
+	"strings"
 )
 
 var slugRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
@@ -11,6 +12,25 @@ var slugRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 // cannot start or end with a hyphen.
 func isValidSlug(s string) bool {
 	return slugRe.MatchString(s)
+}
+
+var nonSlugChars = regexp.MustCompile(`[^a-z0-9]+`)
+
+// slugify converts a free-form name into a slug-safe base. Lowercases,
+// collapses any run of non-[a-z0-9] into a single dash, trims edges,
+// caps length at 40 chars so the final agent_key (slug + "-" + 8-hex
+// UUID suffix = 49 chars) stays well below storage / display limits.
+//
+// Returns "" if the input contains zero usable characters — callers
+// should substitute a fallback (e.g. "agent") in that case.
+func slugify(name string) string {
+	s := strings.ToLower(strings.TrimSpace(name))
+	s = nonSlugChars.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if len(s) > 40 {
+		s = strings.TrimRight(s[:40], "-")
+	}
+	return s
 }
 
 // filterAllowedKeys returns a new map containing only keys present in the allowlist.
