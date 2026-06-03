@@ -260,7 +260,18 @@ func (h *AgentsHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// system agent.
 	isSystemReserved := userID == "system" && (req.AgentKey == "default" ||
 		req.AgentKey == "researcher" || req.AgentKey == "writer" || req.AgentKey == "coder")
-	if !isSystemReserved {
+	if isSystemReserved {
+		// Idempotent re-bootstrap path. auth-proxy.seedAgentTemplates POSTs
+		// these keys on every login as a back-fill. If the row already
+		// exists, return 409 — the seeder treats 409 as success. Without
+		// this short-circuit we'd hit the DB UNIQUE constraint inside
+		// agents.Create() and return 500, which is functionally fine but
+		// pollutes logs.
+		if existing, _ := h.agents.GetByKey(r.Context(), req.AgentKey); existing != nil {
+			writeError(w, http.StatusConflict, protocol.ErrAlreadyExists, i18n.T(locale, i18n.MsgAlreadyExists, "agent", req.AgentKey))
+			return
+		}
+	} else {
 		newID := uuid.Must(uuid.NewV7())
 		req.ID = newID
 		// 8 hex chars from the UUID time-low portion. Stable for the
