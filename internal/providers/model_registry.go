@@ -12,6 +12,15 @@ type ModelSpec struct {
 	Vision        bool
 	TokenizerID   string
 	Cost          ModelCost
+	// UpstreamProvider and UpstreamModel preserve the LLM gateway's view of
+	// what an alias eventually routes to. For a literal model these match
+	// Provider/ID; for an alias like "default" they expose the real upstream
+	// (e.g. UpstreamProvider="vertex", UpstreamModel="google/gemini-3.5-flash").
+	// Provider/ID are mutated by RegisterAlias to support multi-key lookup —
+	// these two fields are left intact so downstream capability checks
+	// (e.g. Gemini's thought_signature requirement) survive alias indirection.
+	UpstreamProvider string
+	UpstreamModel    string
 }
 
 // ModelCost tracks per-1M-token pricing.
@@ -91,6 +100,9 @@ func (r *InMemoryRegistry) RegisterAlias(alias string, spec ModelSpec) {
 		entry := spec
 		entry.ID = alias
 		entry.Provider = p
+		// UpstreamProvider/UpstreamModel intentionally NOT overwritten — they
+		// are the gateway's authoritative view of the real upstream and must
+		// survive the per-provider-key aliasing above. See ModelSpec doc.
 		r.models.Store(registryKey(p, alias), &entry)
 	}
 }
