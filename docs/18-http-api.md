@@ -90,11 +90,55 @@ CRUD operations for agent management. Requires `X-GoClaw-User-Id` header for mul
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `GET` | `/v1/agents` | List agents accessible by user | Bearer |
+| `GET` | `/v1/agents` | List agents accessible by user (auto-seeds starter templates on first hit) | Bearer |
 | `POST` | `/v1/agents` | Create new agent | Bearer |
 | `GET` | `/v1/agents/{id}` | Get agent by ID or key | Bearer |
-| `PUT` | `/v1/agents/{id}` | Update agent (owner only) | Bearer |
-| `DELETE` | `/v1/agents/{id}` | Delete agent (owner only) | Bearer |
+| `PUT` | `/v1/agents/{id}` | Update agent (owner only; **409** on `is_locked`) | Bearer |
+| `DELETE` | `/v1/agents/{id}` | Delete agent (owner only; **409** on `is_locked`) | Bearer |
+
+### Locked agents
+
+Rows with `is_locked = true` (currently only the canonical tenant default —
+`agent_key = 'default' AND owner_id = 'system'`) reject mutations:
+
+```
+PUT  /v1/agents/{locked_id}     →  409 FAILED_PRECONDITION
+                                   { "code": "FAILED_PRECONDITION",
+                                     "message": "this agent is locked and cannot be edited" }
+DELETE /v1/agents/{locked_id}   →  409 FAILED_PRECONDITION
+                                   { "code": "FAILED_PRECONDITION",
+                                     "message": "this agent is locked and cannot be deleted" }
+```
+
+The check runs before allowlist filtering so a no-op body still gets a 409
+rather than a silent 200. `is_locked` is excluded from `agentAllowedFields`,
+so callers can't flip it via PUT — only the server-side invariant in
+`pg/agents.go Create` sets it (when both `agent_key='default'` and
+`owner_id='system'` match).
+
+### Starter template seeding
+
+On the user's first `GET /v1/agents` (no personal agents under their
+`owner_id`), the server auto-clones every entry in
+`internal/http/agent_templates.go` (`researcher` / `writer` / `coder`) into
+user-owned rows:
+
+```
+agent_key:        "<key>-<uuid8>"   // e.g. researcher-019e8f46
+owner_id:         <userID>          // not 'system'
+is_locked:        false
+agent_type:       "predefined"
+model:            "gemini-3.5-flash"
+system_prompt:    <canonical from template list>
+```
+
+Idempotent: a single existing personal row blocks re-seed, so deleting one
+starter never resurrects it. Best-effort: a seed failure logs but never
+fails the list response — the caller still sees the locked default plus
+any shared/legacy agents.
+
+Owners (system fleet admins from `policy.IsOwner`) skip the seed; their
+`/v1/agents` returns the full cross-tenant catalog instead.
 
 ### Shares
 
