@@ -272,15 +272,6 @@ func (s *toolLoopState) detectSameResult(toolName, resultHash string) (level, me
 	if toolName == "refresh_page_content" {
 		return "", ""
 	}
-	// Image-generation tools are throttled deterministically at the tool itself
-	// (one image per request via a server-side cooldown); repeat calls just
-	// return the same "already generated" notice and never re-generate. The image
-	// is already delivered, so halting here only replaces a good reply with the
-	// raw "CRITICAL ... runaway loop" debug string. Match by suffix so it works
-	// regardless of the MCP server prefix (e.g. mcp_document_mcp__generate_image).
-	if strings.HasSuffix(toolName, "generate_image") {
-		return "", ""
-	}
 	var count int
 	for _, rec := range s.history {
 		if rec.toolName == toolName && rec.resultHash == resultHash {
