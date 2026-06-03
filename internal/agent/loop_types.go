@@ -638,7 +638,8 @@ type RunRequest struct {
 	ChatID            string             // source chat ID
 	PeerKind          string             // "direct" or "group" (for session key building and tool context)
 	RunID             string             // unique run identifier
-	UserID            string             // external user ID (TEXT, free-form) for multi-tenant scoping
+	UserID            string             // IDENTITY user ID (TEXT, free-form) for memory / session scope. May be a sender numeric (Telegram chat_id) when no merged contact is set. NOT used for billing.
+	BillingUserID     string             // BILLING owner — channel_instance.created_by, always a real platform UUID. Used in actor headers (X-Actor-User-ID) so downstream attribution (ai_tasks.user_id, org quota) charges the bot owner. Falls back to UserID for in-app callers (extension chat) where there's no separate bot owner.
 	SenderID          string             // original individual sender ID (preserved in group chats for permission checks)
 	SenderName        string             // display name from channel metadata (for bootstrap auto-contact)
 	Role              string             // caller's RBAC role (admin/operator/viewer/owner); bypasses per-user grants for authenticated admins (#915)

@@ -77,8 +77,19 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	//      receiver inverts the prefix family and joins on
 	//      organizations.slug.
 	if req.UserID != "" {
+		// X-Actor-User-ID is the BILLING attribution for downstream
+		// services (web-agent-api -> ai_tasks.user_id, org quota). Prefer
+		// req.BillingUserID — set by the inbound consumer to the bot
+		// owner (channel_instances.created_by) — so a Telegram bot
+		// connected by user X always charges X regardless of who happens
+		// to write to it. Fall back to req.UserID for in-app channels
+		// (extension chat, dashboard) where the user IS the actor.
+		actorUserID := req.BillingUserID
+		if actorUserID == "" {
+			actorUserID = req.UserID
+		}
 		actor := map[string]string{
-			"X-Actor-User-ID": req.UserID,
+			"X-Actor-User-ID": actorUserID,
 		}
 		orgID := l.externalOrgID
 		if orgID == "" {
