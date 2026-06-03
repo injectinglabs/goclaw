@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -220,6 +221,15 @@ func (t *CronTool) handleAdd(ctx context.Context, args map[string]any, agentID, 
 	message, _ := jobObj["message"].(string)
 	if message == "" {
 		return ErrorResult("job.message is required")
+	}
+	// Reject placeholders the model sometimes drops in when it doesn't fully
+	// pick a final reminder text. Stateless cron broadcasts the message
+	// verbatim, so "..." or "…" end up delivered to the user as literal
+	// ellipses, indistinguishable from a broken silent agent. Force the
+	// model to pick a concrete short text on retry.
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "..." || trimmed == "…" || trimmed == ". . ." {
+		return ErrorResult("job.message must be the actual text the user should see at fire time, not a placeholder like '...'. Retry with a concrete short reminder (e.g. 'Take vitamins' or 'Fetch tonight's weather and reply concisely' for compute-at-fire-time jobs).")
 	}
 
 	// Parse schedule
