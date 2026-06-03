@@ -27,6 +27,7 @@ type ProvidersHandler struct {
 	store           store.ProviderStore
 	secretStore     store.ConfigSecretsStore
 	providerReg     *providers.Registry
+	modelReg        providers.ModelRegistry          // shared alias→spec registry (populated by model_alias_fetcher)
 	gatewayAddr     string                           // for injecting MCP bridge into Claude CLI providers
 	mcpLookup       providers.MCPServerLookup        // optional: resolves per-agent MCP servers
 	apiBaseFallback func(providerType string) string // optional: config/env fallback for api_base
@@ -35,6 +36,15 @@ type ProvidersHandler struct {
 	sysConfigStore  store.SystemConfigStore
 	tracingStore    store.TracingStore   // optional: for provider-scoped pool activity
 	agents          store.AgentCRUDStore // optional: for provider pool activity agent lookup
+}
+
+// SetModelRegistry wires the shared model registry so tenant-scoped OpenAI
+// providers can resolve alias upstream (UpstreamProvider/UpstreamModel) for
+// per-request capability detection — most importantly, the Gemini-via-alias
+// path that needs thought_signature echoed back even when the local model
+// string is just "default".
+func (h *ProvidersHandler) SetModelRegistry(r providers.ModelRegistry) {
+	h.modelReg = r
 }
 
 // NewProvidersHandler creates a handler for provider management endpoints.
@@ -180,13 +190,26 @@ func (h *ProvidersHandler) registerInMemory(p *store.LLMProviderData) {
 		if host == "" {
 			host = "http://localhost:11434/v1"
 		}
-		h.providerReg.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, "ollama", config.DockerLocalhost(host), "llama3.3"))
+		prov := providers.NewOpenAIProvider(p.Name, "ollama", config.DockerLocalhost(host), "llama3.3")
+		if h.modelReg != nil {
+			prov = prov.WithRegistry(h.modelReg)
+		}
+		h.providerReg.RegisterForTenant(p.TenantID, prov)
 		return
 	}
 	if p.APIKey == "" {
 		return
 	}
 	apiBase := h.resolveAPIBase(p)
+	// withModelReg wires the alias→spec registry onto any OpenAI-shaped tenant
+	// provider so capability checks (notably Gemini's thought_signature gate)
+	// can see the upstream identity hiding behind a gateway alias like "default".
+	withModelReg := func(prov *providers.OpenAIProvider) *providers.OpenAIProvider {
+		if h.modelReg != nil {
+			return prov.WithRegistry(h.modelReg)
+		}
+		return prov
+	}
 	switch p.ProviderType {
 	case store.ProviderChatGPTOAuth:
 		ts := oauth.NewDBTokenSource(h.store, h.secretStore, p.Name).WithTenantID(p.TenantID)
@@ -205,19 +228,19 @@ func (h *ProvidersHandler) registerInMemory(p *store.LLMProviderData) {
 		if base == "" {
 			base = "https://coding-intl.dashscope.aliyuncs.com/v1"
 		}
-		h.providerReg.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, p.APIKey, base, "qwen3.5-plus"))
+		h.providerReg.RegisterForTenant(p.TenantID, withModelReg(providers.NewOpenAIProvider(p.Name, p.APIKey, base, "qwen3.5-plus")))
 	case store.ProviderNovita:
 		base := apiBase
 		if base == "" {
 			base = store.NovitaDefaultAPIBase
 		}
-		h.providerReg.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, p.APIKey, base, store.NovitaDefaultModel))
+		h.providerReg.RegisterForTenant(p.TenantID, withModelReg(providers.NewOpenAIProvider(p.Name, p.APIKey, base, store.NovitaDefaultModel)))
 	default:
 		prov := providers.NewOpenAIProvider(p.Name, p.APIKey, apiBase, "")
 		if p.ProviderType == store.ProviderMiniMax {
 			prov.WithChatPath("/text/chatcompletion_v2")
 		}
-		h.providerReg.RegisterForTenant(p.TenantID, prov)
+		h.providerReg.RegisterForTenant(p.TenantID, withModelReg(prov))
 	}
 }
 

@@ -354,37 +354,37 @@ func registerProvidersFromDB(registry *providers.Registry, provStore store.Provi
 			if base == "" {
 				base = "https://coding-intl.dashscope.aliyuncs.com/v1"
 			}
-			registry.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, p.APIKey, base, "qwen3.5-plus"))
+			registry.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, p.APIKey, base, "qwen3.5-plus").WithRegistry(modelReg))
 		case store.ProviderZai:
 			base := p.APIBase
 			if base == "" {
 				base = "https://api.z.ai/api/paas/v4"
 			}
-			registry.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, p.APIKey, base, "glm-5"))
+			registry.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, p.APIKey, base, "glm-5").WithRegistry(modelReg))
 		case store.ProviderZaiCoding:
 			base := p.APIBase
 			if base == "" {
 				base = "https://api.z.ai/api/coding/paas/v4"
 			}
-			registry.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, p.APIKey, base, "glm-5"))
+			registry.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, p.APIKey, base, "glm-5").WithRegistry(modelReg))
 		case store.ProviderOllamaCloud:
 			base := p.APIBase
 			if base == "" {
 				base = "https://ollama.com/v1"
 			}
-			registry.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, p.APIKey, base, "llama3.3"))
+			registry.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, p.APIKey, base, "llama3.3").WithRegistry(modelReg))
 		case store.ProviderNovita:
 			base := p.APIBase
 			if base == "" {
 				base = store.NovitaDefaultAPIBase
 			}
-			registry.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, p.APIKey, base, store.NovitaDefaultModel))
+			registry.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, p.APIKey, base, store.NovitaDefaultModel).WithRegistry(modelReg))
 		case store.ProviderBytePlus:
 			base := p.APIBase
 			if base == "" {
 				base = store.BytePlusDefaultAPIBase
 			}
-			prov := providers.NewOpenAIProvider(p.Name, p.APIKey, base, store.BytePlusDefaultModel)
+			prov := providers.NewOpenAIProvider(p.Name, p.APIKey, base, store.BytePlusDefaultModel).WithRegistry(modelReg)
 			prov.WithProviderType(p.ProviderType)
 			registry.RegisterForTenant(p.TenantID, prov)
 		case store.ProviderBytePlusCoding:
@@ -392,11 +392,16 @@ func registerProvidersFromDB(registry *providers.Registry, provStore store.Provi
 			if base == "" {
 				base = store.BytePlusCodingDefaultAPIBase
 			}
-			prov := providers.NewOpenAIProvider(p.Name, p.APIKey, base, store.BytePlusDefaultModel)
+			prov := providers.NewOpenAIProvider(p.Name, p.APIKey, base, store.BytePlusDefaultModel).WithRegistry(modelReg)
 			prov.WithProviderType(p.ProviderType)
 			registry.RegisterForTenant(p.TenantID, prov)
 		default:
-			prov := providers.NewOpenAIProvider(p.Name, p.APIKey, p.APIBase, "")
+			// Wire modelReg here too: this is the path taken by tenant-scoped
+			// `llm-service` providers (provider_type=openai-compat). Without
+			// it the alias-aware Gemini detection in buildRequestBody falls
+			// back to substring-matching the local model string (just
+			// "default") and skips echoing thought_signature back to Vertex.
+			prov := providers.NewOpenAIProvider(p.Name, p.APIKey, p.APIBase, "").WithRegistry(modelReg)
 			prov.WithProviderType(p.ProviderType)
 			if p.ProviderType == store.ProviderMiniMax {
 				prov.WithChatPath("/text/chatcompletion_v2")
