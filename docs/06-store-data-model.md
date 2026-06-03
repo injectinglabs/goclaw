@@ -138,6 +138,30 @@ The `agent_shares` table stores `UNIQUE(agent_id, user_id)` with roles: `user`, 
 
 `ListAccessible(userID)` queries: `owner_id = ? OR is_default = true OR id IN (SELECT agent_id FROM agent_shares WHERE user_id = ?)`.
 
+### 4.1. Locked agents (`is_locked`)
+
+The `agents.is_locked` boolean (migration 000066) marks an agent as immutable
+through the public API. `PUT /v1/agents/{id}` and `DELETE /v1/agents/{id}`
+short-circuit with `409 FAILED_PRECONDITION` before allowlist filtering when
+the target row is locked.
+
+The flag has a **single, server-side invariant**: `agent_key = 'default' AND
+owner_id = 'system'` ⇒ `is_locked = true`. Enforced inside `pg/agents.go`
+(and the SQLite mirror) on every `Create`, so callers — including the
+auth-proxy gateway-token path — cannot bypass it by sending raw JSON. The
+column is omitted from the HTTP allowlist (`agentAllowedFields`) so a PUT
+body can never flip it on or off.
+
+Rationale: the canonical tenant default is the org-wide fallback for
+channels/cron/web chats without an explicit `agent_id`. Letting a tenant
+owner delete or mutate it would orphan every dependent flow with no
+auto-restore path. The flag survives RegisterAlias-style overwrites because
+it's a real column, not derived state.
+
+The SPA hides Edit / Delete / Clone buttons when `is_locked = true` so users
+don't try mutations they'll get 409 on. The flag rides on the agent JSON
+shape (`is_locked?: boolean`) — older clients ignore it harmlessly.
+
 ---
 
 ## 5. API Key Encryption
@@ -527,7 +551,7 @@ flowchart TD
 
 | Table | Purpose | Key Columns |
 |-------|---------|-------------|
-| `agents` | Agent definitions | `agent_key` (UNIQUE), `owner_id`, `agent_type` (open/predefined), `is_default`, `frontmatter`, `tsv`, `embedding`, soft delete via `deleted_at` |
+| `agents` | Agent definitions | `agent_key` (UNIQUE), `owner_id`, `agent_type` (open/predefined), `is_default`, `is_locked` (immutable canonical default), `frontmatter`, `tsv`, `embedding`, soft delete via `deleted_at` |
 | `agent_shares` | Agent RBAC sharing | UNIQUE(agent_id, user_id), `role` (user/admin/operator) |
 | `agent_context_files` | Agent-level context | UNIQUE(agent_id, file_name) |
 | `user_context_files` | Per-user context | UNIQUE(agent_id, user_id, file_name) |
