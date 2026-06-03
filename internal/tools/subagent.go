@@ -28,7 +28,7 @@ type SubagentConfig struct {
 	ArchiveAfterMinutes int    // auto-archive completed tasks (default 30)
 	MaxRetries          int    // max LLM call retries on error (default 2)
 	Model               string // model override for subagents (empty = inherit)
-	MaxTokens           int    // per-iteration LLM response budget; 0 = no cap (default 0)
+	MaxTokens           int    // per-iteration LLM response budget (default 8192)
 }
 
 // Subagent task status constants.

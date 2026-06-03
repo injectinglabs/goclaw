@@ -320,21 +320,14 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 			return iteration
 		}
 
-		// max_tokens is only forwarded when an explicit clamp is configured
-		// (SubagentConfig.MaxTokens > 0). The default is 0 = "no cap" — the
-		// provider's natural per-model output limit applies. Sending an
-		// explicit cap on Gemini routes is actively harmful with dynamic
-		// thinking budget: reasoning + visible content share the same
-		// allowance, so a tight cap routinely turned into empty content.
-		chatOpts := map[string]any{"temperature": 0.5}
-		if task.spawnConfig.MaxTokens > 0 {
-			chatOpts["max_tokens"] = task.spawnConfig.MaxTokens
-		}
 		chatReq := providers.ChatRequest{
 			Messages: messages,
 			Tools:    toolsReg.ProviderDefs(),
 			Model:    model,
-			Options:  chatOpts,
+			Options: map[string]any{
+				"max_tokens":  task.spawnConfig.MaxTokens,
+				"temperature": 0.5,
+			},
 		}
 
 		llmStart := time.Now().UTC()
