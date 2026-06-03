@@ -27,7 +27,8 @@ type InboundMessage struct {
 	PeerKind     string            `json:"peer_kind,omitempty"`     // "direct" or "group" (used for session key)
 	TenantID     uuid.UUID         `json:"tenant_id,omitempty"`     // tenant scope from channel instance
 	AgentID      string            `json:"agent_id,omitempty"`      // target agent (for multi-agent routing)
-	UserID       string            `json:"user_id,omitempty"`       // external user ID for per-user scoping (memory, bootstrap)
+	UserID       string            `json:"user_id,omitempty"`       // IDENTITY user ID for per-user scoping (memory, bootstrap). Resolved through channel_contacts.merged_id chain. May be a Telegram numeric ID when the sender isn't linked yet.
+	CreatedBy    string            `json:"created_by,omitempty"`    // BILLING owner: user_id of whoever connected this channel instance. Always a real platform user UUID. Used by the agent loop's actor headers so downstream attribution (ai_tasks.user_id, org quota) charges the bot owner regardless of who pressed Send on Telegram. See gateway_consumer_normal.go and loop_context.go.
 	HistoryLimit int               `json:"history_limit,omitempty"` // max turns to keep in context (0=unlimited, from channel config)
 	ToolAllow    []string          `json:"tool_allow,omitempty"`    // per-group tool allow list (nil = no restriction)
 	Metadata     map[string]string `json:"metadata,omitempty"`

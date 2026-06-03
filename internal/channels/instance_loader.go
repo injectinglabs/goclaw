@@ -357,6 +357,12 @@ func (l *InstanceLoader) loadInstance(ctx context.Context, inst store.ChannelIns
 	if base, ok := ch.(interface{ SetTenantID(uuid.UUID) }); ok {
 		base.SetTenantID(inst.TenantID)
 	}
+	// Propagate created_by (bot owner) for billing attribution. Threaded into
+	// bus.InboundMessage on every inbound message so the agent loop can split
+	// BILLING (always bot owner) from IDENTITY (linked merged contact).
+	if base, ok := ch.(interface{ SetCreatedBy(string) }); ok {
+		base.SetCreatedBy(inst.CreatedBy)
+	}
 	// Propagate tenant_id to pending history for compaction/sweep DB operations.
 	// Factory creates PendingHistory before SetTenantID is called, so tenantID is uuid.Nil at construction.
 	if ph, ok := ch.(interface{ SetPendingHistoryTenantID(uuid.UUID) }); ok {
