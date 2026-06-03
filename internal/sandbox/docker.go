@@ -110,6 +110,24 @@ func newDockerSandbox(ctx context.Context, name string, cfg Config, workspace st
 
 	slog.Debug("creating sandbox container", "name", name, "args", args)
 
+	// Best-effort: remove any stale container already holding this name. The name
+	// is deterministic per (agent, channel, user), and sandbox containers are host
+	// siblings (Docker-out-of-Docker) that outlive a GoClaw restart/redeploy. After
+	// a restart the in-memory manager (m.sandboxes) has no handle to them, so the
+	// `docker run --name` below would fail with exit status 125 ("container name
+	// already in use") — surfacing a raw Docker error to the user. Removing first
+	// makes creation idempotent and self-healing across restarts, crashes, and
+	// container recreation on deploy. A missing container makes `rm` exit non-zero,
+	// which is expected and harmless.
+	rmCtx, rmCancel := context.WithTimeout(ctx, 10*time.Second)
+	if out, err := exec.CommandContext(rmCtx, "docker", "rm", "-f", name).CombinedOutput(); err != nil {
+		slog.Debug("sandbox: pre-create rm found no stale container (or rm failed)",
+			"name", name, "output", strings.TrimSpace(string(out)))
+	} else {
+		slog.Info("sandbox: removed stale container before recreate", "name", name)
+	}
+	rmCancel()
+
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
