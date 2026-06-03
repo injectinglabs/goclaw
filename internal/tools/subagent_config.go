@@ -10,11 +10,17 @@ func DefaultSubagentConfig() SubagentConfig {
 		MaxSpawnDepth:       1,  // TS: maxSpawnDepth ?? 1
 		MaxChildrenPerAgent: 0,  // 0 = unlimited (per-parent fan-out off by default)
 		ArchiveAfterMinutes: 60, // TS: archiveAfterMinutes ?? 60
-		MaxRetries:          2,
-		// 8K (was 4K) so a Gemini-flavoured subagent has answer headroom
-		// after hidden reasoning eats part of the budget — Gemini counts
-		// thinking + content against the same max_tokens, unlike o-series.
-		MaxTokens: 8192,
+		MaxRetries: 2,
+		// 0 = do not send max_tokens to the provider; the model picks its
+		// own natural output cap (~24K on Gemini Flash 3.5, ~16K on Codex,
+		// etc.). A hard cap here used to read as "8192 ought to be enough"
+		// — fine for non-reasoning models, but on Gemini with a dynamic
+		// thinking budget the model could spend the whole 8K window on
+		// hidden reasoning and return finish_reason=length with empty
+		// content. Removing the cap lets the natural per-model limits do
+		// the right thing; per-agent overrides on the json5 side still
+		// work to clamp specific agents tighter.
+		MaxTokens: 0,
 	}
 }
 
