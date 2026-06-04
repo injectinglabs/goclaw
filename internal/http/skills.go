@@ -133,6 +133,12 @@ func (h *SkillsHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/skills/export/preview", h.adminMiddleware(h.handleSkillsExportPreview))
 	mux.HandleFunc("GET /v1/skills/export", h.adminMiddleware(h.handleSkillsExport))
 	mux.HandleFunc("POST /v1/skills/import", h.adminMiddleware(h.handleSkillsImport))
+	// Marketplace browser + update detection + audit log (Phase 2)
+	mux.HandleFunc("GET /v1/skills/marketplace", h.authMiddleware(h.handleMarketplaceFetch))
+	mux.HandleFunc("GET /v1/skills/marketplaces", h.authMiddleware(h.handleMarketplacesList))
+	mux.HandleFunc("POST /v1/skills/check-updates", h.authMiddleware(h.handleCheckUpdates))
+	mux.HandleFunc("POST /v1/skills/{id}/update", h.authMiddleware(h.handleSkillUpdate))
+	mux.HandleFunc("GET /v1/skills/install-events", h.adminMiddleware(h.handleInstallEvents))
 }
 
 func (h *SkillsHandler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {

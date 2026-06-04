@@ -65,6 +65,18 @@ func FetchGitHubTarball(ctx context.Context, owner, repo, ref string) (string, s
 	return tarPath, sha, cleanup, nil
 }
 
+// ResolveGitHubRef is the public wrapper around the package-private
+// resolveGitHubRef used by the HTTP check-updates handler. It exists so we
+// can resolve a ref → SHA without paying the cost of downloading the tarball.
+func ResolveGitHubRef(ctx context.Context, owner, repo, ref string) (string, error) {
+	if !ghOwnerRE.MatchString(owner) || !ghRepoRE.MatchString(repo) || !ghRefRE.MatchString(ref) {
+		return "", fmt.Errorf("github_fetcher: invalid owner/repo/ref")
+	}
+	ctx, cancel := context.WithTimeout(ctx, SkillFetchTimeout)
+	defer cancel()
+	return resolveGitHubRef(ctx, owner, repo, ref)
+}
+
 // resolveGitHubRef calls GET /repos/{owner}/{repo}/commits/{ref} and pulls
 // `sha` out of the JSON response. Accepts a tag, branch, or commit SHA.
 func resolveGitHubRef(ctx context.Context, owner, repo, ref string) (string, error) {

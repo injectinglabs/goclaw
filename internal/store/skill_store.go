@@ -23,6 +23,22 @@ type SkillInfo struct {
 	Enabled     bool     `json:"enabled" db:"enabled"`
 	Author      string   `json:"author,omitempty" db:"author"`
 	MissingDeps []string `json:"missing_deps,omitempty" db:"missing_deps"`
+
+	// Source-tracking fields populated by the install-from-URL pipeline
+	// (POST /v1/skills/install). All optional — local uploads / system skills
+	// leave them nil so they serialize as `null` / omitted.
+	SourceURL   *string `json:"source_url,omitempty" db:"source_url"`
+	SourceSHA   *string `json:"source_sha,omitempty" db:"source_sha"`
+	SourceRef   *string `json:"source_ref,omitempty" db:"source_ref"`
+	InstalledBy *string `json:"installed_by,omitempty" db:"installed_by"`
+	InstalledAt *string `json:"installed_at,omitempty" db:"installed_at"`
+
+	// Update-tracking fields populated by POST /v1/skills/check-updates.
+	// UpdateAvailableSHA is non-nil when an update is detected; the UI uses
+	// it to render an update banner / button.
+	UpdateAvailableSHA *string `json:"update_available_sha,omitempty" db:"update_available_sha"`
+	UpdateAvailableRef *string `json:"update_available_ref,omitempty" db:"update_available_ref"`
+	LastUpdateCheck    *string `json:"last_update_check,omitempty" db:"last_update_check"`
 }
 
 // SkillSearchResult is a scored skill returned from embedding search.
