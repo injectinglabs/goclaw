@@ -10,9 +10,12 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
@@ -175,6 +178,45 @@ func (l *Loop) ExternalOrgID() string { return l.externalOrgID }
 // Used as a fallback for outbound actor identity when ExternalOrgID is
 // empty during rollout.
 func (l *Loop) TenantSlug() string { return l.tenantSlug }
+
+// ActorContext attaches the downstream actor-identity headers
+// (X-Actor-User-ID / X-Actor-Org-ID / X-Actor-Agent-ID) to ctx for
+// outbound OpenAI-compatible calls that DON'T flow through the main Run
+// pipeline — currently the busy-DM intent classifier in the gateway
+// consumer, which calls provider.Chat directly. Without these, trusted
+// service-token receivers (web-agent-api) 400 with "Service-token auth
+// requires X-Actor-User-ID and X-Actor-Org-ID headers".
+//
+// This is the single source of truth for the attribution logic;
+// loop_context.go's main-run path calls it too. actorUserID is the
+// billing identity (bot owner for channels, the user for in-app). When
+// it's empty there's no attributable actor, so ctx is returned unchanged
+// rather than emitting a half-populated header set.
+//
+// X-Actor-Org-ID preference order: externalOrgID (canonical web-backend
+// organizations.id) → tenant slug from ctx → l.tenantSlug (rollout
+// fallback). X-Actor-Agent-ID is the calling agent's UUID, used by MCP
+// sidecars as the default resource owner.
+func (l *Loop) ActorContext(ctx context.Context, actorUserID string) context.Context {
+	if actorUserID == "" {
+		return ctx
+	}
+	actor := map[string]string{"X-Actor-User-ID": actorUserID}
+	orgID := l.externalOrgID
+	if orgID == "" {
+		orgID = store.TenantSlugFromContext(ctx)
+		if orgID == "" {
+			orgID = l.tenantSlug
+		}
+	}
+	if orgID != "" {
+		actor["X-Actor-Org-ID"] = orgID
+	}
+	if l.agentUUID != uuid.Nil {
+		actor["X-Actor-Agent-ID"] = l.agentUUID.String()
+	}
+	return providers.WithActorHeaders(ctx, actor)
+}
 
 // ProviderName returns the name of this agent's LLM provider (e.g. "anthropic", "openai").
 func (l *Loop) ProviderName() string {

@@ -290,7 +290,18 @@ func processNormalMessage(
 			if locale == "" {
 				locale = "en"
 			}
-			intent := agent.ClassifyIntent(ctx, loop.Provider(), loop.Model(), msg.Content)
+			// ClassifyIntent calls the provider directly, bypassing the
+			// Run pipeline that normally stamps actor headers — so attach
+			// them here, or web-agent-api 400s the service-token call
+			// ("requires X-Actor-User-ID and X-Actor-Org-ID"). Billing
+			// identity mirrors the RunRequest below: bot owner (CreatedBy)
+			// for channels, falling back to the message's userID.
+			classifyActor := msg.CreatedBy
+			if classifyActor == "" {
+				classifyActor = userID
+			}
+			classifyCtx := loop.ActorContext(ctx, classifyActor)
+			intent := agent.ClassifyIntent(classifyCtx, loop.Provider(), loop.Model(), msg.Content)
 			switch intent {
 			case agent.IntentStatusQuery:
 				status := deps.Agents.GetActivity(sessionKey)
