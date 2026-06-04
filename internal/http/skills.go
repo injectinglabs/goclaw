@@ -89,6 +89,8 @@ func (h *SkillsHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/skills/{id}/files", h.authMiddleware(h.handleListFiles))
 	// Skill writes (admin+)
 	mux.HandleFunc("POST /v1/skills/upload", h.adminMiddleware(h.handleUpload))
+	mux.HandleFunc("POST /v1/skills/install", h.adminMiddleware(h.handleInstall))
+	mux.HandleFunc("POST /v1/skills/preview", h.authMiddleware(h.handlePreview))
 	mux.HandleFunc("PUT /v1/skills/{id}", h.adminMiddleware(h.handleUpdate))
 	mux.HandleFunc("DELETE /v1/skills/{id}", h.adminMiddleware(h.handleDelete))
 	// Skill grants (admin+)
