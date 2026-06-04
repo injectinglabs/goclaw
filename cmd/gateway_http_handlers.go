@@ -35,7 +35,7 @@ func wireHTTP(stores *store.Stores, defaultWorkspace, dataDir, bundledSkillsDir 
 		if manageStore, ok := stores.Skills.(store.SkillManageStore); ok {
 			dirs := manageStore.Dirs()
 			if len(dirs) > 0 {
-				skillsH = httpapi.NewSkillsHandler(manageStore, dirs[0], dataDir, bundledSkillsDir, msgBus, stores.SkillTenantCfgs, stores.Tenants)
+				skillsH = httpapi.NewSkillsHandler(manageStore, dirs[0], dataDir, bundledSkillsDir, msgBus, stores.SkillTenantCfgs, stores.Tenants, stores.SkillHubs)
 				skillsH.SetDB(stores.DB)
 			}
 		}

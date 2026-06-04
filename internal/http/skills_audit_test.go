@@ -26,7 +26,7 @@ func newAuditHandler(t *testing.T) (*SkillsHandler, sqlmock.Sqlmock) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	baseDir := t.TempDir()
-	h := NewSkillsHandler(newSkillManageStoreStub(baseDir), baseDir, baseDir, "", bus.New(), nil, nil)
+	h := NewSkillsHandler(newSkillManageStoreStub(baseDir), baseDir, baseDir, "", bus.New(), nil, nil, nil)
 	h.SetDB(db)
 	return h, mock
 }

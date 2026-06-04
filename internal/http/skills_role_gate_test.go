@@ -35,7 +35,7 @@ func newRoleGateHandler(t *testing.T, ts *mockTenantStore) (*SkillsHandler, *ski
 	root := t.TempDir()
 	baseDir := filepath.Join(root, "skills-store")
 	skillStore := newSkillManageStoreStub(baseDir)
-	handler := NewSkillsHandler(skillStore, baseDir, root, "", bus.New(), nil, ts)
+	handler := NewSkillsHandler(skillStore, baseDir, root, "", bus.New(), nil, ts, nil)
 	return handler, skillStore, root
 }
 

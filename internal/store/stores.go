@@ -32,6 +32,7 @@ type Stores struct {
 	Tenants                TenantStore
 	BuiltinToolTenantCfgs  BuiltinToolTenantConfigStore
 	SkillTenantCfgs        SkillTenantConfigStore
+	SkillHubs              SkillHubStore
 	SystemConfigs          SystemConfigStore
 	SubagentTasks          SubagentTaskStore
 	Vault                  VaultStore

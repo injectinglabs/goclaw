@@ -54,7 +54,7 @@ func newCheckUpdatesHandler(t *testing.T) (*SkillsHandler, sqlmock.Sqlmock, *ski
 
 	baseDir := t.TempDir()
 	skillStore := newSkillManageStoreStub(baseDir)
-	h := NewSkillsHandler(skillStore, baseDir, baseDir, "", bus.New(), nil, nil)
+	h := NewSkillsHandler(skillStore, baseDir, baseDir, "", bus.New(), nil, nil, nil)
 	h.SetDB(db)
 
 	ctx := store.WithLocale(
@@ -268,7 +268,7 @@ func TestSkillUpdate_NonAdminCannotUpdatePublic(t *testing.T) {
 
 	baseDir := t.TempDir()
 	skillStore := newSkillManageStoreStub(baseDir)
-	h := NewSkillsHandler(skillStore, baseDir, baseDir, "", bus.New(), nil, ts)
+	h := NewSkillsHandler(skillStore, baseDir, baseDir, "", bus.New(), nil, ts, nil)
 	h.SetDB(db)
 
 	skillID := uuid.New()
