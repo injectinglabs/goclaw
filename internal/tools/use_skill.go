@@ -4,15 +4,26 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
+
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
-// UseSkillTool is a marker tool for observability.
-// It generates tool.call / tool.result events in spans and realtime
-// so skill activation is visible in tracing. The actual skill content
-// is still loaded via read_file — this tool is a deliberate no-op.
-type UseSkillTool struct{}
+// UseSkillTool gates skill activation by the caller's grants/visibility, then
+// emits a tracing event and returns the SKILL.md path for the model to read.
+// Without the gate, members of a shared tenant could "activate" another
+// member's private skill and the model would hallucinate its contents.
+type UseSkillTool struct {
+	access store.SkillAccessStore // nil in single-user editions; gate is skipped
+}
 
 func NewUseSkillTool() *UseSkillTool { return &UseSkillTool{} }
+
+// SetSkillAccessStore enables the multi-tenant access check. Mirrors the
+// skill_search wiring in cmd/gateway_setup.go.
+func (t *UseSkillTool) SetSkillAccessStore(sas store.SkillAccessStore) {
+	t.access = sas
+}
 
 func (t *UseSkillTool) Name() string { return "use_skill" }
 
@@ -37,13 +48,55 @@ func (t *UseSkillTool) Parameters() map[string]any {
 	}
 }
 
-func (t *UseSkillTool) Execute(_ context.Context, args map[string]any) *Result {
+func (t *UseSkillTool) Execute(ctx context.Context, args map[string]any) *Result {
 	name, _ := args["name"].(string)
+	name = strings.TrimSpace(name)
 	if name == "" {
 		return ErrorResult("name parameter is required")
 	}
 
-	slog.Info("skill.activated", "skill", name)
+	if t.access == nil {
+		// Single-user / desktop edition — no multi-tenant boundary to enforce.
+		slog.Info("skill.activated", "skill", name, "gated", false)
+		return NewResult(activationMessage(name, ""))
+	}
 
-	return NewResult(fmt.Sprintf("Skill %q activated. Proceed to read the skill's SKILL.md with read_file.", name))
+	userID := store.UserIDFromContext(ctx)
+	accessible, err := t.access.ListAccessible(ctx, store.AgentIDFromContext(ctx), userID)
+	if err != nil {
+		slog.Warn("use_skill: access lookup failed", "skill", name, "error", err)
+		return ErrorResult("skill access lookup failed; try again")
+	}
+
+	match := findSkill(accessible, name)
+	if match == nil {
+		// Same response shape as "skill does not exist" so callers can't
+		// probe for the existence of skills they shouldn't see.
+		slog.Info("security.use_skill.denied", "skill", name, "user", userID)
+		return ErrorResult(fmt.Sprintf("skill %q not found", name))
+	}
+
+	slog.Info("skill.activated", "skill", match.Slug, "user", userID, "gated", true)
+	return NewResult(activationMessage(match.Slug, match.Path))
+}
+
+// findSkill matches by slug then by display name, case-insensitively.
+func findSkill(skills []store.SkillInfo, query string) *store.SkillInfo {
+	for i := range skills {
+		if strings.EqualFold(skills[i].Slug, query) || strings.EqualFold(skills[i].Name, query) {
+			return &skills[i]
+		}
+	}
+	return nil
+}
+
+// activationMessage builds the user-facing tool result. When path is known,
+// pointing the model at it prevents probing the filesystem with list_files /
+// bash for SKILL.md candidates (which is what +31's run did and what tipped
+// us off to this bug).
+func activationMessage(slug, path string) string {
+	if path != "" {
+		return fmt.Sprintf("Skill %q activated. Read its SKILL.md with read_file(%q).", slug, path)
+	}
+	return fmt.Sprintf("Skill %q activated. Proceed to read the skill's SKILL.md with read_file.", slug)
 }
