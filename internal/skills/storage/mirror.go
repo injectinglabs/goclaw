@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -242,6 +241,44 @@ func (m *Mirror) DeletePrefix(ctx context.Context, keyPrefix string) error {
 	return nil
 }
 
+// EnsureLocal hydrates a single (slug, version) tree from S3 into localDir
+// when the local copy is missing. Idempotent: a populated localDir short-
+// circuits without an S3 round-trip. Returns the number of files
+// downloaded (0 means "already had it locally"). Used by the startup
+// sync to backfill a fresh ASG node and by the runtime miss-handler
+// when a file disappears between two reads.
+//
+// The "populated" check is intentionally lax: any regular file inside
+// localDir counts. We assume nothing else writes into the per-version
+// dir, so seeing any file means the install completed.
+func (m *Mirror) EnsureLocal(ctx context.Context, keyPrefix, localDir string) (int, error) {
+	if hasLocalFiles(localDir) {
+		return 0, nil
+	}
+	return m.DownloadDir(ctx, keyPrefix, localDir)
+}
+
+// hasLocalFiles returns true when localDir contains at least one regular
+// file. Empty dirs and missing dirs both count as "needs download".
+func hasLocalFiles(localDir string) bool {
+	stat, err := os.Stat(localDir)
+	if err != nil || !stat.IsDir() {
+		return false
+	}
+	var found bool
+	_ = filepath.WalkDir(localDir, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if d.Type().IsRegular() {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
 // HasObjects probes whether at least one object exists under keyPrefix.
 // Used by the startup warm-up to decide whether to attempt a download.
 // A missing prefix is not an error — the function returns ok=false, nil.
@@ -257,7 +294,3 @@ func (m *Mirror) HasObjects(ctx context.Context, keyPrefix string) (bool, error)
 	return out.KeyCount != nil && *out.KeyCount > 0, nil
 }
 
-// SafeBucket returns the bucket name with any URL-unsafe chars escaped
-// for use in log fields. Helps when bucket names contain dots (legal in
-// S3, sometimes copy-pasted into Cloudflare KV / Slack search).
-func (m *Mirror) SafeBucket() string { return url.PathEscape(m.bucket) }

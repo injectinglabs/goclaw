@@ -78,6 +78,11 @@ func (h *SkillsHandler) skillUploadLock(scopeKey string) *sync.Mutex {
 // the install — the skill still works on the originating node.
 func (h *SkillsHandler) SetS3Mirror(m *skillstorage.Mirror) { h.s3Mirror = m }
 
+// S3Mirror exposes the wired mirror for gateway-level consumers (startup
+// sync, disk-pressure sweeper). Returns nil when the mirror feature is
+// disabled (lite / single-node deployments without GOCLAW_SKILLS_S3_BUCKET).
+func (h *SkillsHandler) S3Mirror() *skillstorage.Mirror { return h.s3Mirror }
+
 // mirrorSkillToS3 is the single hook into the S3 backing path. Called
 // after a successful local extract; the DB row may or may not exist yet
 // (we run it post-DB to keep the consistent "DB row implies S3 prefix"
