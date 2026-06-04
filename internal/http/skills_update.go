@@ -73,10 +73,13 @@ func (h *SkillsHandler) handleCheckUpdates(w http.ResponseWriter, r *http.Reques
 	}
 	checkUpdateLastCall.Store(tid, time.Now())
 
+	// The skills table has no `deleted_at` column — soft-delete is via
+	// `status = 'deleted'`. Filtering by status keeps deleted rows out of
+	// the update poll without the earlier 500 (column does not exist).
 	rows, err := h.db.QueryContext(ctx,
 		`SELECT id, slug, source_url, source_sha, source_ref
 		   FROM skills
-		  WHERE deleted_at IS NULL
+		  WHERE status != 'deleted'
 		    AND source_url IS NOT NULL
 		    AND tenant_id = $1`, tid)
 	if err != nil {
