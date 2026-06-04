@@ -77,6 +77,13 @@ type SkillCreateParams struct {
 	FileSize    int64
 	FileHash    *string
 	Frontmatter map[string]string
+
+	// Source-tracking fields populated by the install-from-URL pipeline
+	// (POST /v1/skills/install). All optional — local uploads leave them empty.
+	SourceURL   *string // canonical install source (github:owner/repo@ref or https://*.tar.gz)
+	SourceSHA   *string // resolved commit SHA (github) or sha-256 of tarball (URL)
+	SourceRef   *string // human-readable ref (tag/branch) before SHA resolution
+	InstalledBy *string // user UUID who triggered the install
 }
 
 // SkillWithGrantStatus is a skill with its grant status for a specific agent.
