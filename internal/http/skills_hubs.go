@@ -218,31 +218,31 @@ func fetchAndParseHub(parentCtx context.Context, rawURL string) (HubIndexRespons
 	return parsed, nil
 }
 
-// parseHubJSON tries both supported schemas.
+// parseHubJSON dispatches across the three real-world hub schemas. The
+// shapes share the same outer envelope (name/description/plugins or
+// skills), so we unmarshal once into a permissive struct and let helpers
+// flatten the per-plugin variants. srcURL is required so monorepo-style
+// hubs can resolve their relative `./path/to/skill` entries against the
+// owner/repo/ref of the marketplace JSON itself.
 //
-// Our format (index.json):
+//  1. native — our own index.json: top-level `skills` array of full entries
+//     already in canonical (slug + source) form.
 //
-//	{"name", "description", "skills":[{slug, source, ...}]}
+//  2. anthropic-bundle — `anthropics/skills` style: plugin.skills is a list
+//     of repo-relative paths, each becoming its own HubSkillEntry.
 //
-// Anthropic format (marketplace.json), as actually served:
+//  3. community-plugin-as-skill — every other public hub seen so far. Each
+//     plugin entry IS one skill. Its `source` is either:
+//       - a monorepo string ("./marketing-skill", "plugins/foo"); resolves
+//         against the hub URL's owner/repo/ref;
+//       - an external-repo object ({source:"github", repo:"owner/name"});
+//       - a canonical "github:..." locator (we pass it through).
 //
-//	{
-//	  "name": "...",
-//	  "metadata": {"description": "...", "version": "..."},
-//	  "plugins": [
-//	    {"name": "...", "description": "...", "skills": ["./skills/pdf", ...]},
-//	    ...
-//	  ]
-//	}
-//
-// Each plugin is a bundle; each entry in plugin.skills[] is a repo-relative
-// path that we flatten into its own HubSkillEntry. The skill's install
-// source is derived from the hub URL itself
-// (raw.githubusercontent.com/{owner}/{repo}/{ref}/...), so srcURL must be
-// the same string the handler is going to cache against.
+// The order matters: native first (cheapest unmarshal), then plugins-based
+// schemas. We only fall back to community when no plugin had a `skills`
+// array — otherwise an Anthropic-style hub with a single empty plugin would
+// be misclassified.
 func parseHubJSON(body []byte, srcURL string) (HubIndexResponse, error) {
-	// First try "skills" shape (ours). No URL context needed — sources are
-	// already canonical locator strings.
 	var native rawHubIndex
 	if err := json.Unmarshal(body, &native); err == nil && len(native.Skills) > 0 {
 		return HubIndexResponse{
@@ -252,39 +252,133 @@ func parseHubJSON(body []byte, srcURL string) (HubIndexResponse, error) {
 		}, nil
 	}
 
-	// Then try "plugins" shape (Anthropic).
 	var anth rawAnthropicHubIndex
-	if err := json.Unmarshal(body, &anth); err == nil && len(anth.Plugins) > 0 {
-		owner, repo, ref, basePath, urlErr := skills.ParseMarketplaceURL(srcURL)
-		if urlErr != nil {
-			return HubIndexResponse{}, fmt.Errorf("hub: cannot derive github source from URL: %w", urlErr)
-		}
-		description := anth.Description
-		if description == "" {
-			description = anth.Metadata.Description
-		}
-
-		flattened := make([]HubSkillEntry, 0)
-		for _, p := range anth.Plugins {
-			if len(p.Skills) == 0 {
-				continue
-			}
-			for _, rel := range p.Skills {
-				entry, ok := buildAnthropicHubSkillEntry(p.Name, p.Description, p.Tags, rel, owner, repo, ref, basePath)
-				if !ok {
-					continue
-				}
-				flattened = append(flattened, entry)
-			}
-		}
-		return HubIndexResponse{
-			Name:        anth.Name,
-			Description: description,
-			Skills:      flattened,
-		}, nil
+	if err := json.Unmarshal(body, &anth); err != nil || len(anth.Plugins) == 0 {
+		return HubIndexResponse{}, fmt.Errorf("hub: payload does not match a supported schema (skills[] or plugins[])")
 	}
 
-	return HubIndexResponse{}, fmt.Errorf("hub: payload does not match a supported schema (skills[] or plugins[])")
+	owner, repo, ref, basePath, urlErr := skills.ParseMarketplaceURL(srcURL)
+	if urlErr != nil {
+		return HubIndexResponse{}, fmt.Errorf("hub: cannot derive github source from URL: %w", urlErr)
+	}
+	description := anth.Description
+	if description == "" {
+		description = anth.Metadata.Description
+	}
+
+	flattened := make([]HubSkillEntry, 0)
+	anyPluginHadSkills := false
+	for _, p := range anth.Plugins {
+		if len(p.Skills) == 0 {
+			continue
+		}
+		anyPluginHadSkills = true
+		for _, rel := range p.Skills {
+			entry, ok := buildAnthropicHubSkillEntry(p.Name, p.Description, p.Tags, rel, owner, repo, ref, basePath)
+			if !ok {
+				continue
+			}
+			flattened = append(flattened, entry)
+		}
+	}
+	// Anthropic-bundle path: at least one plugin had a skills[] array.
+	if anyPluginHadSkills {
+		return HubIndexResponse{Name: anth.Name, Description: description, Skills: flattened}, nil
+	}
+
+	// Community plugin-as-skill: each plugin contributes exactly one entry.
+	for _, p := range anth.Plugins {
+		entry, ok := buildCommunityHubSkillEntry(p.Name, p.Description, p.Tags, p.Source, owner, repo, ref)
+		if !ok {
+			continue
+		}
+		flattened = append(flattened, entry)
+	}
+	return HubIndexResponse{Name: anth.Name, Description: description, Skills: flattened}, nil
+}
+
+// buildCommunityHubSkillEntry turns one community-schema plugin into a
+// HubSkillEntry. Source can be a string (monorepo relative path OR full
+// "github:" locator) or an object {source:"github", repo:"owner/name"}.
+// hubOwner/hubRepo/hubRef come from the marketplace URL itself — used to
+// resolve relative monorepo paths into stable canonical sources.
+func buildCommunityHubSkillEntry(pluginName, pluginDescription string, pluginTags []string, rawSource any, hubOwner, hubRepo, hubRef string) (HubSkillEntry, bool) {
+	slug := slugFromName(pluginName)
+	if slug == "" {
+		return HubSkillEntry{}, false
+	}
+	source, ok := resolveCommunitySource(rawSource, hubOwner, hubRepo, hubRef)
+	if !ok {
+		return HubSkillEntry{}, false
+	}
+	tags := pluginTags
+	if tags == nil {
+		tags = []string{}
+	}
+	return HubSkillEntry{
+		Slug:        slug,
+		Name:        humanizeSlug(slug),
+		Description: pluginDescription,
+		Source:      source,
+		Tags:        tags,
+		Verified:    false,
+	}, true
+}
+
+// resolveCommunitySource normalises every community `source` shape into a
+// canonical "github:owner/repo[/path]@ref" locator the install pipeline
+// understands. Returns ok=false when the source is unrecognised — those
+// plugins are skipped rather than emitting a broken Install button.
+func resolveCommunitySource(raw any, hubOwner, hubRepo, hubRef string) (string, bool) {
+	switch s := raw.(type) {
+	case string:
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return "", false
+		}
+		// Already canonical.
+		if strings.HasPrefix(s, "github:") {
+			return s, true
+		}
+		// Monorepo relative path → resolve against hub URL.
+		cleaned := strings.TrimPrefix(s, "./")
+		cleaned = strings.Trim(cleaned, "/")
+		if cleaned == "" || strings.Contains(cleaned, "..") || hubOwner == "" || hubRepo == "" {
+			return "", false
+		}
+		ref := hubRef
+		if ref == "" {
+			ref = "main"
+		}
+		return fmt.Sprintf("github:%s/%s/%s@%s", hubOwner, hubRepo, cleaned, ref), true
+	case map[string]any:
+		// External-repo object: {source:"github", repo:"owner/name", tag/version?}
+		kind, _ := s["source"].(string)
+		repoPath, _ := s["repo"].(string)
+		repoPath = strings.Trim(strings.TrimSpace(repoPath), "/")
+		if !strings.EqualFold(kind, "github") || repoPath == "" || !strings.Contains(repoPath, "/") {
+			return "", false
+		}
+		ref := stringFromAny(s["tag"])
+		if ref == "" {
+			ref = stringFromAny(s["version"])
+		}
+		if ref == "" {
+			ref = stringFromAny(s["branch"])
+		}
+		if ref == "" {
+			ref = "main"
+		}
+		return fmt.Sprintf("github:%s@%s", repoPath, ref), true
+	}
+	return "", false
+}
+
+// stringFromAny is a defensive type-assertion helper for the loose
+// map[string]any returned by encoding/json on optional fields.
+func stringFromAny(v any) string {
+	s, _ := v.(string)
+	return strings.TrimSpace(s)
 }
 
 // buildAnthropicHubSkillEntry turns a single plugin.skills[] entry (a
