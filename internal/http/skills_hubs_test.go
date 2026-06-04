@@ -326,3 +326,102 @@ func TestHub_RealAnthropicEndpoint(t *testing.T) {
 	}
 }
 
+// ─── Community plugin-as-skill schema ───────────────────────────────
+
+// Monorepo variant: plugin.source is a relative path like "./marketing-skill"
+// and the install URL resolves against the hub URL's owner/repo/ref.
+// Matches alirezarezvani/claude-skills, jeremylongshore/..., rohitg00/...
+func TestHub_Community_Monorepo(t *testing.T) {
+	resetHubFetchCache(t)
+	const body = `{
+		"name": "Alireza Skills",
+		"description": "Curated coding agent skills",
+		"plugins": [
+			{
+				"name": "marketing-skills",
+				"description": "44 marketing skills across 7 pods",
+				"source": "./marketing-skill",
+				"category": "marketing",
+				"keywords": ["marketing", "seo"]
+			},
+			{
+				"name": "sales-skills",
+				"description": "Sales enablement library",
+				"source": "./sales-skill"
+			}
+		]
+	}`
+	resp := parseOrFail(t, "https://raw.githubusercontent.com/alirezarezvani/claude-skills/main/.claude-plugin/marketplace.json", body)
+	if len(resp.Skills) != 2 {
+		t.Fatalf("expected 2 community skills, got %d", len(resp.Skills))
+	}
+	want := "github:alirezarezvani/claude-skills/marketing-skill@main"
+	if resp.Skills[0].Source != want {
+		t.Fatalf("source = %q, want %q", resp.Skills[0].Source, want)
+	}
+	if resp.Skills[0].Slug != "marketing-skills" {
+		t.Fatalf("slug = %q, want marketing-skills (from plugin.name)", resp.Skills[0].Slug)
+	}
+}
+
+// External-repo variant: plugin.source is an object pointing at a separate
+// GitHub repo. Matches netresearch/claude-code-marketplace.
+func TestHub_Community_ExternalRepo(t *testing.T) {
+	resetHubFetchCache(t)
+	const body = `{
+		"name": "Netresearch",
+		"plugins": [
+			{
+				"name": "enterprise-readiness",
+				"description": "Supply-chain hardening",
+				"source": {"source": "github", "repo": "netresearch/enterprise-readiness-skill"},
+				"category": "security"
+			}
+		]
+	}`
+	resp := parseOrFail(t, "https://raw.githubusercontent.com/netresearch/claude-code-marketplace/main/.claude-plugin/marketplace.json", body)
+	if len(resp.Skills) != 1 {
+		t.Fatalf("expected 1 external-repo skill, got %d", len(resp.Skills))
+	}
+	want := "github:netresearch/enterprise-readiness-skill@main"
+	if resp.Skills[0].Source != want {
+		t.Fatalf("source = %q, want %q", resp.Skills[0].Source, want)
+	}
+}
+
+// Mixed Anthropic + community in one hub: as long as at least one plugin
+// has a skills[] array, we use the Anthropic flatten path for everyone —
+// no implicit downgrade. Verifies we don't mis-classify and skip plugins
+// that DO have skills[] just because another plugin has source-only.
+func TestHub_Community_MixedDoesNotDowngrade(t *testing.T) {
+	resetHubFetchCache(t)
+	const body = `{
+		"name": "Mixed",
+		"plugins": [
+			{"name": "anthropic-bundle", "skills": ["./skills/pdf"]},
+			{"name": "community-only", "source": "./somewhere"}
+		]
+	}`
+	resp := parseOrFail(t, "https://raw.githubusercontent.com/foo/bar/main/.claude-plugin/marketplace.json", body)
+	if len(resp.Skills) != 1 || resp.Skills[0].Slug != "pdf" {
+		t.Fatalf("expected only the anthropic-bundle skill (pdf); got %+v", resp.Skills)
+	}
+}
+
+// resolveCommunitySource handles unknown shapes (null, number) by skipping
+// the plugin rather than emitting a broken Install button.
+func TestHub_Community_UnknownSourceSkipped(t *testing.T) {
+	resetHubFetchCache(t)
+	const body = `{
+		"name": "Broken",
+		"plugins": [
+			{"name": "good", "source": "./ok"},
+			{"name": "bad-null", "source": null},
+			{"name": "bad-number", "source": 42}
+		]
+	}`
+	resp := parseOrFail(t, "https://raw.githubusercontent.com/o/r/main/.claude-plugin/marketplace.json", body)
+	if len(resp.Skills) != 1 || resp.Skills[0].Slug != "good" {
+		t.Fatalf("expected only the good plugin to survive; got %+v", resp.Skills)
+	}
+}
