@@ -49,7 +49,31 @@ var (
 // GitHub-style tarballs wrap everything in a single top-level directory
 // (`{repo}-{sha[:7]}/...`). If every entry shares such a prefix, it is
 // stripped so destDir receives the skill contents directly (SKILL.md at root).
+//
+// For monorepo skill bundles (e.g. anthropics/skills with one skill per
+// subdirectory), use ExtractTarballSubdir to pull just one subdir.
 func ExtractTarball(tarballPath, destDir string) error {
+	return extractTarballInternal(tarballPath, destDir, "")
+}
+
+// ExtractTarballSubdir behaves like ExtractTarball but additionally restricts
+// the extracted contents to a subdirectory within the (stripped) archive root.
+// Files outside that subdirectory are silently skipped.
+//
+// subdir is interpreted relative to the archive root after the GitHub-style
+// `{repo}-{sha7}/` wrapper is stripped. An empty subdir is equivalent to
+// plain ExtractTarball. The subdir's own path prefix is removed from each
+// entry's name so that the destination receives just the subdir's children
+// (SKILL.md at root, etc.).
+func ExtractTarballSubdir(tarballPath, destDir, subdir string) error {
+	clean := strings.Trim(strings.ReplaceAll(subdir, "\\", "/"), "/")
+	if pathTraversalRE.MatchString(clean) {
+		return fmt.Errorf("%w: subdir %q", ErrTarballPathTraversal, subdir)
+	}
+	return extractTarballInternal(tarballPath, destDir, clean)
+}
+
+func extractTarballInternal(tarballPath, destDir, subdir string) error {
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return fmt.Errorf("tarball_extractor: mkdir dest: %w", err)
 	}
@@ -128,6 +152,24 @@ func ExtractTarball(tarballPath, destDir string) error {
 		if entryName == "" {
 			// The wrapper directory itself — skip.
 			continue
+		}
+		// Subdir restriction: when extracting a monorepo skill, keep only
+		// entries beneath the requested subdir and re-root their paths so the
+		// destination directory receives the skill at its top level.
+		if subdir != "" {
+			subPrefix := subdir + "/"
+			switch {
+			case entryName == subdir:
+				// The subdir itself — nothing to write at root.
+				continue
+			case strings.HasPrefix(entryName, subPrefix):
+				entryName = entryName[len(subPrefix):]
+				if entryName == "" {
+					continue
+				}
+			default:
+				continue
+			}
 		}
 		if IsSystemArtifact(entryName) {
 			continue

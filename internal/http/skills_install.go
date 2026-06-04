@@ -120,7 +120,7 @@ func (h *SkillsHandler) handleInstall(w http.ResponseWriter, r *http.Request) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	if err := skills.ExtractTarball(tarPath, tmpDir); err != nil {
+	if err := skills.ExtractTarballSubdir(tarPath, tmpDir, src.Path); err != nil {
 		slog.Warn("skills.install: extract failed", "user_id", userID, "source", body.Source, "error", err)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidRequest, "extract: "+err.Error())})
 		return
@@ -317,6 +317,9 @@ func (h *SkillsHandler) fetchSkillTarball(ctx context.Context, src skills.SkillS
 			return "", "", noopCleanupFn, "", "", err
 		}
 		canonical := fmt.Sprintf("github:%s/%s@%s", src.Owner, src.Repo, src.Ref)
+		if src.Path != "" {
+			canonical = fmt.Sprintf("github:%s/%s/%s@%s", src.Owner, src.Repo, src.Path, src.Ref)
+		}
 		return tarPath, sha, cleanup, canonical, src.Ref, nil
 	case "url":
 		tarPath, sha, cleanup, err := skills.FetchURLTarball(ctx, src.URL)

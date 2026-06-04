@@ -86,16 +86,41 @@ type rawMarketplaceIndex struct {
 	Skills      []MarketplaceSkillEntry `json:"skills"`
 }
 
-// rawAnthropicMarketplace matches the Anthropic Claude Code marketplace.json schema.
+// rawAnthropicMarketplace matches the Anthropic Claude Code marketplace.json
+// schema as actually served at
+// https://raw.githubusercontent.com/anthropics/skills/main/.claude-plugin/marketplace.json
+//
+// Each plugin entry is a *bundle* of skills, not a single skill. The plugin
+// itself does not carry a github source struct; the skills array holds
+// repo-relative paths like "./skills/pdf" which resolve against the
+// marketplace URL's owner/repo/ref.
 type rawAnthropicMarketplace struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	Name     string `json:"name"`
+	Metadata struct {
+		Description string `json:"description"`
+		Version     string `json:"version"`
+	} `json:"metadata"`
+	Description string `json:"description"` // legacy/top-level, falls back to metadata.description
 	Plugins     []struct {
 		Name        string   `json:"name"`
 		Description string   `json:"description"`
 		Source      any      `json:"source"`
 		Tags        []string `json:"tags"`
+		Skills      []string `json:"skills"`
 	} `json:"plugins"`
+}
+
+// acceptedMarketplaceContentTypes lists the content-types we accept directly
+// without falling back to JSON-parse. GitHub raw serves `.json` as
+// `text/plain; charset=utf-8`, so the historical strict check rejected the
+// canonical Anthropic marketplace entirely.
+var acceptedMarketplaceContentTypes = map[string]bool{
+	"":                         true, // some self-hosted servers omit it
+	"application/json":         true,
+	"application/jsonl":        true, // defensive (we don't actually parse jsonl)
+	"text/plain":               true, // GitHub raw, GitLab raw
+	"text/json":                true,
+	"application/octet-stream": true, // some CDNs
 }
 
 // handleMarketplaceFetch parses ?source=<url>, validates the host allowlist,
@@ -179,9 +204,6 @@ func fetchAndParseMarketplace(parentCtx context.Context, rawURL string) (Marketp
 	}
 
 	ct := strings.ToLower(strings.TrimSpace(strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0]))
-	if ct != "" && ct != marketplaceJSONHeader && ct != "text/json" {
-		return MarketplaceIndexResponse{}, fmt.Errorf("marketplace: unexpected content-type %q", ct)
-	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, marketplaceMaxBytes+1))
 	if err != nil {
@@ -191,7 +213,17 @@ func fetchAndParseMarketplace(parentCtx context.Context, rawURL string) (Marketp
 		return MarketplaceIndexResponse{}, fmt.Errorf("marketplace: body exceeds 1MB limit")
 	}
 
-	parsed, err := parseMarketplaceJSON(body)
+	// Most upstreams (GitHub/GitLab raw, S3, self-hosted) misreport JSON files
+	// as text/plain, text/json, or octet-stream. Accept the common set
+	// directly; for anything else, try a best-effort JSON.Valid probe before
+	// rejecting. The parser itself is the final arbiter.
+	if !acceptedMarketplaceContentTypes[ct] {
+		if !json.Valid(body) {
+			return MarketplaceIndexResponse{}, fmt.Errorf("marketplace: unexpected content-type %q", ct)
+		}
+	}
+
+	parsed, err := parseMarketplaceJSON(body, rawURL)
 	if err != nil {
 		return MarketplaceIndexResponse{}, err
 	}
@@ -202,10 +234,29 @@ func fetchAndParseMarketplace(parentCtx context.Context, rawURL string) (Marketp
 
 // parseMarketplaceJSON tries both supported schemas.
 //
-// Our format (index.json): {"name", "description", "skills":[{slug, source, ...}]}
-// Anthropic format (marketplace.json): {"name", "description", "plugins":[{name, source:{type,repo}, ...}]}
-func parseMarketplaceJSON(body []byte) (MarketplaceIndexResponse, error) {
-	// First try "skills" shape (ours).
+// Our format (index.json):
+//
+//	{"name", "description", "skills":[{slug, source, ...}]}
+//
+// Anthropic format (marketplace.json), as actually served:
+//
+//	{
+//	  "name": "...",
+//	  "metadata": {"description": "...", "version": "..."},
+//	  "plugins": [
+//	    {"name": "...", "description": "...", "skills": ["./skills/pdf", ...]},
+//	    ...
+//	  ]
+//	}
+//
+// Each plugin is a bundle; each entry in plugin.skills[] is a repo-relative
+// path that we flatten into its own MarketplaceSkillEntry. The skill's
+// install source is derived from the marketplace URL itself
+// (raw.githubusercontent.com/{owner}/{repo}/{ref}/...), so srcURL must be
+// the same string the handler is going to cache against.
+func parseMarketplaceJSON(body []byte, srcURL string) (MarketplaceIndexResponse, error) {
+	// First try "skills" shape (ours). No URL context needed — sources are
+	// already canonical locator strings.
 	var native rawMarketplaceIndex
 	if err := json.Unmarshal(body, &native); err == nil && len(native.Skills) > 0 {
 		return MarketplaceIndexResponse{
@@ -218,57 +269,93 @@ func parseMarketplaceJSON(body []byte) (MarketplaceIndexResponse, error) {
 	// Then try "plugins" shape (Anthropic).
 	var anth rawAnthropicMarketplace
 	if err := json.Unmarshal(body, &anth); err == nil && len(anth.Plugins) > 0 {
-		translated := make([]MarketplaceSkillEntry, 0, len(anth.Plugins))
+		owner, repo, ref, basePath, urlErr := skills.ParseMarketplaceURL(srcURL)
+		if urlErr != nil {
+			return MarketplaceIndexResponse{}, fmt.Errorf("marketplace: cannot derive github source from URL: %w", urlErr)
+		}
+		description := anth.Description
+		if description == "" {
+			description = anth.Metadata.Description
+		}
+
+		flattened := make([]MarketplaceSkillEntry, 0)
 		for _, p := range anth.Plugins {
-			src := extractAnthropicSource(p.Source)
-			if src == "" {
+			if len(p.Skills) == 0 {
 				continue
 			}
-			slug := slugFromName(p.Name)
-			translated = append(translated, MarketplaceSkillEntry{
-				Slug:        slug,
-				Name:        p.Name,
-				Description: p.Description,
-				Source:      src,
-				Tags:        p.Tags,
-				Verified:    false,
-			})
+			for _, rel := range p.Skills {
+				entry, ok := buildAnthropicSkillEntry(p.Name, p.Description, p.Tags, rel, owner, repo, ref, basePath)
+				if !ok {
+					continue
+				}
+				flattened = append(flattened, entry)
+			}
 		}
 		return MarketplaceIndexResponse{
 			Name:        anth.Name,
-			Description: anth.Description,
-			Skills:      translated,
+			Description: description,
+			Skills:      flattened,
 		}, nil
 	}
 
 	return MarketplaceIndexResponse{}, fmt.Errorf("marketplace: payload does not match a supported schema (skills[] or plugins[])")
 }
 
-// extractAnthropicSource translates the Anthropic plugin source object into
-// the goclaw locator string. Supports:
+// buildAnthropicSkillEntry turns a single plugin.skills[] entry (a
+// repo-relative path like "./skills/pdf") into a flat MarketplaceSkillEntry
+// keyed at owner/repo/path@ref. pluginDescription is reused as the per-skill
+// description because the Anthropic schema does not surface one per skill.
 //
-//	{"type": "github", "repo": "owner/repo"}        → github:owner/repo
-//	{"type": "github", "repo": "owner/repo", "path": "subdir"} → github:owner/repo (path tracked separately)
-//	string forms are passed through verbatim.
-func extractAnthropicSource(raw any) string {
-	switch v := raw.(type) {
-	case string:
-		return v
-	case map[string]any:
-		t, _ := v["type"].(string)
-		if t != "github" {
-			return ""
-		}
-		repo, _ := v["repo"].(string)
-		if repo == "" {
-			return ""
-		}
-		// Ignore "path" — the install pipeline pulls the repo root and
-		// SKILL.md must be at archive root or a single subdir level.
-		return "github:" + repo
-	default:
-		return ""
+// basePath (the dir holding marketplace.json) is accepted for forward
+// compatibility but not consumed here: real-world Anthropic paths start with
+// a leading `./` and are repo-root anchored. Schemas that publish basePath-
+// relative entries would need a different convention to disambiguate.
+func buildAnthropicSkillEntry(pluginName, pluginDescription string, pluginTags []string, rel, owner, repo, ref, basePath string) (MarketplaceSkillEntry, bool) {
+	_ = basePath
+	cleaned := strings.TrimSpace(rel)
+	cleaned = strings.TrimPrefix(cleaned, "./")
+	cleaned = strings.Trim(cleaned, "/")
+	if cleaned == "" || strings.Contains(cleaned, "..") {
+		return MarketplaceSkillEntry{}, false
 	}
+	segments := strings.Split(cleaned, "/")
+	last := segments[len(segments)-1]
+	slug := slugFromName(last)
+	if slug == "" {
+		slug = slugFromName(pluginName + "-" + last)
+	}
+	if slug == "" {
+		return MarketplaceSkillEntry{}, false
+	}
+	source := fmt.Sprintf("github:%s/%s/%s@%s", owner, repo, cleaned, ref)
+	tags := pluginTags
+	if tags == nil {
+		tags = []string{}
+	}
+	return MarketplaceSkillEntry{
+		Slug:        slug,
+		Name:        humanizeSlug(slug),
+		Description: pluginDescription,
+		Source:      source,
+		Tags:        tags,
+		Verified:    false,
+	}, true
+}
+
+// humanizeSlug turns "skill-creator" into "Skill Creator" for display. Falls
+// back to the slug itself when input is empty.
+func humanizeSlug(s string) string {
+	if s == "" {
+		return s
+	}
+	parts := strings.Split(s, "-")
+	for i, p := range parts {
+		if p == "" {
+			continue
+		}
+		parts[i] = strings.ToUpper(p[:1]) + p[1:]
+	}
+	return strings.Join(parts, " ")
 }
 
 // slugFromName turns "PDF Reader" into "pdf-reader".
