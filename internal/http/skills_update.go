@@ -384,6 +384,15 @@ func (h *SkillsHandler) handleSkillUpdate(w http.ResponseWriter, r *http.Request
 	h.emitCacheInvalidate(bus.CacheKindSkills, id.String(), uuid.Nil)
 	emitAudit(h.msgBus, r, "skill.updated", "skill", sk.Slug)
 
+	// Mirror the new version to S3. See skills_install.go for the same
+	// pattern (detached background context + 5-minute deadline).
+	tenantSlugForMirror := store.TenantSlugFromContext(r.Context())
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		h.mirrorSkillToS3(bgCtx, tenantSlugForMirror, sk.Slug, newVersion, destDir)
+	}()
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":         id.String(),
 		"slug":       sk.Slug,
