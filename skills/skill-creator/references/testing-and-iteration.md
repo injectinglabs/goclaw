@@ -3,7 +3,7 @@
 ## Testing Approaches
 
 Choose rigor based on skill visibility:
-- **Manual testing** — Run queries in GoClaw chat, observe behavior. Fast iteration.
+- **Manual testing** — Run queries in agent runtime chat, observe behavior. Fast iteration.
 - **Scripted testing** — Automate test cases via eval suite scripts for repeatable validation.
 - **Programmatic testing** — Build eval suites with `evals/evals.json` for systematic grading.
 

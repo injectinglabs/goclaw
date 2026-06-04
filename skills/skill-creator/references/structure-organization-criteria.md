@@ -4,11 +4,11 @@ Proper structure enables discovery and maintainability.
 
 ## Required Directory Layout
 
-Skills are created directly in `~/.goclaw/skills-store/<skill-name>/`.
-After writing SKILL.md, use `publish_skill` to register in the DB (version managed by GoClaw).
+Skills are created directly in `~/skills-store/<skill-name>/`.
+After writing SKILL.md, use `publish_skill` to register in the DB (version managed by agent runtime).
 
 ```
-~/.goclaw/skills-store/
+~/skills-store/
 └── skill-name/          ← directory name = slug (DB key)
     ├── SKILL.md         # Required, exact uppercase filename
     ├── scripts/         # Optional: executable code
@@ -28,7 +28,7 @@ name: skill-name           # required, kebab-case, must match directory name
 description: Under 1024 chars, specific triggers
 license: Optional
 metadata:
-  author: GoClaw
+  author: injecting.ai
   version: "1.0"
 ---
 ```
@@ -36,8 +36,8 @@ metadata:
 ## Resource Directories
 
 ### scripts/
-Executable code for deterministic tasks. Runs via GoClaw's `exec` tool (no sudo needed).
-Packages installed at runtime persist to `/app/.goclaw/data/.runtime/`.
+Executable code for deterministic tasks. Runs via the runtime's `exec` tool (no sudo needed).
+Packages installed at runtime persist to `/app/data/.runtime/`.
 
 ```
 scripts/
@@ -106,7 +106,7 @@ Related topics should be combined into one skill:
 Run packaging script to check structure:
 
 ```bash
-python3 scripts/skill-creator/scripts/package_skill.py ~/.goclaw/skills-store/<name>
+python3 scripts/skill-creator/scripts/package_skill.py ~/skills-store/<name>
 ```
 
 Checks: SKILL.md exists, valid frontmatter, proper directory structure.
