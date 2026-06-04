@@ -299,6 +299,19 @@ func (h *SkillsHandler) handleInstall(w http.ResponseWriter, r *http.Request) {
 	emitAudit(h.msgBus, r, "skill.installed", "skill", slug)
 	depState.emit(h, slug)
 
+	// 13. Mirror to S3 so sibling ASG nodes can serve this skill from a
+	//     cold local cache. Async + detached context: the handler's
+	//     depsCtx is cancelled by `defer cancel()` as soon as we return,
+	//     so the goroutine needs its own deadline. 5 min covers the
+	//     largest realistic skill (Anthropic algorithmic-art is ~1 MB,
+	//     skill-creator ~3 MB).
+	tenantSlugForMirror := store.TenantSlugFromContext(r.Context())
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		h.mirrorSkillToS3(bgCtx, tenantSlugForMirror, slug, version, destDir)
+	}()
+
 	slog.Info("skill installed from source",
 		"id", id, "slug", slug, "version", version,
 		"source", body.Source, "source_sha", resolvedSHA)

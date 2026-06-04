@@ -17,6 +17,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/permissions"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
+	skillstorage "github.com/nextlevelbuilder/goclaw/internal/skills/storage"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
@@ -37,9 +38,10 @@ type SkillsHandler struct {
 	msgBus         *bus.MessageBus
 	tenantCfgStore store.SkillTenantConfigStore
 	tenantStore    store.TenantStore
-	hubStore       store.SkillHubStore // optional — drives GET /v1/skills/hubs
-	db             *sql.DB             // for export/import direct queries
-	uploadLocks    sync.Map            // per-slug mutex; bounded by validated slug set, entries are tiny (*sync.Mutex)
+	hubStore       store.SkillHubStore   // optional — drives GET /v1/skills/hubs
+	s3Mirror       *skillstorage.Mirror  // optional — durable S3 copy of installed skills
+	db             *sql.DB               // for export/import direct queries
+	uploadLocks    sync.Map              // per-slug mutex; bounded by validated slug set, entries are tiny (*sync.Mutex)
 }
 
 // NewSkillsHandler creates a handler for skill management endpoints.
@@ -67,6 +69,41 @@ func (h *SkillsHandler) tenantSkillsDir(r *http.Request) string {
 func (h *SkillsHandler) skillUploadLock(scopeKey string) *sync.Mutex {
 	actual, _ := h.uploadLocks.LoadOrStore(scopeKey, &sync.Mutex{})
 	return actual.(*sync.Mutex)
+}
+
+// SetS3Mirror wires durable S3 storage onto the handler. When set, every
+// successful install/update also mirrors the extracted skill tree to S3
+// so a sibling EC2 node in the ASG can serve the skill after a cold
+// cache. Best-effort: a mirror failure logs a warning but does not fail
+// the install — the skill still works on the originating node.
+func (h *SkillsHandler) SetS3Mirror(m *skillstorage.Mirror) { h.s3Mirror = m }
+
+// mirrorSkillToS3 is the single hook into the S3 backing path. Called
+// after a successful local extract; the DB row may or may not exist yet
+// (we run it post-DB to keep the consistent "DB row implies S3 prefix"
+// invariant for future startup-prefetch logic). tenantSlug must be
+// non-empty in multi-tenant deployments; we fall back to the tenant UUID
+// when only that is available so the key is still unique.
+func (h *SkillsHandler) mirrorSkillToS3(ctx context.Context, tenantSlug, skillSlug string, version int, localDir string) {
+	if h.s3Mirror == nil {
+		return
+	}
+	if tenantSlug == "" {
+		tenantSlug = "_unknown"
+	}
+	keyPrefix := h.s3Mirror.SkillKeyPrefix(tenantSlug, skillSlug, version)
+	uploaded, err := h.s3Mirror.UploadDir(ctx, localDir, keyPrefix)
+	if err != nil {
+		// Mirror failure is logged but not returned — the install still
+		// succeeded locally. A future sweeper can retry orphaned trees by
+		// scanning DB rows and probing the matching S3 prefix.
+		slog.Warn("skills.s3.mirror_failed",
+			"slug", skillSlug, "version", version, "tenant", tenantSlug,
+			"uploaded", uploaded, "error", err)
+		return
+	}
+	slog.Info("skills.s3.mirrored",
+		"slug", skillSlug, "version", version, "tenant", tenantSlug, "files", uploaded)
 }
 
 // isOwnerOrAdmin reports whether the caller can perform team-wide skill
