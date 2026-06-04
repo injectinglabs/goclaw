@@ -29,15 +29,15 @@ npm test
 
 Tests must pass. No skipping failed tests.
 
-## Runtime Environment (GoClaw)
+## Runtime Environment (agent runtime)
 
-Scripts run inside the GoClaw container via the `exec` tool. Environment is set by the entrypoint:
+Scripts run inside the the agent runtime container via the `exec` tool. Environment is set by the entrypoint:
 
 | Variable | Value | Purpose |
 |----------|-------|---------|
-| `PYTHONPATH` | `/app/.goclaw/data/.runtime/pip` | Python runtime packages |
-| `PIP_TARGET` | `/app/.goclaw/data/.runtime/pip` | pip install target |
-| `NPM_CONFIG_PREFIX` | `/app/.goclaw/data/.runtime/npm-global` | npm global install dir |
+| `PYTHONPATH` | `/app/data/.runtime/pip` | Python runtime packages |
+| `PIP_TARGET` | `/app/data/.runtime/pip` | pip install target |
+| `NPM_CONFIG_PREFIX` | `/app/data/.runtime/npm-global` | npm global install dir |
 | `NODE_PATH` | `/usr/local/lib/node_modules:...` | Node module resolution |
 
 **Installing packages at runtime (no sudo needed):**

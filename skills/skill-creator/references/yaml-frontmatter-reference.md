@@ -36,7 +36,7 @@ allowed-tools: "Bash(python3:*) Bash(node:*) Read"  # optional — experimental
 - Must not start or end with a hyphen
 - Must not contain consecutive hyphens (`--`)
 - **Must match the parent directory name** exactly
-- GoClaw uses directory name as the DB slug — `name` is also used as display name fallback
+- agent runtime uses directory name as the DB slug — `name` is also used as display name fallback
 
 ### description (required)
 - **Under 1024 characters** (keep under 200 for concision)
@@ -61,9 +61,9 @@ allowed-tools: "Bash(python3:*) Bash(node:*) Read"  # optional — experimental
 - Space-delimited tool patterns pre-approved for this skill
 - Support varies between agent implementations
 
-## GoClaw Behavior
+## agent runtime Behavior
 
-GoClaw reads only `name` and `description` from frontmatter (the `Metadata` struct).
+agent runtime reads only `name` and `description` from frontmatter (the `Metadata` struct).
 All other fields are stored as raw `frontmatter JSONB` in the DB for display purposes.
 
 The **slug** (DB key) is always derived from the **directory name**, not from frontmatter:

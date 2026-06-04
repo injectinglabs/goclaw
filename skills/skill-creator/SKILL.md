@@ -1,9 +1,9 @@
 ---
 name: skill-creator
-description: Create or update GoClaw agent skills with eval-driven iteration. Use for new skills, skill scripts, references, benchmark optimization, description optimization, eval testing, extending agent capabilities.
+description: Create or update agent skills with eval-driven iteration. Use for new skills, skill scripts, references, benchmark optimization, description optimization, eval testing, extending agent capabilities.
 license: Complete terms in LICENSE.txt
 metadata:
-  author: GoClaw
+  author: injecting.ai
   version: "4.0.0"
 ---
 
@@ -29,7 +29,7 @@ Create effective, eval-driven Claude skills using progressive disclosure and hum
 
 ## Skill Structure
 
-New skills **MUST** be created directly in `~/.goclaw/skills-store/<skill-name>/`.
+New skills **MUST** be created directly in `~/skills-store/<skill-name>/`.
 After writing SKILL.md and resources, use `publish_skill` to register in the system DB.
 
 ```
@@ -54,7 +54,7 @@ Follow the process in `references/skill-creation-workflow.md`:
 5. **Write** — Implement resources, write SKILL.md, optimize for benchmarks
 6. **Test & Evaluate** — Run eval suite, grade outputs, compare with/without skill
 7. **Optimize Description** — AI-powered trigger accuracy optimization
-8. **Publish** — `publish_skill(path: "~/.goclaw/skills-store/<name>")` to register in system database
+8. **Publish** — `publish_skill(path: "~/skills-store/<name>")` to register in system database
 9. **Package** (optional) — `scripts/package_skill.py <path>` for external distribution
 10. **Iterate** — Generalize from feedback, keep prompts lean
 
@@ -136,14 +136,14 @@ Optimization patterns: `references/benchmark-optimization-guide.md`
 
 ## Publishing to System
 
-After creating and validating a skill, register it in the GoClaw database:
+After creating and validating a skill, register it in the skills database:
 
 ```
-publish_skill(path: "~/.goclaw/skills-store/my-skill")
+publish_skill(path: "~/skills-store/my-skill")
 ```
 
 This tool:
-- Copies skill files to `~/.goclaw/skills-store/<slug>/<version>/` (Docker: `/app/.goclaw/skills-store/`)
+- Copies skill files to `~/skills-store/<slug>/<version>/` (Docker: `/app/skills-store/`)
 - Registers metadata (name, slug, description) in the database
 - Scans dependencies and reports any missing ones
 - Generates BM25/embedding index for skill discovery

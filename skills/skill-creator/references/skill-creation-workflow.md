@@ -48,10 +48,10 @@ Scripts MUST: respect `.env` hierarchy, have tests, pass all tests.
 For new skills, run init script:
 
 ```bash
-scripts/init_skill.py <skill-name> --path ~/.goclaw/skills-store/
+scripts/init_skill.py <skill-name> --path ~/skills-store/
 ```
 
-Creates: `~/.goclaw/skills-store/<skill-name>/SKILL.md` template, `scripts/`, `references/`, `assets/` with examples.
+Creates: `~/skills-store/<skill-name>/SKILL.md` template, `scripts/`, `references/`, `assets/` with examples.
 Skip if skill already exists (go to Step 5).
 
 ## Step 5: Write the Skill
@@ -130,12 +130,12 @@ Combat undertriggering with automated optimization:
 - **Single-pass:** `scripts/improve_description.py` — one iteration
 - **Iterative loop:** `scripts/run_loop.py` — train/test split, convergence detection
 
-## Step 8: Publish to GoClaw
+## Step 8: Publish to agent runtime
 
-Register the skill in the GoClaw database:
+Register the skill in the skills database:
 
 ```
-publish_skill(path: "~/.goclaw/skills-store/<name>")
+publish_skill(path: "~/skills-store/<name>")
 ```
 
 This copies skill files to the managed store, registers metadata in DB, scans deps,
@@ -154,7 +154,7 @@ scripts/package_skill.py <path/to/skill-folder>
 ```
 
 Validates: frontmatter, naming, description, structure.
-Creates: `skill-name.zip` for uploading to other GoClaw instances via the admin UI.
+Creates: `skill-name.zip` for uploading to other the agent runtime via the admin UI.
 Fix all errors, re-run until clean.
 
 ## Step 10: Iterate
@@ -163,6 +163,6 @@ Fix all errors, re-run until clean.
 2. Generalize from feedback — don't overfit to test examples
 3. Keep prompts lean — remove ineffective instructions
 4. Update SKILL.md or resources
-5. Re-publish: `publish_skill(path: "~/.goclaw/skills-store/<name>")` — DB version auto-increments only if content changed
+5. Re-publish: `publish_skill(path: "~/skills-store/<name>")` — DB version auto-increments only if content changed
 6. Re-test (return to Step 6)
 7. Scale test set to 5-10 cases for production skills

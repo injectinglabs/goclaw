@@ -24,7 +24,7 @@ Quick validation before packaging. Run `scripts/package_skill.py` for automated 
 - [ ] Cross-platform (Node.js/Python preferred)
 - [ ] Runtime packages installed via `pip3 install <pkg>` or `npm install -g <pkg>` (no sudo, persists in `/app/data/.runtime/`)
 - [ ] Dependencies listed in `references/` or SKILL.md so users know what to install
-- [ ] Manually tested with real use cases inside GoClaw exec tool
+- [ ] Manually tested with real use cases inside agent runtime exec tool
 
 ## Quality
 
