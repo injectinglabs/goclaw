@@ -123,13 +123,8 @@ type SystemPromptConfig struct {
 	// authority over the generic "## Tooling" / "## Skills" sections.
 	CustomInstructions string
 
-	// LockedAgentPreamble is a deployment-wide prelude (identity + capability
-	// instructions) injected at the very top of the system prompt when the
-	// caller's agent is locked. Empty = no preamble. See GatewayConfig.
-	LockedAgentPreamble string
-
-	// IsLocked mirrors agents.is_locked — gates whether LockedAgentPreamble
-	// is actually injected. True only for the canonical tenant default agent.
+	// IsLocked mirrors agents.is_locked — gates whether the locked-agent
+	// preamble is injected. True only for the canonical tenant default agent.
 	IsLocked bool
 
 	HasSkillSearch      bool              // skill_search tool registered? (for search-mode prompt)
@@ -293,14 +288,16 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 		lines = append(lines, "")
 	}
 
-	// 1.1.5. Locked-agent preamble — deployment-wide identity + capability
-	// block. Only for is_locked=true rows (canonical tenant default). User-
-	// created agents (is_locked=false) skip this entirely so they're pure
-	// user content. Lives in goclaw config, not in agents.system_prompt, so
-	// it cannot be broken by migrations, lock-protected DB drift, or by
-	// auth-proxy losing UPDATE permission post-lock.
-	if cfg.IsLocked && cfg.LockedAgentPreamble != "" {
-		lines = append(lines, cfg.LockedAgentPreamble, "")
+	// 1.1.5. Locked-agent preamble — identity + capability block, built into
+	// the binary as the lockedAgentPreamble const. Injected only for
+	// is_locked=true rows (canonical tenant default). User-created agents
+	// (is_locked=false) skip this entirely so they're pure user content.
+	// Source lives in Go (locked_agent_preamble_default.go), not in
+	// agents.system_prompt — so it cannot be broken by migrations,
+	// lock-protected DB drift, or by auth-proxy losing UPDATE permission
+	// post-lock.
+	if cfg.IsLocked {
+		lines = append(lines, lockedAgentPreamble, "")
 	}
 
 	// 1.2. Custom instructions — the agent's own configured prompt from
