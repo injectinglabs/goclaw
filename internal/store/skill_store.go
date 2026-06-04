@@ -53,7 +53,17 @@ type SkillSearchResult struct {
 // SkillStore manages skill discovery and loading.
 // Backed by Postgres (PGSkillStore) or filesystem (FileSkillStore).
 type SkillStore interface {
+	// ListSkills returns every active/archived skill in the tenant. Intended
+	// for system/admin contexts (embedding rebuild, dep resolver, CLI). User
+	// surfaces (HTTP /v1/skills, WS skills.list) MUST use ListSkillsForUser
+	// instead — ListSkills does not apply visibility / grant filtering.
 	ListSkills(ctx context.Context) []SkillInfo
+	// ListSkillsForUser returns skills visible to the given user in the
+	// current tenant: system skills + tenant-public + skills the user owns +
+	// skills explicitly granted to them. Owner/admin additionally see every
+	// skill in the tenant (for moderation / share toggling). role values:
+	// "owner", "admin", or anything else (treated as member).
+	ListSkillsForUser(ctx context.Context, userID, role string) []SkillInfo
 	LoadSkill(ctx context.Context, name string) (string, bool)
 	LoadForContext(ctx context.Context, allowList []string) string
 	BuildSummary(ctx context.Context, allowList []string) string

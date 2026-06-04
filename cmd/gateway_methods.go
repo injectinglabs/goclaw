@@ -45,8 +45,10 @@ func registerAllMethods(server *gateway.Server, agents *agent.Router, sessStore 
 	}
 	configMethods.Register(router)
 
-	// Phase 2: Skills (uses SkillStore interface — PG or File)
-	methods.NewSkillsMethods(skillStore, skillTenantCfgStore).Register(router)
+	// Phase 2: Skills (uses SkillStore interface — PG or File).
+	// tenantStore lets handleList resolve the caller's role for the
+	// per-user visibility filter (see ListSkillsForUser).
+	methods.NewSkillsMethods(skillStore, skillTenantCfgStore, tenantStore).Register(router)
 
 	// Phase 2: Cron (store created externally, shared with gateway)
 	methods.NewCronMethods(cronStore, msgBus, cfg).Register(router)
