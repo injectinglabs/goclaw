@@ -151,6 +151,32 @@ func (h *SkillsHandler) adminMiddleware(next http.HandlerFunc) http.HandlerFunc 
 	return requireAuth(permissions.RoleAdmin, next)
 }
 
+// resolveTenantRole looks up the caller's role in the current tenant. Owner
+// scope (cross-tenant admin) short-circuits to TenantRoleOwner so they always
+// see everything. Missing membership row → empty string ("member" semantics).
+// Errors are swallowed and logged because the handler must keep working with
+// the safer least-privilege role — DB outage shouldn't elevate a member to
+// admin view.
+func (h *SkillsHandler) resolveTenantRole(ctx context.Context, userID string) string {
+	if store.IsOwnerRole(ctx) {
+		return store.TenantRoleOwner
+	}
+	if h.tenantStore == nil || userID == "" {
+		return ""
+	}
+	tid := store.TenantIDFromContext(ctx)
+	if tid == uuid.Nil || tid == store.MasterTenantID {
+		// Master tenant has no tenant_users rows; treat as member view.
+		return ""
+	}
+	role, err := h.tenantStore.GetUserRole(ctx, tid, userID)
+	if err != nil {
+		slog.Warn("skills.handleList: tenant role lookup failed", "tenant", tid, "user", userID, "error", err)
+		return ""
+	}
+	return role
+}
+
 // requireMasterTenant rejects requests from non-master tenants.
 // System skill management (install packages, rescan deps) is a server-wide operation
 // that should only be accessible to the master tenant or cross-tenant admins.
@@ -171,7 +197,9 @@ func (h *SkillsHandler) requireMasterTenant(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *SkillsHandler) handleList(w http.ResponseWriter, r *http.Request) {
-	skillList := h.skills.ListSkills(r.Context())
+	userID := store.UserIDFromContext(r.Context())
+	role := h.resolveTenantRole(r.Context(), userID)
+	skillList := h.skills.ListSkillsForUser(r.Context(), userID, role)
 
 	// Merge per-tenant overrides into response when tenant-scoped
 	tid := store.TenantIDFromContext(r.Context())

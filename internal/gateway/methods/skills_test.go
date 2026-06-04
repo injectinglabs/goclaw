@@ -27,6 +27,13 @@ func newStubSkillStore(skills []store.SkillInfo) *stubSkillStore {
 
 func (s *stubSkillStore) ListSkills(_ context.Context) []store.SkillInfo { return s.skills }
 
+// ListSkillsForUser mirrors ListSkills for the stub — gateway methods tests
+// don't exercise the per-user visibility filter (covered by store-level
+// tests). Returning the same slice keeps existing assertions valid.
+func (s *stubSkillStore) ListSkillsForUser(_ context.Context, _, _ string) []store.SkillInfo {
+	return s.skills
+}
+
 func (s *stubSkillStore) GetSkill(_ context.Context, name string) (*store.SkillInfo, bool) {
 	for i := range s.skills {
 		if s.skills[i].Name == name {
@@ -54,7 +61,7 @@ func (s *stubSkillStore) Dirs() []string  { return nil }
 
 func buildSkillMethods(t *testing.T, skills []store.SkillInfo) *SkillsMethods {
 	t.Helper()
-	return NewSkillsMethods(newStubSkillStore(skills), nil)
+	return NewSkillsMethods(newStubSkillStore(skills), nil, nil)
 }
 
 func skillReqFrame(t *testing.T, method string, params map[string]any) *protocol.RequestFrame {

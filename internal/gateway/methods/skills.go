@@ -23,10 +23,14 @@ type skillOwnerGetter interface {
 type SkillsMethods struct {
 	store          store.SkillStore
 	tenantCfgStore store.SkillTenantConfigStore
+	// tenantStore resolves caller's tenant role for the visibility filter
+	// in handleList. Optional — when nil, falls back to member view (safer
+	// least-privilege default than admin).
+	tenantStore store.TenantStore
 }
 
-func NewSkillsMethods(s store.SkillStore, tenantCfg store.SkillTenantConfigStore) *SkillsMethods {
-	return &SkillsMethods{store: s, tenantCfgStore: tenantCfg}
+func NewSkillsMethods(s store.SkillStore, tenantCfg store.SkillTenantConfigStore, tenantStore store.TenantStore) *SkillsMethods {
+	return &SkillsMethods{store: s, tenantCfgStore: tenantCfg, tenantStore: tenantStore}
 }
 
 func (m *SkillsMethods) Register(router *gateway.MethodRouter) {
@@ -35,8 +39,31 @@ func (m *SkillsMethods) Register(router *gateway.MethodRouter) {
 	router.Register(protocol.MethodSkillsUpdate, m.handleUpdate)
 }
 
+// resolveTenantRole returns the caller's tenant_users.role for the visibility
+// filter. Cross-tenant owner short-circuits to TenantRoleOwner. DB errors fall
+// back to empty (member view) — see HTTP handler comment for rationale.
+func (m *SkillsMethods) resolveTenantRole(ctx context.Context, client *gateway.Client) string {
+	if client.IsOwner() {
+		return store.TenantRoleOwner
+	}
+	if m.tenantStore == nil {
+		return ""
+	}
+	tid := client.TenantID()
+	if tid == uuid.Nil || tid == store.MasterTenantID {
+		return ""
+	}
+	role, err := m.tenantStore.GetUserRole(ctx, tid, client.UserID())
+	if err != nil {
+		slog.Warn("skills.handleList: tenant role lookup failed", "tenant", tid, "user", client.UserID(), "error", err)
+		return ""
+	}
+	return role
+}
+
 func (m *SkillsMethods) handleList(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
-	allSkills := m.store.ListSkills(ctx)
+	role := m.resolveTenantRole(ctx, client)
+	allSkills := m.store.ListSkillsForUser(ctx, client.UserID(), role)
 
 	result := make([]map[string]any, 0, len(allSkills))
 	for _, s := range allSkills {

@@ -408,6 +408,13 @@ func (s *skillManageStoreStub) ListSkills(context.Context) []store.SkillInfo {
 	return s.ListAllSkills(context.Background())
 }
 
+// ListSkillsForUser mirrors ListSkills for the upload-handler stub — the
+// upload tests don't exercise the per-user visibility filter (covered by
+// pg/skills_visibility_test.go).
+func (s *skillManageStoreStub) ListSkillsForUser(_ context.Context, _, _ string) []store.SkillInfo {
+	return s.ListAllSkills(context.Background())
+}
+
 func (s *skillManageStoreStub) LoadSkill(context.Context, string) (string, bool) { return "", false }
 func (s *skillManageStoreStub) LoadForContext(context.Context, []string) string  { return "" }
 func (s *skillManageStoreStub) BuildSummary(context.Context, []string) string    { return "" }
