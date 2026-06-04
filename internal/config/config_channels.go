@@ -361,6 +361,13 @@ type GatewayConfig struct {
 	TaskRecoveryIntervalSec int          `json:"task_recovery_interval_sec,omitempty"` // team task recovery ticker interval in seconds (default 300 = 5min)
 	BackgroundProvider      string       `json:"background_provider,omitempty"`        // LLM provider for background workers (vault enrichment, consolidation)
 	BackgroundModel         string       `json:"background_model,omitempty"`           // LLM model for background workers
+	// LockedAgentPreamble is the full prompt prelude (identity + capability
+	// instructions) injected ONLY for agents with is_locked=true (canonical
+	// tenant default). User-created agents receive nothing from this field —
+	// what they wrote in agents.system_prompt is the entire prompt.
+	//
+	// Empty disables the injection (no preamble for any agent).
+	LockedAgentPreamble string `json:"locked_agent_preamble,omitempty"`
 }
 
 // ToolsConfig controls tool availability, policy, and web search.

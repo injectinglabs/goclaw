@@ -230,6 +230,8 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		// Inject agents.system_prompt from migration 000063 — see resolver.go
 		// where l.customInstructions is populated from AgentData.SystemPrompt.
 		CustomInstructions:     l.customInstructions,
+		IsLocked:                l.isLocked,
+		LockedAgentPreamble:     l.lockedAgentPreamble,
 		ExtraPrompt:            extraSystemPrompt,
 		SandboxEnabled:         l.sandboxEnabled,
 		SandboxContainerDir:    l.sandboxContainerDir,

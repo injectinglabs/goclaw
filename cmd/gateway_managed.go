@@ -261,6 +261,7 @@ func wireExtras(
 		SystemConfigs:          stores.SystemConfigs,
 		Workspace:              workspace,
 		TTSAutoMode:            appCfg.Tts.Auto,
+		LockedAgentPreamble:    appCfg.Gateway.LockedAgentPreamble,
 		AutoInjector:           autoInjector,
 		EvolutionMetricsStore:  stores.EvolutionMetrics,
 		DomainBus:              domainBus,
