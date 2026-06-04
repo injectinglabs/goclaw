@@ -54,11 +54,43 @@ func (h *SkillsHandler) handleInstall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	visibility := strings.TrimSpace(body.Visibility)
-	if visibility == "" {
-		visibility = "public"
-	}
-	if visibility != "public" && visibility != "private" && visibility != "internal" {
+	requestedVisibility := visibility
+	if visibility != "" && visibility != "public" && visibility != "private" && visibility != "internal" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidRequest, "visibility must be public|private|internal")})
+		return
+	}
+
+	// Role gate: writes that affect the team's shared catalog (visibility=public)
+	// require owner/admin in the active tenant. Personal tenants and explicit
+	// private installs are unrestricted.
+	tenantID := store.TenantIDFromContext(r.Context())
+	isPrivilegedWriter, err := h.isOwnerOrAdmin(r.Context(), tenantID, userID)
+	if err != nil {
+		slog.Warn("skills.install: role lookup failed",
+			"user_id", userID, "tenant_id", tenantID, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "role lookup")})
+		return
+	}
+
+	if visibility == "" {
+		// Default visibility: privileged callers publish team-wide, others install
+		// for themselves only. This preserves the "shared catalog by default"
+		// behaviour for owners/admins while keeping member installs from leaking.
+		if isPrivilegedWriter {
+			visibility = "public"
+		} else {
+			visibility = "private"
+		}
+	}
+
+	if visibility == "public" && !isPrivilegedWriter {
+		slog.Warn("security.skills.install_role_denied",
+			"user_id", userID,
+			"tenant_id", tenantID,
+			"requested_visibility", requestedVisibility)
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "Only owners and admins can install skills for the team. Use visibility=private to install for yourself.",
+		})
 		return
 	}
 

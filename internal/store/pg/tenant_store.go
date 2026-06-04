@@ -174,6 +174,31 @@ func (s *PGTenantStore) GetUserRole(ctx context.Context, tenantID uuid.UUID, use
 	return role, err
 }
 
+// IsOwnerOrAdmin reports whether the user is allowed to perform team-wide
+// writes (e.g. publish a public skill) in the given tenant. Personal tenants
+// — those with exactly one membership row — are treated as implicitly admin
+// for their single member so single-user installs never get blocked.
+// Otherwise the user must have role 'owner' or 'admin'.
+func (s *PGTenantStore) IsOwnerOrAdmin(ctx context.Context, tenantID uuid.UUID, userID string) (bool, error) {
+	var memberCount int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM tenant_users WHERE tenant_id = $1`,
+		tenantID,
+	).Scan(&memberCount); err != nil {
+		return false, err
+	}
+	if memberCount <= 1 {
+		// Personal tenant: the single member is implicitly the owner.
+		// (0 covers legacy data where the personal owner has no row at all.)
+		return true, nil
+	}
+	role, err := s.GetUserRole(ctx, tenantID, userID)
+	if err != nil {
+		return false, err
+	}
+	return role == store.TenantRoleOwner || role == store.TenantRoleAdmin, nil
+}
+
 func (s *PGTenantStore) ListUsers(ctx context.Context, tenantID uuid.UUID) ([]store.TenantUserData, error) {
 	var result []store.TenantUserData
 	err := pkgSqlxDB.SelectContext(ctx, &result,
