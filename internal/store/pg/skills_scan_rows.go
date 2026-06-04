@@ -1,7 +1,9 @@
 package pg
 
 import (
+	"database/sql"
 	"encoding/json"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -27,10 +29,38 @@ type skillInfoRow struct {
 	FilePath   *string        `db:"file_path"`
 }
 
-// skillInfoRowWithFrontmatter extends skillInfoRow with the frontmatter column.
+// skillInfoRowWithFrontmatter extends skillInfoRow with the frontmatter column
+// and all source / install / update tracking columns. Used by ListSkills so the
+// API surface includes everything the marketplace UI needs in one round trip.
 type skillInfoRowWithFrontmatter struct {
 	skillInfoRow
-	FmRaw []byte `db:"frontmatter"`
+	FmRaw              []byte         `db:"frontmatter"`
+	SourceURL          sql.NullString `db:"source_url"`
+	SourceSHA          sql.NullString `db:"source_sha"`
+	SourceRef          sql.NullString `db:"source_ref"`
+	InstalledBy        sql.NullString `db:"installed_by"`
+	InstalledAt        sql.NullTime   `db:"installed_at"`
+	UpdateAvailableSHA sql.NullString `db:"update_available_sha"`
+	UpdateAvailableRef sql.NullString `db:"update_available_ref"`
+	LastUpdateCheck    sql.NullTime   `db:"last_update_check"`
+}
+
+// nullStringPtr returns a *string for a sql.NullString, or nil when invalid.
+func nullStringPtr(ns sql.NullString) *string {
+	if !ns.Valid {
+		return nil
+	}
+	v := ns.String
+	return &v
+}
+
+// nullTimePtr returns a *string (RFC3339) for a sql.NullTime, or nil when invalid.
+func nullTimePtr(nt sql.NullTime) *string {
+	if !nt.Valid {
+		return nil
+	}
+	s := nt.Time.UTC().Format(time.RFC3339)
+	return &s
 }
 
 // toSkillInfo converts a skillInfoRow to store.SkillInfo, resolving computed fields from baseDir.
@@ -45,10 +75,19 @@ func (r *skillInfoRow) toSkillInfo(baseDir string) store.SkillInfo {
 	return info
 }
 
-// toSkillInfoWithFrontmatter converts a skillInfoRowWithFrontmatter to store.SkillInfo including Author.
+// toSkillInfoWithFrontmatter converts a skillInfoRowWithFrontmatter to store.SkillInfo
+// including Author and all source / install / update tracking pointers.
 func (r *skillInfoRowWithFrontmatter) toSkillInfo(baseDir string) store.SkillInfo {
 	info := r.skillInfoRow.toSkillInfo(baseDir)
 	info.Author = parseFrontmatterAuthor(r.FmRaw)
+	info.SourceURL = nullStringPtr(r.SourceURL)
+	info.SourceSHA = nullStringPtr(r.SourceSHA)
+	info.SourceRef = nullStringPtr(r.SourceRef)
+	info.InstalledBy = nullStringPtr(r.InstalledBy)
+	info.InstalledAt = nullTimePtr(r.InstalledAt)
+	info.UpdateAvailableSHA = nullStringPtr(r.UpdateAvailableSHA)
+	info.UpdateAvailableRef = nullStringPtr(r.UpdateAvailableRef)
+	info.LastUpdateCheck = nullTimePtr(r.LastUpdateCheck)
 	return info
 }
 

@@ -78,7 +78,9 @@ func (s *PGSkillStore) ListSkills(ctx context.Context) []store.SkillInfo {
 	// Tenant filter: system skills visible globally, custom skills scoped to tenant.
 	var scanned []skillInfoRowWithFrontmatter
 	if err := pkgSqlxDB.SelectContext(ctx, &scanned,
-		`SELECT id, name, slug, description, visibility, tags, version, is_system, status, enabled, deps, frontmatter, file_path
+		`SELECT id, name, slug, description, visibility, tags, version, is_system, status, enabled, deps, frontmatter, file_path,
+		        source_url, source_sha, source_ref, installed_by, installed_at,
+		        update_available_sha, update_available_ref, last_update_check
 		 FROM skills WHERE (status IN ('active', 'archived') OR is_system = true) AND (is_system = true OR tenant_id = $1)
 		 ORDER BY name`, tid); err != nil {
 		return nil
