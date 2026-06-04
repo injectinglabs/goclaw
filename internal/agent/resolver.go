@@ -493,6 +493,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			AgentType:              ag.AgentType,
 			IsTeamLead:             isTeamLead,
 			CustomInstructions:     ag.SystemPrompt,
+			IsLocked:               ag.IsLocked,
 			AutoInjector:          deps.AutoInjector,
 			Provider:               provider,
 			Model:                  ag.Model,
