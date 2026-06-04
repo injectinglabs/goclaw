@@ -3,7 +3,40 @@ package agent
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 )
+
+// buildLiveMediaPayload converts tool-result MediaFiles into the
+// shipping shape used by live tool.result events. Returns nil when the
+// input is empty so callers can skip the map key entirely and keep the
+// omitempty contract clean.
+//
+// Paths are shipped as raw object keys (not signed URLs). The agent
+// package can't import internal/http to call SignMediaPath here —
+// internal/http already imports internal/agent (agents_prompt_preview.go),
+// so the reverse direction would create a cycle. The canonical signing
+// seam is the gateway's OnEvent hook (cmd/gateway_managed.go) where
+// every outbound AgentEvent passes through one signMediaInLiveEvent
+// pass before broadcast.
+func buildLiveMediaPayload(media []bus.MediaFile) []map[string]string {
+	if len(media) == 0 {
+		return nil
+	}
+	out := make([]map[string]string, 0, len(media))
+	for _, mf := range media {
+		ct := mf.MimeType
+		if ct == "" {
+			ct = mimeFromExt(filepath.Ext(mf.Path))
+		}
+		out = append(out, map[string]string{
+			"path":      mf.Path,
+			"filename":  mf.Filename,
+			"mime_type": ct,
+		})
+	}
+	return out
+}
 
 // parseMediaResult extracts a MediaResult from a tool result string containing "MEDIA:" prefix.
 // Handles formats: "MEDIA:/path/to/file" and "[[audio_as_voice]]\nMEDIA:/path/to/file".

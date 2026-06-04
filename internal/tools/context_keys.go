@@ -32,7 +32,29 @@ const (
 	ctxAgentKey    toolContextKey = "tool_agent_key"
 	ctxSessionKey  toolContextKey = "tool_session_key" // origin session key for announce routing
 	ctxRunKind     toolContextKey = "tool_run_kind"    // "notification", "announce", "delegation"
+	// ctxParentToolCallID carries the LLM-issued tool_call.id of the spawn
+	// call that triggered the current subagent run. SubagentManager attaches
+	// it to every nested tool.call / tool.result it emits so the website can
+	// route them to the right parent chip and render a live progress timeline
+	// under the spawn expand body.
+	ctxParentToolCallID toolContextKey = "tool_parent_tool_call_id"
+	// ctxToolEventEmitter carries the parent run's event emit function so the
+	// SubagentManager can broadcast subagent tool events on the SAME WS run
+	// subscription the parent is using. Without this, subagent tool events
+	// can't reach the UI — there's no canonical channel from a child
+	// goroutine back to the parent's tool-event stream.
+	ctxToolEventEmitter toolContextKey = "tool_event_emitter"
+	// ctxToolRunID carries the current agent Loop.Run id so spawn-class
+	// tools can record it on the spawned SubagentTask. Without this the
+	// barrier defaults to agent-scope waits and parallel chats on the
+	// same agent block each other's children — see SubagentTask.ParentRunID.
+	ctxToolRunID toolContextKey = "tool_run_id"
 )
+
+// ToolEventEmitter is the function shape the parent loop uses to broadcast
+// tool.call / tool.result events on the run's WS subscription. Decoupled
+// from the agent package to avoid an import cycle: agent depends on tools.
+type ToolEventEmitter func(eventType string, payload map[string]any)
 
 // Well-known channel names used for routing and access control.
 const (
@@ -117,6 +139,33 @@ func ToolAsyncCBFromCtx(ctx context.Context) AsyncCallback {
 	return v
 }
 
+// WithParentToolCallID stamps the LLM-issued spawn tool_call.id onto context
+// so the subagent's nested tool events can be routed back to the parent UI
+// chip. See ctxParentToolCallID doc.
+func WithParentToolCallID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, ctxParentToolCallID, id)
+}
+
+// ParentToolCallIDFromCtx returns the spawn tool_call.id this subagent was
+// spawned for, or empty string if not in a subagent context.
+func ParentToolCallIDFromCtx(ctx context.Context) string {
+	v, _ := ctx.Value(ctxParentToolCallID).(string)
+	return v
+}
+
+// WithToolEventEmitter stamps the parent run's event-emit function onto
+// context so child goroutines (subagent loop) can publish tool events on
+// the same WS subscription.
+func WithToolEventEmitter(ctx context.Context, emit ToolEventEmitter) context.Context {
+	return context.WithValue(ctx, ctxToolEventEmitter, emit)
+}
+
+// ToolEventEmitterFromCtx returns the emitter or nil. Callers must nil-check.
+func ToolEventEmitterFromCtx(ctx context.Context) ToolEventEmitter {
+	v, _ := ctx.Value(ctxToolEventEmitter).(ToolEventEmitter)
+	return v
+}
+
 func WithToolWorkspace(ctx context.Context, ws string) context.Context {
 	return context.WithValue(ctx, ctxWorkspace, ws)
 }
@@ -168,6 +217,23 @@ func WithRunKind(ctx context.Context, kind string) context.Context {
 // RunKindFromCtx returns the run kind from context, or empty string.
 func RunKindFromCtx(ctx context.Context) string {
 	v, _ := ctx.Value(ctxRunKind).(string)
+	return v
+}
+
+// WithToolRunID stamps the current agent Loop.Run id onto the tool
+// execution context so spawn-class tools can record it on the spawned
+// subagent. Lets the barrier wait on ONLY this run's children instead
+// of the agent's global task pool — see SubagentTask.ParentRunID for
+// motivation. Always set by the agent layer (loop_pipeline_tool_callbacks.go
+// stamping seam) before tools execute.
+func WithToolRunID(ctx context.Context, runID string) context.Context {
+	return context.WithValue(ctx, ctxToolRunID, runID)
+}
+
+// ToolRunIDFromCtx returns the agent run id from context, or empty string
+// when the caller is a non-agent path (cron / announce / HTTP).
+func ToolRunIDFromCtx(ctx context.Context) string {
+	v, _ := ctx.Value(ctxToolRunID).(string)
 	return v
 }
 

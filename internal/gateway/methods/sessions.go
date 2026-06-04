@@ -10,20 +10,34 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
 // SessionsMethods handles sessions.list, sessions.preview, sessions.patch, sessions.delete, sessions.reset.
 type SessionsMethods struct {
-	sessions store.SessionStore
-	agents   *agent.Router // for aborting in-flight runs on session delete
-	eventBus bus.EventPublisher
-	cfg      *config.Config
+	sessions     store.SessionStore
+	agents       *agent.Router // for aborting in-flight runs on session delete
+	eventBus     bus.EventPublisher
+	cfg          *config.Config
+	// subagentTasks is optional — when set, sessions.preview attaches structured
+	// subagent state (label, final text, tool history, thinking) per spawn
+	// ToolCall in the history so the website can rebuild the nested mini-chat
+	// after page reload. nil at boot before stores are wired; preview falls
+	// back to history-only.
+	subagentTasks store.SubagentTaskStore
 }
 
 func NewSessionsMethods(sess store.SessionStore, agents *agent.Router, eventBus bus.EventPublisher, cfg *config.Config) *SessionsMethods {
 	return &SessionsMethods{sessions: sess, agents: agents, eventBus: eventBus, cfg: cfg}
+}
+
+// SetSubagentTaskStore wires the subagent_tasks store. Called once at boot.
+// Separate setter (rather than constructor arg) so existing test wiring
+// keeps compiling without changes.
+func (m *SessionsMethods) SetSubagentTaskStore(s store.SubagentTaskStore) {
+	m.subagentTasks = s
 }
 
 func (m *SessionsMethods) Register(router *gateway.MethodRouter) {
@@ -132,11 +146,79 @@ func (m *SessionsMethods) handlePreview(ctx context.Context, client *gateway.Cli
 	}
 	summary = httpapi.SignFileURLs(summary, secret)
 
-	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
+	// Attach structured subagent state per spawn ToolCall so the website's
+	// nested mini-chat can rebuild after page reload without parsing the
+	// announce-callback markdown out of the tool result text. Best-effort:
+	// any DB miss / lookup error leaves that toolCall without a subagent
+	// entry and the website degrades to the history-only fallback.
+	subagents := m.collectSubagentsForHistory(ctx, history)
+
+	resp := map[string]any{
 		"key":      params.Key,
 		"messages": history,
 		"summary":  summary,
-	}))
+	}
+	if len(subagents) > 0 {
+		resp["subagents"] = subagents
+	}
+	client.SendResponse(protocol.NewOKResponse(req.ID, resp))
+}
+
+// collectSubagentsForHistory scans the session history for spawn / sessions_spawn
+// tool_calls and, for each, looks up the structured subagent task by
+// parent_tool_call_id. Returns a map keyed by tool_call.id → subagent record
+// shape the website expects (matches the SubagentRun TS interface fields).
+//
+// Returns nil if the subagent store isn't wired or no spawn calls exist.
+func (m *SessionsMethods) collectSubagentsForHistory(
+	ctx context.Context, history []providers.Message,
+) map[string]any {
+	if m.subagentTasks == nil {
+		return nil
+	}
+	out := map[string]any{}
+	for _, msg := range history {
+		for _, tc := range msg.ToolCalls {
+			if tc.Name != "spawn" && tc.Name != "sessions_spawn" {
+				continue
+			}
+			task, err := m.subagentTasks.GetByParentToolCallID(ctx, tc.ID)
+			if err != nil || task == nil {
+				continue
+			}
+			entry := map[string]any{
+				"id":            task.ID.String(),
+				"label":         task.Subject,
+				"task":          task.Description,
+				"status":        task.Status,
+				"iterations":    task.Iterations,
+				"input_tokens":  task.InputTokens,
+				"output_tokens": task.OutputTokens,
+			}
+			if task.Model != nil {
+				entry["model"] = *task.Model
+			}
+			if task.Result != nil {
+				entry["content"] = *task.Result
+			}
+			if task.Thinking != nil {
+				entry["thinking"] = *task.Thinking
+			}
+			if len(task.ToolHistory) > 0 {
+				steps := make([]map[string]any, 0, len(task.ToolHistory))
+				for _, h := range task.ToolHistory {
+					steps = append(steps, map[string]any{
+						"name":        h.Name,
+						"status":      h.Status,
+						"duration_ms": h.DurationMs,
+					})
+				}
+				entry["tool_history"] = steps
+			}
+			out[tc.ID] = entry
+		}
+	}
+	return out
 }
 
 // handlePatch updates session metadata fields.

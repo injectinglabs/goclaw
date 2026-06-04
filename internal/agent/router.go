@@ -256,6 +256,13 @@ type ActiveRun struct {
 	SessionKey string
 	AgentID    string
 	UserID     string // owning user; lets chat.activeSessions filter to caller's runs without joining sessions
+	// Channel the run came in on: "ws" (web/extension chat), "telegram",
+	// "slack", "discord", "feishu", etc. Captured at RegisterRun so
+	// chat.activeSessions can filter by channel — symmetric with
+	// sessions.list's default `channelName=ws`. Without this, an
+	// in-flight Telegram bot reply would briefly synthesize a chat row
+	// in the web sidebar via reload-recovery, then vanish.
+	Channel    string
 	Cancel     context.CancelFunc
 	StartedAt  time.Time
 	InjectCh   chan InjectedMessage // buffered channel for mid-run user message injection
@@ -273,7 +280,37 @@ type ActiveRun struct {
 	Content   string
 	Thinking  string
 	ToolCalls []ToolCallSnapshot
+
+	// nextSeq is the monotonic sequence assigned to the NEXT outbound
+	// event. Read/written under bufMu. Used by StampAndBufferEvent to
+	// give every emitted AgentEvent a per-run order so the client can
+	// detect gaps and call runs.subscribe(runId, sinceSeq) to fill them.
+	nextSeq int64
+	// EventLog is a capped ring of every event that left this run, in
+	// emit order. Sized to fit a typical multi-iteration run with all
+	// chunks (~5000 events). Replayed verbatim on runs.subscribe so the
+	// UI can heal partial streams from any point without a sessions.
+	// preview detour.
+	EventLog []BufferedEvent
 }
+
+// BufferedEvent is one entry in ActiveRun.EventLog. We keep the whole
+// AgentEvent rather than a typed subset so runs.subscribe can replay any
+// event the client cares about (chunk / thinking / tool.call / tool.result /
+// subagent.* / run.completed) through the same code path that the live
+// emit uses.
+type BufferedEvent struct {
+	Seq   int64      `json:"seq"`
+	Event AgentEvent `json:"event"`
+}
+
+// maxRunEventLog caps each run's buffered event log. Hit only on
+// pathological multi-thousand-iteration runs; the ring drops oldest to
+// stay under this bound. Live-stream clients never lose anything (events
+// dispatch immediately); only post-hoc reconnect resume might miss the
+// very-earliest events on a marathon run — acceptable trade-off vs
+// unbounded growth.
+const maxRunEventLog = 5000
 
 // ToolCallSnapshot is the per-tool entry attached to ActiveRun so a
 // reconnecting client can rebuild the streaming bubble's tool indicators
@@ -313,13 +350,14 @@ func safeClose(ch chan struct{}) {
 // userID is the run's owning user — empty for tenant-system runs (cron,
 // title-gen) which never need to surface in chat.activeSessions.
 // Returns a receive-only channel for mid-run message injection.
-func (r *Router) RegisterRun(ctx context.Context, runID, sessionKey, agentID, userID string, cancel context.CancelFunc) <-chan InjectedMessage {
+func (r *Router) RegisterRun(ctx context.Context, runID, sessionKey, agentID, userID, channel string, cancel context.CancelFunc) <-chan InjectedMessage {
 	injectCh := make(chan InjectedMessage, injectBufferSize)
 	r.activeRuns.Store(runID, &ActiveRun{
 		RunID:      runID,
 		SessionKey: sessionKey,
 		AgentID:    agentID,
 		UserID:     userID,
+		Channel:    channel,
 		Cancel:     cancel,
 		StartedAt:  time.Now(),
 		InjectCh:   injectCh,
@@ -397,6 +435,79 @@ func (r *Router) AppendToolResult(runID, callID string, isErr bool, result strin
 	run.bufMu.Unlock()
 }
 
+// StampAndBufferEvent assigns the next monotonic Seq to an outbound event
+// and appends it to the run's capped EventLog. The (stamped) event is
+// returned for the caller to broadcast as-is. Off-router code paths that
+// emit events (channel handlers, tests) can skip this — the resulting
+// Seq=0 means "untracked", and runs.subscribe simply finds no entry for
+// the run.
+//
+// Eviction policy: when the log exceeds maxRunEventLog we drop the
+// oldest. This only affects reconnect-resume on marathon runs; live
+// streaming clients never miss anything because they receive the event
+// at broadcast time, before it enters the ring.
+//
+// Returns the same event (with Seq set) so the caller can write through:
+//
+//	event = router.StampAndBufferEvent(event)
+//	msgBus.Broadcast(bus.Event{Payload: event, ...})
+func (r *Router) StampAndBufferEvent(event AgentEvent) AgentEvent {
+	if event.RunID == "" {
+		return event
+	}
+	val, ok := r.activeRuns.Load(event.RunID)
+	if !ok {
+		return event
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	run.nextSeq++
+	event.Seq = run.nextSeq
+	run.EventLog = append(run.EventLog, BufferedEvent{Seq: event.Seq, Event: event})
+	if len(run.EventLog) > maxRunEventLog {
+		// Drop oldest: shift the slice forward. Allocates a fresh backing
+		// array so we don't keep the head events alive through the slice
+		// header (the dropped events become eligible for GC).
+		drop := len(run.EventLog) - maxRunEventLog
+		next := make([]BufferedEvent, maxRunEventLog)
+		copy(next, run.EventLog[drop:])
+		run.EventLog = next
+	}
+	run.bufMu.Unlock()
+	return event
+}
+
+// EventsSince returns every buffered event for runID whose Seq > sinceSeq,
+// in emit order. The returned slice is a defensive copy so callers can
+// iterate without holding bufMu. Empty slice = nothing missed (or run
+// unknown / already evicted).
+//
+// Used by the runs.subscribe WS method: client supplies its lastSeq, we
+// reply with everything newer, and the live broadcast continues to fan
+// out subsequent events as they happen.
+func (r *Router) EventsSince(runID string, sinceSeq int64) []BufferedEvent {
+	val, ok := r.activeRuns.Load(runID)
+	if !ok {
+		return nil
+	}
+	run := val.(*ActiveRun)
+	run.bufMu.Lock()
+	defer run.bufMu.Unlock()
+	if len(run.EventLog) == 0 {
+		return nil
+	}
+	// Linear scan — the log is bounded by maxRunEventLog and clients
+	// typically ask for sinceSeq close to the tail (last received was
+	// just a few events back).
+	out := make([]BufferedEvent, 0, len(run.EventLog))
+	for _, ev := range run.EventLog {
+		if ev.Seq > sinceSeq {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
 // AppendThinking mirrors AppendContent for chain-of-thought chunks emitted
 // by reasoning models (MiniMax, DeepSeek-R1). Kept separate from Content
 // so the UI can render the thinking block independently after reload.
@@ -449,6 +560,39 @@ type ActiveRunSnapshot struct {
 	Content    string             `json:"content,omitempty"`
 	Thinking   string             `json:"thinking,omitempty"`
 	ToolCalls  []ToolCallSnapshot `json:"toolCalls,omitempty"`
+	// Subagents carries in-memory state for any subagents this run has
+	// spawned, keyed by parent spawn tool_call.id. Populated by the chat
+	// methods handler after ActiveSessionsForUser returns — Router itself
+	// stays decoupled from the subagent layer. Lets the SPA rehydrate the
+	// nested mini-chat (text + thinking + tool history) on page reload
+	// without waiting for new live events.
+	Subagents map[string]SubagentSnapshot `json:"subagents,omitempty"`
+}
+
+// SubagentSnapshot mirrors the GoclawSubagentPreviewEntry shape the
+// website already consumes from sessions.preview, so the SPA can reuse
+// one hydration path for both live-active and finalised subagents.
+type SubagentSnapshot struct {
+	ID           string                     `json:"id"`
+	Label        string                     `json:"label,omitempty"`
+	Task         string                     `json:"task,omitempty"`
+	Model        string                     `json:"model,omitempty"`
+	Status       string                     `json:"status"`
+	Content      string                     `json:"content,omitempty"`
+	Thinking     string                     `json:"thinking,omitempty"`
+	ToolHistory  []SubagentToolHistoryEntry `json:"tool_history,omitempty"`
+	Iterations   int                        `json:"iterations,omitempty"`
+	InputTokens  int64                      `json:"input_tokens,omitempty"`
+	OutputTokens int64                      `json:"output_tokens,omitempty"`
+}
+
+// SubagentToolHistoryEntry is one step in SubagentSnapshot.ToolHistory.
+// Snake-case tags match sessions.preview's emitted shape so the website
+// reuses one TS type for both transports.
+type SubagentToolHistoryEntry struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
 }
 
 // ActiveSessionsForUser returns the active runs owned by the given user
@@ -473,6 +617,16 @@ func (r *Router) ActiveSessionsForUser(tenantID uuid.UUID, userID string) []Acti
 	r.activeRuns.Range(func(_, val any) bool {
 		run := val.(*ActiveRun)
 		if run.TenantID != tenantID || run.UserID != userID {
+			return true
+		}
+		// Channel filter — only return runs that originated from the WS
+		// chat path. Telegram / Slack / Discord runs would otherwise leak
+		// into the website's sidebar via reload-recovery and flash as a
+		// "ghost" chat for a second before the sessions.list response
+		// (which IS channel-scoped) replaces the array. Empty channel
+		// covers legacy ActiveRun entries created before the field
+		// existed — treat as ws for safety.
+		if run.Channel != "" && run.Channel != "ws" {
 			return true
 		}
 		if sessions.IsCronSession(run.SessionKey) {

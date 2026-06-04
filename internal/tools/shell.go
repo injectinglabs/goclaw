@@ -143,8 +143,23 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 	// Unicode-based pattern bypass while preserving functional command content.
 	normalizedCommand := normalizeCommand(command)
 
+	// Sandbox routing decision, resolved up front so the deny policy can account
+	// for it. When exec runs inside the isolated sandbox container (not on the
+	// host), the container — no host mounts, unprivileged user, cpu/mem caps,
+	// optional network — is the security boundary. The host-protection deny
+	// groups (reverse_shell's python/node/ruby network-import patterns,
+	// package_install's pip/npm/apk) then only block legitimate code skills and
+	// are trivially bypassed inside the sandbox anyway (write the script to a
+	// file, run it — the command string stops matching). So relax exactly those
+	// two for sandboxed exec; the host path keeps every group enabled.
+	sandboxKey := ToolSandboxKeyFromCtx(ctx)
+	willSandbox := t.sandboxMgr != nil && sandboxKey != ""
+
 	// Resolve deny patterns: per-agent overrides from context, fallback to all defaults.
 	denyOverrides := store.ShellDenyGroupsFromContext(ctx)
+	if willSandbox {
+		denyOverrides = relaxSandboxDenyGroups(denyOverrides)
+	}
 	groupPatterns := ResolveDenyPatterns(denyOverrides)
 
 	// Also resolve package_install patterns separately for approval routing.
@@ -240,7 +255,6 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 				cwd = wd
 			}
 		}
-		sandboxKey := ToolSandboxKeyFromCtx(ctx)
 		return t.executeCredentialed(ctx, cred, binary, cmdArgs, cwd, sandboxKey, command)
 	}
 
@@ -286,14 +300,51 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 		}
 	}
 
-	// Sandbox routing (sandboxKey from ctx — thread-safe)
-	sandboxKey := ToolSandboxKeyFromCtx(ctx)
-	if t.sandboxMgr != nil && sandboxKey != "" {
+	// Sandbox routing (willSandbox/sandboxKey resolved above — thread-safe).
+	if willSandbox {
 		return t.executeInSandbox(ctx, command, cwd, sandboxKey)
 	}
 
 	// Host execution
 	return t.executeOnHost(ctx, command, cwd)
+}
+
+// sandboxRelaxedDenyGroups lists the deny groups that exist to constrain the
+// HOST goclaw process and are the wrong boundary inside the isolated, optionally
+// network-enabled sandbox container. They block legitimate code skills (Python
+// network clients, pip/npm/apk installs, curl/DNS/recon) and are trivially
+// bypassed in-sandbox (write the script to a file, run it — the command string
+// stops matching), while the container (no host mounts, unprivileged user,
+// cpu/mem caps) is the real boundary. With sandbox network egress enabled,
+// outbound network use IS the intended capability, so the network/egress groups
+// (data_exfiltration's curl-POST/DNS-tools, network_recon's nmap/ssh-tunnels)
+// only generate false positives — e.g. data_exfiltration's `\b(nslookup|dig|host)\b`
+// matches the bare word "host" in any print label.
+//
+// Groups guarding against secret/host exposure are deliberately NOT listed and
+// stay enabled even in the sandbox: container_escape, env_dump, env_injection,
+// dangerous_paths, destructive_ops, code_injection, privilege_escalation,
+// persistence, process_control, crypto_mining, filter_bypass.
+var sandboxRelaxedDenyGroups = []string{
+	"reverse_shell",     // python/node/ruby network imports, bind/connect shells
+	"package_install",   // pip/npm/apk install
+	"data_exfiltration", // curl POST/PUT, curl|sh, DNS tools (nslookup/dig/host)
+	"network_recon",     // nmap/masscan, ssh tunnels, ngrok/chisel/cloudflared
+}
+
+// relaxSandboxDenyGroups returns a copy of the per-agent deny-group overrides
+// with the host-era groups in sandboxRelaxedDenyGroups disabled, for exec that
+// runs inside the sandbox container. Callers must have confirmed the command is
+// sandbox-routed; the host exec path keeps every group enabled.
+func relaxSandboxDenyGroups(overrides map[string]bool) map[string]bool {
+	relaxed := make(map[string]bool, len(overrides)+len(sandboxRelaxedDenyGroups))
+	for k, v := range overrides {
+		relaxed[k] = v
+	}
+	for _, g := range sandboxRelaxedDenyGroups {
+		relaxed[g] = false
+	}
+	return relaxed
 }
 
 // matchesAny checks if a command matches any pattern in the list.
@@ -400,18 +451,18 @@ func (t *ExecTool) executeInSandbox(ctx context.Context, command, cwd, sandboxKe
 			"error", err,
 			"command", truncateCmd(command, 80),
 		)
-		return ErrorResult(fmt.Sprintf("sandbox unavailable: %v (will not fall back to unsandboxed host execution)", err))
+		return sandboxInfraErrorResult("exec.get", err)
 	}
 
 	// Map host workdir to container workdir via SandboxCwd helper.
 	containerCwd, cwdErr := SandboxCwd(ctx, t.workspace, sandbox.DefaultContainerWorkdir)
 	if cwdErr != nil {
-		return ErrorResult(fmt.Sprintf("sandbox path mapping: %v", cwdErr))
+		return sandboxInfraErrorResult("exec.cwd_map", cwdErr)
 	}
 
 	result, err := sb.Exec(ctx, []string{"sh", "-c", command}, containerCwd) //nolint: no ExecOption for normal exec
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("sandbox exec: %v", err))
+		return sandboxInfraErrorResult("exec.run", err)
 	}
 
 	// Format output same as host execution

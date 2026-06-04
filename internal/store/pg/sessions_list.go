@@ -209,6 +209,7 @@ func (s *PGSessionStore) ListPagedRich(ctx context.Context, opts store.SessionLi
 		s.label, s.channel, s.user_id, COALESCE(s.metadata, '{}') AS metadata,
 		s.model, s.provider, s.input_tokens, s.output_tokens,
 		COALESCE(a.display_name, '') AS agent_name,
+		COALESCE(a.agent_key, '') AS agent_key,
 		COALESCE(s.last_prompt_tokens, octet_length(s.messages::text) / 4 + 12000) AS estimated_tokens,
 		COALESCE(a.context_window, 200000) AS context_window,
 		s.compaction_count`

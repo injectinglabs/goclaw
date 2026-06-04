@@ -154,6 +154,7 @@ type modelAliasEntry struct {
 	Alias         string `json:"alias"`
 	ID            string `json:"id"`
 	Provider      string `json:"provider"`
+	ModelID       string `json:"model_id"`
 	ContextWindow int    `json:"context_window"`
 	MaxTokens     int    `json:"max_tokens"`
 	Vision        bool   `json:"vision"`
@@ -211,12 +212,14 @@ func (f *ModelAliasFetcher) fetchOnce(ctx context.Context) (int, error) {
 			continue
 		}
 		spec := ModelSpec{
-			ID:            alias,
-			Provider:      row.Provider,
-			ContextWindow: row.ContextWindow,
-			MaxTokens:     row.MaxTokens,
-			Reasoning:     row.Reasoning,
-			Vision:        row.Vision,
+			ID:               alias,
+			Provider:         row.Provider,
+			ContextWindow:    row.ContextWindow,
+			MaxTokens:        row.MaxTokens,
+			Reasoning:        row.Reasoning,
+			Vision:           row.Vision,
+			UpstreamProvider: row.Provider,
+			UpstreamModel:    row.ModelID,
 		}
 		f.registry.RegisterAlias(alias, spec)
 		registered++

@@ -84,6 +84,7 @@ type sessionRichRow struct {
 	InputTokens     int64     `db:"input_tokens"`
 	OutputTokens    int64     `db:"output_tokens"`
 	AgentName       string    `db:"agent_name"`
+	AgentKey        string    `db:"agent_key"`
 	EstimatedTokens int       `db:"estimated_tokens"`
 	ContextWindow   int       `db:"context_window"`
 	CompactionCount int       `db:"compaction_count"`
@@ -111,6 +112,7 @@ func (r *sessionRichRow) toSessionInfoRich() store.SessionInfoRich {
 		InputTokens:     r.InputTokens,
 		OutputTokens:    r.OutputTokens,
 		AgentName:       r.AgentName,
+		AgentKey:        r.AgentKey,
 		EstimatedTokens: r.EstimatedTokens,
 		ContextWindow:   r.ContextWindow,
 		CompactionCount: r.CompactionCount,

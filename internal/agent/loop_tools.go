@@ -74,6 +74,18 @@ func (l *Loop) processToolResult(
 	if result.IsError && result.ForLLM != "" {
 		toolResultPayload["content"] = result.ForLLM
 	}
+	// Live media attach: when the tool produced files (write_file,
+	// create_pdf, create_image, …) ship them on this event so the SPA
+	// can render attachment chips on the streaming bubble immediately.
+	// Without this, files only appear after run.completed when the saved
+	// message's media_refs gets loaded — which is why a mid-stream chat
+	// shows "wrote 3 files" in text but no actual download buttons until
+	// you reload the page (the load path reads from sessions.preview).
+	// Paths are signed to /v1/files/...?ft=... here so the SPA can hit
+	// them with no extra round-trip — same shape sessions.preview emits.
+	if live := buildLiveMediaPayload(result.Media); live != nil {
+		toolResultPayload["media"] = live
+	}
 	emitRun(AgentEvent{
 		Type:    protocol.AgentEventToolResult,
 		AgentID: l.id,
@@ -137,8 +149,11 @@ func (l *Loop) processToolResult(
 		if level, msg := rs.loopDetector.detectSameResult(registryName, rh); level != "" {
 			if level == "critical" {
 				slog.Warn("tool loop critical: same result",
-					"tool", registryName, "agent", l.id, "run", req.RunID)
-				rs.finalContent = msg
+					"tool", registryName, "agent", l.id, "run", req.RunID, "detail", msg)
+				// Don't surface the raw "CRITICAL ... runaway loop" debug string to
+				// the user (the same-args path above uses a friendly message too).
+				// Any artifact already produced is still attached via deliverables.
+				rs.finalContent = "I've stopped because I was repeating the same step without getting a new result. If something's missing or you'd like me to adjust it, let me know."
 				rs.loopKilled = true
 				return toolMsg, nil, toolResultBreak
 			}

@@ -4,6 +4,53 @@ All notable changes to GoClaw Gateway are documented here. Format follows [Keep 
 
 ---
 
+### Locked canonical default + per-user starter templates + alias-aware thought_signature (2026-06-04)
+
+Three related PRs reshaping how agents are seeded and how alias-based
+model routing detects Gemini for the `thought_signature` echo-back path.
+
+**Migration 000066 — `agents.is_locked`** ([PR #233](https://github.com/injectinglabs/goclaw/pull/233))
+
+* New `is_locked boolean DEFAULT false` column. Backfill marks every
+  existing canonical default (`agent_key='default' AND owner_id='system'`)
+  as locked. Partial index covers the hot-path lookup.
+* Store invariant in `pg/agents.go` and `sqlitestore/agents.go` `Create`:
+  the lock is forced server-side when both `agent_key='default'` and
+  `owner_id='system'` are present. `is_locked` is excluded from
+  `agentAllowedFields`, so HTTP callers (including the auth-proxy
+  gateway-token path) cannot flip it on or off.
+* `PUT/DELETE /v1/agents/{id}` short-circuit with **409
+  FAILED_PRECONDITION** before allowlist filtering when the target is
+  locked. The SPA hides Edit / Delete / Clone buttons accordingly.
+* Tenant-shared `researcher` / `writer` / `coder` rows are retired:
+  `GET /v1/agents` now auto-clones per-user copies from the canonical
+  list in `internal/http/agent_templates.go` on a user's first visit
+  with zero personal agents. Idempotent — deleting a starter doesn't
+  resurrect it. The matching auth-proxy seed is dropped in
+  `injecting-ai-goclaw#227` so the picker no longer shows
+  shared-row + per-user-row duplicates.
+
+**Alias-aware `thought_signature` detection** ([PR #232](https://github.com/injectinglabs/goclaw/pull/232) + [#234](https://github.com/injectinglabs/goclaw/pull/234))
+
+* `OpenAIProvider.buildRequestBody` `supportsThoughtSignature` falls back
+  to the shared `ModelRegistry` when the local model string doesn't
+  contain `"gemini"`. New `ModelSpec.UpstreamProvider` /
+  `UpstreamModel` fields preserve the gateway's view of where an alias
+  resolves through `RegisterAlias`'s per-key overwrite (the
+  `model_alias_fetcher` deserializes `model_id` from `/v1/models` and
+  stashes both). Gemini detection then catches user-created agents
+  pinned to `model='default'` — without this fix Vertex rejected every
+  follow-up tool_call with `INVALID_ARGUMENT: missing thought_signature
+  in functionCall parts`.
+* PR #234 threads `modelReg` into the **tenant-scoped** OpenAI provider
+  construction paths (`cmd/gateway_providers.go registerProvidersFromDB`
+  and `internal/http/providers.go registerFromConfig`). Without that
+  wiring the registry was nil for per-tenant `llm-service` providers
+  and the alias fallback never ran — fix #232 only applied to globally
+  configured providers (openai, groq, etc.) until #234 landed.
+
+---
+
 ### Parked — Stream-to-DB for multi-instance reload recovery (2026-05-21)
 
 Branch `feat/stream-to-db` + PR [#108](https://github.com/injectinglabs/goclaw/pull/108)

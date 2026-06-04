@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS agents (
     shell_deny_groups     TEXT NOT NULL DEFAULT '{}',
     kg_dedup_config       TEXT NOT NULL DEFAULT '{}',
     is_default            BOOLEAN NOT NULL DEFAULT 0,
+    is_locked             BOOLEAN NOT NULL DEFAULT 0,
     agent_type            VARCHAR(20) NOT NULL DEFAULT 'open',
     status                VARCHAR(20) DEFAULT 'active',
     frontmatter           TEXT,
@@ -1416,12 +1417,16 @@ CREATE TABLE IF NOT EXISTS subagent_tasks (
     archived_at       TEXT,
     metadata          TEXT NOT NULL DEFAULT '{}',
     custom_scope      TEXT,
+    parent_tool_call_id VARCHAR(255),
+    tool_history      TEXT NOT NULL DEFAULT '[]',
+    thinking          TEXT,
     created_at        TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at        TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_subagent_tasks_parent_status ON subagent_tasks(tenant_id, parent_agent_key, status);
 CREATE INDEX IF NOT EXISTS idx_subagent_tasks_session ON subagent_tasks(session_key);
+CREATE INDEX IF NOT EXISTS idx_subagent_tasks_parent_tool_call_id ON subagent_tasks(parent_tool_call_id) WHERE parent_tool_call_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_subagent_tasks_created ON subagent_tasks(tenant_id, created_at);
 
 -- ============================================================

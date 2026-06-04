@@ -28,6 +28,7 @@ type SubagentConfig struct {
 	ArchiveAfterMinutes int    // auto-archive completed tasks (default 30)
 	MaxRetries          int    // max LLM call retries on error (default 2)
 	Model               string // model override for subagents (empty = inherit)
+	MaxTokens           int    // per-iteration LLM response budget (default 8192)
 }
 
 // Subagent task status constants.
@@ -67,6 +68,51 @@ type SubagentTask struct {
 	cancelFunc       context.CancelFunc `json:"-"` // per-task context cancel
 	spawnConfig      SubagentConfig `json:"-"` // resolved config at spawn time (per-agent override merged)
 	dbID             uuid.UUID `json:"-"` // persistent DB UUID (zero if not persisted)
+	// ToolHistory records the tool calls this subagent made during its run.
+	// Surfaced back to the parent via the announce callback so the UI can
+	// show what work the child agent actually did (web_search, web_fetch,
+	// write_file, …) without subscribing to per-tool WS events. Upstream
+	// goclaw doesn't track this — it's a fork-local addition to make
+	// subagent runs less of a black box on the website. Guarded by sm.mu
+	// the same way Status / Result / Token counters are.
+	ToolHistory      []SubagentToolRecord `json:"toolHistory,omitempty"`
+	// ParentToolCallID is the LLM-issued spawn tool_call.id this subagent
+	// was created for. Used to tag the nested tool.call/tool.result events
+	// the subagent emits so the website routes them to the parent's spawn
+	// chip and renders a live progress timeline. Empty for sync run paths
+	// (RunSync) that don't have a UI subscriber.
+	ParentToolCallID string `json:"parentToolCallId,omitempty"`
+	// ParentRunID is the agent Loop.Run that issued this spawn. Stored so
+	// the barrier (loop_barrier.go) can wait on ONLY the children of the
+	// current run instead of every task under the parent agent. Without
+	// this scope two parallel chats on the same agent share a global task
+	// list and each chat's barrier blocks on the other chat's children —
+	// breaks multi-chat parallelism even though chat.send itself permits
+	// concurrent runs per session. Mirrors the structured-concurrency
+	// convention LangGraph / Temporal / Claude Agent SDK use: children
+	// scoped to the parent execution, not to the agent definition.
+	ParentRunID string `json:"parentRunId,omitempty"`
+	// emitEvent (unexported, json:"-") is the parent run's tool-event
+	// emitter, captured from context at spawn time. Lets the subagent's
+	// goroutine publish on the SAME WS subscription the parent is using —
+	// without it there's no canonical channel from child back to UI.
+	emitEvent        ToolEventEmitter `json:"-"`
+	// Thinking accumulates the streamed chain-of-thought from reasoning
+	// providers (MiniMax / DeepSeek-R1 / Kimi) for persistence — so the
+	// website's nested mini-chat can rebuild the Thoughts block after
+	// page reload via sessions.preview. Empty for non-reasoning models.
+	// Guarded by sm.mu like Status / Result / Token counters.
+	Thinking         string `json:"thinking,omitempty"`
+}
+
+// SubagentToolRecord is one tool invocation the subagent made — captured
+// inside the iteration loop in executeTask and rendered as a Markdown table
+// in the announce callback. Duration is wall-clock ms from Execute() start
+// to return. Status mirrors result.IsError ("ok" / "error").
+type SubagentToolRecord struct {
+	Name       string `json:"name"`
+	DurationMs int64  `json:"durationMs"`
+	Status     string `json:"status"` // "ok" | "error"
 }
 
 // SubagentManager manages the lifecycle of spawned subagents.
@@ -83,6 +129,16 @@ type SubagentManager struct {
 	createTools   func() *Registry
 	announceQueue *AnnounceQueue          // optional: batches announces with debounce
 	taskStore     store.SubagentTaskStore // optional: persists tasks to DB (fire-and-forget)
+
+	// barrierMode, when true, suppresses the announceQueue.Enqueue path in
+	// runTask after a subagent finishes. The expectation is that the agent
+	// loop's pre-finalize barrier (agent.Loop.Run) calls WaitForChildren and
+	// consumes the results into the parent's own run via a second pipeline
+	// pass — so we don't want the announce queue to ALSO schedule a separate
+	// pseudo-run with the same content (duplicate synthesis + double bubble).
+	// Off by default to preserve legacy fire-and-forget behavior for tests +
+	// any tenant the operator hasn't migrated yet.
+	barrierMode bool
 }
 
 // NewSubagentManager creates a new subagent manager.
@@ -116,6 +172,16 @@ func (sm *SubagentManager) SetTaskStore(s store.SubagentTaskStore) {
 	sm.taskStore = s
 }
 
+// SetBarrierMode toggles barrier-mode announce suppression. See SubagentManager.barrierMode.
+func (sm *SubagentManager) SetBarrierMode(v bool) {
+	sm.barrierMode = v
+}
+
+// BarrierMode reports whether barrier-mode announce suppression is on.
+func (sm *SubagentManager) BarrierMode() bool {
+	return sm.barrierMode
+}
+
 // effectiveConfig returns the per-agent context override merged with defaults,
 // or falls back to sm.config when no override is present.
 func (sm *SubagentManager) effectiveConfig(ctx context.Context) SubagentConfig {
@@ -141,6 +207,9 @@ func (sm *SubagentManager) effectiveConfig(ctx context.Context) SubagentConfig {
 	}
 	if override.Model != "" {
 		cfg.Model = override.Model
+	}
+	if override.MaxTokens > 0 {
+		cfg.MaxTokens = override.MaxTokens
 	}
 	return cfg
 }

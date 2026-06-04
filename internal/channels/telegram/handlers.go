@@ -53,6 +53,17 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	userID := fmt.Sprintf("%d", user.ID)
 	senderID := userID
 
+	// Allowlist matching supports usernames via a compound "id|username" key
+	// (BaseChannel.IsAllowed strips a leading "@" from allowFrom entries and
+	// matches the username half). handleMessage otherwise only knows the numeric
+	// id, so a @username in allow_from would never match. Build the compound key
+	// for allowlist checks ONLY — userID/senderID stay numeric for pairing,
+	// localKey, and logs.
+	allowKey := userID
+	if user.Username != "" {
+		allowKey = fmt.Sprintf("%d|%s", user.ID, user.Username)
+	}
+
 	isGroup := message.Chat.Type == "group" || message.Chat.Type == "supergroup"
 
 	slog.Debug("telegram message received",
@@ -146,7 +157,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 			// Allow all senders.
 
 		case "allowlist":
-			if !c.IsAllowed(userID) && !c.IsAllowed(senderID) {
+			if !c.IsAllowed(allowKey) {
 				slog.Debug("telegram message rejected by allowlist",
 					"user_id", userID, "username", user.Username,
 				)
@@ -166,7 +177,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 					paired = p1 || p2
 				}
 			}
-			inAllowList := c.HasAllowList() && (c.IsAllowed(userID) || c.IsAllowed(senderID))
+			inAllowList := c.HasAllowList() && c.IsAllowed(allowKey)
 
 			if !paired && !inAllowList {
 				slog.Debug("telegram message rejected: sender not paired",
@@ -641,6 +652,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		HistoryLimit: c.HistoryLimit(),
 		ToolAllow:    topicCfg.tools,
 		TenantID:     c.TenantID(),
+		CreatedBy:    c.CreatedBy(),
 		Metadata:     metadata,
 	})
 

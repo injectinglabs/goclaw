@@ -114,6 +114,14 @@ type SystemPromptConfig struct {
 	ContextFiles  []bootstrap.ContextFile // bootstrap files for # Project Context
 	ExtraPrompt   string                 // extra system prompt (subagent context, etc.)
 	AgentType     string                 // "open" or "predefined" — affects context file framing
+	// CustomInstructions are the agent's own configured system prompt
+	// (agents.system_prompt column, migration 000063). Empty for the
+	// tenant default agent — falls through to the standard prompt. For
+	// user-created or template agents (Researcher/Writer/Coder) this is
+	// the carefully crafted prompt the user typed into the Manage modal.
+	// Injected near the top of the assembled prompt so it carries
+	// authority over the generic "## Tooling" / "## Skills" sections.
+	CustomInstructions string
 
 	HasSkillSearch      bool              // skill_search tool registered? (for search-mode prompt)
 	HasSkillManage      bool              // skill_manage tool registered + skill_evolve enabled for this agent
@@ -274,6 +282,23 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 		}
 		lines = append(lines, fmt.Sprintf("You are a personal assistant running in %s (%s).", channelLabel, chatType))
 		lines = append(lines, "")
+	}
+
+	// 1.2. Custom instructions — the agent's own configured prompt from
+	// agents.system_prompt (migration 000063). Injected ABOVE bootstrap +
+	// tools sections so it shapes how the agent interprets the rest. For
+	// templates (Researcher/Writer/Coder) this is the role-specific
+	// behaviour the user expects; for user-created custom agents it's
+	// whatever they typed into the Manage modal. The generic identity
+	// line above stays so channel context still threads in. Empty
+	// CustomInstructions → no-op (default agent's behaviour unchanged).
+	if cfg.CustomInstructions != "" {
+		lines = append(lines,
+			"## Custom Instructions",
+			"",
+			cfg.CustomInstructions,
+			"",
+		)
 	}
 
 	// 1.5. First-run bootstrap override (must be early so model sees it first)
@@ -583,12 +608,24 @@ func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups ma
 		)
 	}
 
-	if tools.IsGroupDenied(shellDenyGroups, "package_install") {
+	switch {
+	case hasSandbox:
+		// Sandboxed exec relaxes the package_install and reverse_shell deny
+		// groups (see internal/tools/shell.go relaxSandboxDenyGroups), so
+		// installs and Python network clients run directly inside the isolated
+		// container. Network reach depends on the sandbox's network setting,
+		// which may be disabled in some environments — a command that can't
+		// reach the network will error, so phrase this network-honestly.
+		lines = append(lines,
+			"",
+			"Inside the sandbox you can install packages at runtime with `pip3 install <pkg>` or `npm install -g <pkg>` (no sudo needed), and use Python network libraries (requests, urllib, httpx, sockets) directly. If the sandbox has no network access these will error — fall back to a bundled/offline approach in that case.",
+		)
+	case tools.IsGroupDenied(shellDenyGroups, "package_install"):
 		lines = append(lines,
 			"",
 			"Package installation (pip, npm, apk) requires admin approval. If you need to install a package, use exec with the install command — it will be routed to the admin for approval. Alternatively, ask the user to install via the Web UI Packages page.",
 		)
-	} else {
+	default:
 		lines = append(lines,
 			"",
 			"You can install packages at runtime with `pip3 install <pkg>` or `npm install -g <pkg>` — no sudo needed.",

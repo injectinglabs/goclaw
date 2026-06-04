@@ -104,6 +104,26 @@ func (s *SQLiteAgentStore) CanAccess(ctx context.Context, agentID uuid.UUID, use
 	if ownerID == userID {
 		return true, "owner", nil
 	}
+	// System-owned predefined templates (seeded by auth-proxy as the default
+	// agent's siblings) are tenant-wide siblings of is_default — every member
+	// of the tenant can use them. Mirror this rule in ListAccessible above.
+	var agentType string
+	if store.IsCrossTenant(ctx) {
+		_ = s.db.QueryRowContext(ctx,
+			"SELECT agent_type FROM agents WHERE id = ? AND deleted_at IS NULL", agentID,
+		).Scan(&agentType)
+	} else {
+		tid := store.TenantIDFromContext(ctx)
+		if tid != uuid.Nil {
+			_ = s.db.QueryRowContext(ctx,
+				"SELECT agent_type FROM agents WHERE id = ? AND deleted_at IS NULL AND tenant_id = ?",
+				agentID, tid,
+			).Scan(&agentType)
+		}
+	}
+	if agentType == "predefined" && ownerID == "system" {
+		return true, "user", nil
+	}
 	// Check shares
 	var role string
 	if store.IsCrossTenant(ctx) {
@@ -134,6 +154,7 @@ func (s *SQLiteAgentStore) ListAccessible(ctx context.Context, userID string) ([
 			 WHERE deleted_at IS NULL AND (
 			     owner_id = ?
 			     OR is_default = 1
+			     OR (agent_type = 'predefined' AND owner_id = 'system')
 			     OR id IN (SELECT agent_id FROM agent_shares WHERE user_id = ?)
 			     OR (agent_type = 'predefined' AND id IN (
 			         SELECT agent_id FROM channel_instances ci
@@ -161,6 +182,7 @@ func (s *SQLiteAgentStore) ListAccessible(ctx context.Context, userID string) ([
 		 WHERE deleted_at IS NULL AND tenant_id = ? AND (
 		     owner_id = ?
 		     OR is_default = 1
+		     OR (agent_type = 'predefined' AND owner_id = 'system')
 		     OR id IN (SELECT agent_id FROM agent_shares WHERE user_id = ? AND tenant_id = ?)
 		     OR (agent_type = 'predefined' AND id IN (
 		         SELECT agent_id FROM channel_instances ci

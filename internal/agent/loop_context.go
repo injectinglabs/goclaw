@@ -77,8 +77,19 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	//      receiver inverts the prefix family and joins on
 	//      organizations.slug.
 	if req.UserID != "" {
+		// X-Actor-User-ID is the BILLING attribution for downstream
+		// services (web-agent-api -> ai_tasks.user_id, org quota). Prefer
+		// req.BillingUserID — set by the inbound consumer to the bot
+		// owner (channel_instances.created_by) — so a Telegram bot
+		// connected by user X always charges X regardless of who happens
+		// to write to it. Fall back to req.UserID for in-app channels
+		// (extension chat, dashboard) where the user IS the actor.
+		actorUserID := req.BillingUserID
+		if actorUserID == "" {
+			actorUserID = req.UserID
+		}
 		actor := map[string]string{
-			"X-Actor-User-ID": req.UserID,
+			"X-Actor-User-ID": actorUserID,
 		}
 		orgID := l.externalOrgID
 		if orgID == "" {
@@ -89,6 +100,18 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 		}
 		if orgID != "" {
 			actor["X-Actor-Org-ID"] = orgID
+		}
+		// X-Actor-Agent-ID is the UUID of the agent whose loop is calling
+		// this tool. MCP sidecars (connectors-mcp) use it as the default
+		// owner when creating per-agent resources (Telegram channels, file
+		// scopes, etc.) — eliminates the "which agent should own this?"
+		// ambiguity that previously forced the tool to refuse with a
+		// picker prompt in multi-agent tenants. The session's agent is
+		// the user's expressed intent (they chose to chat with it), so
+		// it's a safe, explicit-feeling default. The user can still
+		// override by passing agent_id="<key>" in the tool args.
+		if l.agentUUID != uuid.Nil {
+			actor["X-Actor-Agent-ID"] = l.agentUUID.String()
 		}
 		ctx = providers.WithActorHeaders(ctx, actor)
 	}

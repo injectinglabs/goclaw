@@ -29,12 +29,14 @@ func NewSQLiteSubagentTaskStore(db *sql.DB) *SQLiteSubagentTaskStore {
 
 const subagentTaskInsertCols = `tenant_id, parent_agent_key, session_key, subject, description,
 	status, result, depth, model, provider, iterations, input_tokens, output_tokens,
-	origin_channel, origin_chat_id, origin_peer_kind, origin_user_id, spawned_by, metadata`
+	origin_channel, origin_chat_id, origin_peer_kind, origin_user_id, spawned_by, metadata,
+	parent_tool_call_id, tool_history, thinking`
 
 const subagentTaskSelectCols = `id, tenant_id, parent_agent_key, session_key, subject, description,
 	status, result, depth, model, provider, iterations, input_tokens, output_tokens,
 	origin_channel, origin_chat_id, origin_peer_kind, origin_user_id, spawned_by,
-	completed_at, archived_at, COALESCE(metadata, '{}'), created_at, updated_at`
+	completed_at, archived_at, COALESCE(metadata, '{}'), created_at, updated_at,
+	parent_tool_call_id, COALESCE(tool_history, '[]'), thinking`
 
 // Create persists a new subagent task at spawn time.
 func (s *SQLiteSubagentTaskStore) Create(ctx context.Context, task *store.SubagentTaskData) error {
@@ -47,9 +49,16 @@ func (s *SQLiteSubagentTaskStore) Create(ctx context.Context, task *store.Subage
 		}
 	}
 
+	historyJSON := []byte("[]")
+	if len(task.ToolHistory) > 0 {
+		if b, err := json.Marshal(task.ToolHistory); err == nil {
+			historyJSON = b
+		}
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	q := fmt.Sprintf(`INSERT OR IGNORE INTO subagent_tasks (id, %s, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, subagentTaskInsertCols)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, subagentTaskInsertCols)
 
 	_, err := s.db.ExecContext(ctx, q,
 		task.ID, tid, task.ParentAgentKey, task.SessionKey, task.Subject, task.Description,
@@ -57,6 +66,7 @@ func (s *SQLiteSubagentTaskStore) Create(ctx context.Context, task *store.Subage
 		task.Iterations, task.InputTokens, task.OutputTokens,
 		task.OriginChannel, task.OriginChatID, task.OriginPeerKind, task.OriginUserID,
 		task.SpawnedBy, metaJSON,
+		task.ParentToolCallID, string(historyJSON), task.Thinking,
 		now, now,
 	)
 	return err
@@ -66,6 +76,7 @@ func (s *SQLiteSubagentTaskStore) Create(ctx context.Context, task *store.Subage
 func scanTask(row interface{ Scan(...any) error }) (*store.SubagentTaskData, error) {
 	var t store.SubagentTaskData
 	var metaJSON []byte
+	var historyJSON []byte
 	var completedAt, archivedAt nullSqliteTime
 	var createdAt, updatedAt sqliteTime
 
@@ -75,6 +86,7 @@ func scanTask(row interface{ Scan(...any) error }) (*store.SubagentTaskData, err
 		&t.Iterations, &t.InputTokens, &t.OutputTokens,
 		&t.OriginChannel, &t.OriginChatID, &t.OriginPeerKind, &t.OriginUserID, &t.SpawnedBy,
 		&completedAt, &archivedAt, &metaJSON, &createdAt, &updatedAt,
+		&t.ParentToolCallID, &historyJSON, &t.Thinking,
 	)
 	if err != nil {
 		return nil, err
@@ -91,6 +103,9 @@ func scanTask(row interface{ Scan(...any) error }) (*store.SubagentTaskData, err
 	t.UpdatedAt = updatedAt.Time
 	if len(metaJSON) > 2 {
 		_ = json.Unmarshal(metaJSON, &t.Metadata)
+	}
+	if len(historyJSON) > 2 {
+		_ = json.Unmarshal(historyJSON, &t.ToolHistory)
 	}
 	return &t, nil
 }
@@ -251,3 +266,49 @@ func collectTasks(rows *sql.Rows) ([]store.SubagentTaskData, error) {
 var metadataKeyRe = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 
 func validMetadataKey(k string) bool { return metadataKeyRe.MatchString(k) }
+
+// UpdateNestedState persists the subagent's tool timeline + accumulated
+// thinking onto an existing task row (migration 000065). Called once at
+// completion.
+func (s *SQLiteSubagentTaskStore) UpdateNestedState(
+	ctx context.Context, id uuid.UUID,
+	history []store.SubagentToolHistoryEntry, thinking *string,
+) error {
+	tid, err := requireTenantID(ctx)
+	if err != nil {
+		return err
+	}
+	historyJSON := []byte("[]")
+	if len(history) > 0 {
+		if b, err := json.Marshal(history); err == nil {
+			historyJSON = b
+		}
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	q := `UPDATE subagent_tasks SET
+		tool_history = ?, thinking = ?, updated_at = ?
+		WHERE id = ? AND tenant_id = ?`
+	_, err = s.db.ExecContext(ctx, q, string(historyJSON), thinking, now, id, tid)
+	return err
+}
+
+// GetByParentToolCallID returns the subagent task linked to a parent's
+// spawn tool_call.id. Used by sessions.preview to rebuild the website's
+// nested mini-chat after page reload. Returns (nil, nil) when no match.
+func (s *SQLiteSubagentTaskStore) GetByParentToolCallID(
+	ctx context.Context, parentToolCallID string,
+) (*store.SubagentTaskData, error) {
+	tid, err := requireTenantID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	q := fmt.Sprintf(`SELECT %s FROM subagent_tasks
+		WHERE parent_tool_call_id = ? AND tenant_id = ?
+		ORDER BY created_at DESC LIMIT 1`, subagentTaskSelectCols)
+	row := s.db.QueryRowContext(ctx, q, parentToolCallID, tid)
+	t, err := scanTask(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return t, err
+}

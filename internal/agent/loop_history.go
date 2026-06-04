@@ -227,6 +227,9 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		MCPToolDescs:           mcpToolDescs,
 		ContextFiles:           contextFiles,
 		AgentType:              l.agentType,
+		// Inject agents.system_prompt from migration 000063 — see resolver.go
+		// where l.customInstructions is populated from AgentData.SystemPrompt.
+		CustomInstructions:     l.customInstructions,
 		ExtraPrompt:            extraSystemPrompt,
 		SandboxEnabled:         l.sandboxEnabled,
 		SandboxContainerDir:    l.sandboxContainerDir,

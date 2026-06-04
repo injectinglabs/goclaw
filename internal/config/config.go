@@ -421,6 +421,7 @@ type SubagentsConfig struct {
 	ArchiveAfterMinutes int    `json:"archiveAfterMinutes,omitempty"` // default 60
 	MaxRetries          int    `json:"maxRetries,omitempty"`          // max LLM retries on error (default 2)
 	Model               string `json:"model,omitempty"`               // model override for subagents
+	MaxTokens           int    `json:"maxTokens,omitempty"`           // per-iteration LLM response budget (default 8192)
 }
 
 // AgentSpec is the per-agent configuration override.

@@ -123,6 +123,21 @@ type PipelineDeps struct {
 	// back to a user-facing sentence (localised). Returning "" means the
 	// caller should keep the legacy "..." placeholder.
 	HandleEmptyReply func(ctx context.Context, history []providers.Message) string
+
+	// WaitForChildren is the pre-finalize barrier hook. Called by the
+	// pipeline after a stage signals BreakLoop, BEFORE the loop actually
+	// exits. Implementations wait for any spawned subagents to finish,
+	// append a synthetic [System Message] with their results to the
+	// pending message buffer, and return true to indicate "loop one more
+	// time so the LLM can synthesize over the new context". Returning
+	// false (or nil callback) lets the pipeline exit normally.
+	//
+	// Keeping the barrier inside the pipeline (rather than wrapping
+	// runViaPipeline at the agent.Loop layer) means the entire turn is
+	// finalized exactly once, which keeps DB history clean — a single
+	// assistant row instead of one-per-pass. Mid-stream page reloads
+	// then show a single assembling bubble instead of a split.
+	WaitForChildren func(ctx context.Context, state *RunState) bool
 }
 
 // FireHook is nil-safe. Returns FireResult{Decision: DecisionAllow} when no

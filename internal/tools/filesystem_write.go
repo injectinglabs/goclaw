@@ -331,12 +331,12 @@ func copyToTempForUpload(src string) (string, error) {
 func (t *WriteFileTool) executeInSandbox(ctx context.Context, path, content, sandboxKey string, deliver, appendMode bool) *Result {
 	bridge, err := t.getFsBridge(ctx, sandboxKey)
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("sandbox error: %v", err))
+		return sandboxInfraErrorResult("write_file.get", err)
 	}
 
 	containerCwd, cwdErr := SandboxCwd(ctx, t.workspace, sandbox.DefaultContainerWorkdir)
 	if cwdErr != nil {
-		return ErrorResult(fmt.Sprintf("sandbox path mapping: %v", cwdErr))
+		return sandboxInfraErrorResult("write_file.cwd_map", cwdErr)
 	}
 	containerPath := ResolveSandboxPath(path, containerCwd)
 

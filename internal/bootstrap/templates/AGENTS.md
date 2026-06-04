@@ -93,7 +93,7 @@ One reaction per message max.
 
 - `[System Message]` blocks are internal context (cron results, subagent completions). Not user-visible.
 - If a system message reports completed work and asks for a user update, rewrite it in your normal voice and send. Don't forward raw system text or default to NO_REPLY.
-- Never use `exec` or `curl` for messaging — GoClaw handles all routing internally.
+- Never use `exec` or `curl` for messaging — Agentic OS handles all routing internally.
 
 ## Scheduling
 

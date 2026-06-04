@@ -159,32 +159,47 @@ func buildEmbeddingProvider(
 }
 
 func setupSubagents(providerReg *providers.Registry, cfg *config.Config, msgBus *bus.MessageBus, toolsReg *tools.Registry, workspace string, sandboxMgr sandbox.Manager) *tools.SubagentManager {
-	names := providerReg.List(context.Background())
-	if len(names) == 0 {
-		return nil
-	}
-
+	// In multi-tenant deployments providers are registered per-tenant under
+	// composite "tenantID/name" keys; the registry's master-tenant fallback
+	// is empty for our setup (no global default provider). Both
+	// `providerReg.List(context.Background())` and `providerReg.Get(
+	// context.Background(), …)` therefore return empty/nil at startup,
+	// even though there are dozens of valid per-tenant providers in the
+	// table. Previously the function bailed out here, killing
+	// the spawn tool registration in cmd/gateway.go: every agent ran with
+	// hasSpawn=false and the LLM had no subagent affordance to call.
+	//
+	// Skip the early-out entirely. SubagentManager only uses `sm.provider`
+	// as a last-resort fallback — `subagent_exec.executeSubagent` re-resolves
+	// the active provider on every run via providerReg.Get(ctx_with_tenant,
+	// ParentProviderFromCtx(ctx)). loop_context.go:168 stamps both tenant ID
+	// and parent provider name onto every tool-execution context before
+	// dispatch, so the per-tenant provider is always found at run time.
+	// `nil` here is safe; the executeSubagent NPE guard catches the
+	// pathological case (config drift, tenant teardown mid-flight) and
+	// fails the task cleanly.
 	agentCfg := cfg.ResolveAgent("default")
-	provider, err := providerReg.Get(context.Background(), agentCfg.Provider)
-	if err != nil {
-		provider, _ = providerReg.Get(context.Background(), names[0])
-	}
+	provider, _ := providerReg.Get(context.Background(), agentCfg.Provider)
 	if provider == nil {
-		return nil
+		slog.Info("subagent system: no global primary provider (multi-tenant mode); per-run resolution will pick the parent agent's tenant-scoped provider")
 	}
 
 	subCfg := tools.DefaultSubagentConfig()
 
 	// Apply config file overrides if present (matching TS agents.defaults.subagents).
 	if sc := agentCfg.Subagents; sc != nil {
-		if sc.MaxConcurrent > 0 {
+		// Non-zero passes through, including negative for explicit "unlimited".
+		// The spawn-side check treats <= 0 as off.
+		if sc.MaxConcurrent != 0 {
 			subCfg.MaxConcurrent = sc.MaxConcurrent
 		}
 		if sc.MaxSpawnDepth > 0 {
 			subCfg.MaxSpawnDepth = min(sc.MaxSpawnDepth, 5) // TS: max 5
 		}
-		if sc.MaxChildrenPerAgent > 0 {
-			subCfg.MaxChildrenPerAgent = min(sc.MaxChildrenPerAgent, 20) // TS: max 20
+		// Negative → unlimited (skip the spawn-side check). Positive → use
+		// as-is, no 20-clamp — ops control their own ceiling.
+		if sc.MaxChildrenPerAgent != 0 {
+			subCfg.MaxChildrenPerAgent = sc.MaxChildrenPerAgent
 		}
 		if sc.ArchiveAfterMinutes > 0 {
 			subCfg.ArchiveAfterMinutes = sc.ArchiveAfterMinutes

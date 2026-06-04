@@ -41,29 +41,37 @@ func (sm *SubagentManager) Spawn(
 		return "", fmt.Errorf("spawn depth limit reached (%d/%d)", depth, cfg.MaxSpawnDepth)
 	}
 
-	// Check concurrent limit (scoped per tenant for isolation).
-	tenantID := store.TenantIDFromContext(ctx)
-	running := 0
-	for _, t := range sm.tasks {
-		if t.Status == TaskStatusRunning && t.OriginTenantID == tenantID {
-			running++
+	// Tenant-scoped concurrent limit. <= 0 disables the check entirely —
+	// same convention as MaxChildrenPerAgent below. Per-tenant scoping
+	// stays even when off so a future operator turning it back on doesn't
+	// have to also revisit the loop body.
+	if cfg.MaxConcurrent > 0 {
+		tenantID := store.TenantIDFromContext(ctx)
+		running := 0
+		for _, t := range sm.tasks {
+			if t.Status == TaskStatusRunning && t.OriginTenantID == tenantID {
+				running++
+			}
 		}
-	}
-	if running >= cfg.MaxConcurrent {
-		sm.mu.Unlock()
-		return "", fmt.Errorf("max concurrent subagents reached (%d/%d)", running, cfg.MaxConcurrent)
+		if running >= cfg.MaxConcurrent {
+			sm.mu.Unlock()
+			return "", fmt.Errorf("max concurrent subagents reached (%d/%d)", running, cfg.MaxConcurrent)
+		}
 	}
 
-	// Check per-parent children limit
-	childCount := 0
-	for _, t := range sm.tasks {
-		if t.ParentID == parentID {
-			childCount++
+	// Per-parent children limit. MaxChildrenPerAgent <= 0 disables the check
+	// entirely (intent: ops can turn it off without removing the field).
+	if cfg.MaxChildrenPerAgent > 0 {
+		childCount := 0
+		for _, t := range sm.tasks {
+			if t.ParentID == parentID {
+				childCount++
+			}
 		}
-	}
-	if childCount >= cfg.MaxChildrenPerAgent {
-		sm.mu.Unlock()
-		return "", fmt.Errorf("max children per agent reached (%d/%d)", childCount, cfg.MaxChildrenPerAgent)
+		if childCount >= cfg.MaxChildrenPerAgent {
+			sm.mu.Unlock()
+			return "", fmt.Errorf("max children per agent reached (%d/%d)", childCount, cfg.MaxChildrenPerAgent)
+		}
 	}
 
 	id := generateSubagentID()
@@ -92,6 +100,9 @@ func (sm *SubagentManager) Spawn(
 		OriginRootSpanID:  tracing.ParentSpanIDFromContext(ctx),
 		CreatedAt:         time.Now().UnixMilli(),
 		spawnConfig:       cfg,
+		ParentToolCallID:  ParentToolCallIDFromCtx(ctx),
+		ParentRunID:       ToolRunIDFromCtx(ctx),
+		emitEvent:         ToolEventEmitterFromCtx(ctx),
 	}
 	// Detach from parent's cancellation chain so subagent survives after parent run completes.
 	// WithoutCancel preserves all context values (agent ID, workspace, trace info, etc.)
@@ -171,6 +182,15 @@ func (sm *SubagentManager) RunSync(
 		OriginRootSpanID: tracing.ParentSpanIDFromContext(ctx),
 		CreatedAt:        time.Now().UnixMilli(),
 		spawnConfig:      cfg,
+		// Wire the parent's WS subscriber + spawn tool_call.id so the
+		// sync path also surfaces subagent.run.started / subagent.chunk /
+		// subagent.run.completed events to the UI. Without these the
+		// nested mini-chat under the spawn chip renders empty for sync
+		// subagents and the user sees no progress until the parent's
+		// tool.result arrives (which for a 60s research task is way too
+		// late). Mirror of what Spawn() does in the async path.
+		ParentToolCallID: ParentToolCallIDFromCtx(ctx),
+		emitEvent:        ToolEventEmitterFromCtx(ctx),
 	}
 	if sm.taskStore != nil {
 		subTask.dbID = store.GenNewID()

@@ -10,6 +10,7 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
+	"github.com/nextlevelbuilder/goclaw/internal/skills"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tokencount"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
@@ -143,34 +144,49 @@ func BuildPreviewPrompt(ctx context.Context, ag *store.AgentData, mode PromptMod
 	}
 
 	// --- Pinned skills ---
+	// DB-backed when an access store is wired (per-tenant skills aren't on the
+	// filesystem loader); fall back to the loader for single-user / desktop.
 	var pinnedSummary string
-	if pinnedSkills := ag.ParsePinnedSkills(); len(pinnedSkills) > 0 && deps.SkillsLoader != nil {
-		pinnedSummary = deps.SkillsLoader.BuildPinnedSummary(ctx, pinnedSkills)
-	}
-
-	// --- Skills summary (BuildSummary + token count) ---
-	var skillsSummary string
-	if deps.SkillsLoader != nil {
-		var skillAllowList []string
+	if pinnedSkills := ag.ParsePinnedSkills(); len(pinnedSkills) > 0 {
 		if deps.SkillAccessStore != nil {
 			if accessible, err := deps.SkillAccessStore.ListAccessible(ctx, ag.ID, userID); err == nil {
-				skillAllowList = make([]string, 0, len(accessible))
-				for _, sk := range accessible {
-					skillAllowList = append(skillAllowList, sk.Slug)
+				pinned := make(map[string]bool, len(pinnedSkills))
+				for _, n := range pinnedSkills {
+					pinned[n] = true
 				}
-			} else {
-				// On error: empty list (no skills). Preview is diagnostic; safer than showing all.
-				skillAllowList = []string{}
+				var infos []skills.Info
+				for _, sk := range accessible {
+					if pinned[sk.Slug] || pinned[sk.Name] {
+						infos = append(infos, storeSkillInfoToInfo(sk))
+					}
+				}
+				pinnedSummary = skills.BuildSummaryFromInfos(infos)
 			}
+		} else if deps.SkillsLoader != nil {
+			pinnedSummary = deps.SkillsLoader.BuildPinnedSummary(ctx, pinnedSkills)
 		}
+	}
 
-		summary := deps.SkillsLoader.BuildSummary(ctx, skillAllowList)
-		if summary != "" {
-			tokens := tokencount.NewFallbackCounter().Count("claude-3", summary)
-			if tokens <= skillInlineMaxTokens {
+	// --- Skills summary (token-capped) ---
+	var skillsSummary string
+	if deps.SkillAccessStore != nil {
+		if accessible, err := deps.SkillAccessStore.ListAccessible(ctx, ag.ID, userID); err == nil {
+			infos := make([]skills.Info, 0, len(accessible))
+			for _, sk := range accessible {
+				if sk.Status != "" && sk.Status != "active" {
+					continue
+				}
+				infos = append(infos, storeSkillInfoToInfo(sk))
+			}
+			if summary := skills.BuildSummaryFromInfos(infos); summary != "" &&
+				tokencount.NewFallbackCounter().Count("claude-3", summary) <= skillInlineMaxTokens {
 				skillsSummary = summary
 			}
-			// Over threshold → search-only mode (skillsSummary stays empty)
+		}
+	} else if deps.SkillsLoader != nil {
+		if summary := deps.SkillsLoader.BuildSummary(ctx, nil); summary != "" &&
+			tokencount.NewFallbackCounter().Count("claude-3", summary) <= skillInlineMaxTokens {
+			skillsSummary = summary
 		}
 	}
 

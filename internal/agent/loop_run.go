@@ -162,7 +162,14 @@ func (l *Loop) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 		l.traceCollector.SetTraceStatus(ctx, traceID, store.TraceStatusRunning)
 	}
 
-	// V3 pipeline path (always enabled)
+	// V3 pipeline path (always enabled).
+	//
+	// Barrier is wired INSIDE the pipeline now (PipelineDeps.WaitForChildren)
+	// so the whole user turn stays in one pipeline run. That keeps
+	// FinalizeStage's session flush singular: one assistant row in DB per
+	// turn instead of one-per-pass. The two-call wrapper this used to
+	// have produced a mid-stream "split bubble" symptom on page reload —
+	// see Loop.makePipelineBarrier for the in-pipeline replacement.
 	{
 		result, err := l.runViaPipeline(ctx, req)
 		// Tracing + events handled below via the same finalize path

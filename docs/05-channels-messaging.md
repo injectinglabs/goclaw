@@ -645,7 +645,91 @@ Channels provide per-user isolation through compound sender IDs and context prop
 
 ---
 
-## 15. Pairing System
+## 15. Billing vs Identity Attribution
+
+Inbound channel messages carry **two distinct user identities**, deliberately decoupled so DB-state drift in one cannot misroute the other.
+
+| Dimension | Source | Used for |
+|-----------|--------|----------|
+| **BILLING** (`BillingUserID`) | `channel_instances.created_by` | Outbound `X-Actor-User-ID` header → `web-agent-api` → `ai_tasks.user_id`, org quota |
+| **IDENTITY** (`UserID`) | `channel_contacts.merged_id` → `tenant_users.user_id`, else bot owner | Session scope, memory (`USER.md` / `SOUL.md`), BYOC credentials, per-user file seeding |
+
+### Why two fields
+
+Before this split, a single `userID` carried both responsibilities and produced two bug classes that cost real money:
+
+1. **Stale-link bug**: a bot reconnected under a new user kept the previous `merged_id` link, so token attribution kept charging the old member of the team-org. (Customer-visible: dashboard `tokens_used` doesn't grow for the new bot owner.)
+2. **Null-link bug**: when no `merged_id` was set, the resolver fell through to the raw sender ID (Telegram numeric, e.g. `"802131129"`). `web-agent-api` rejected non-UUID actor IDs with HTTP 500 → bot silently stopped answering.
+
+Splitting fixes both deterministically without DB migrations or maintenance scripts.
+
+### Resolution chain (Telegram inbound, applies to any platform)
+
+```
+channel_instances.created_by  ──────────────────►  RunRequest.BillingUserID
+                                                          │
+                                                          ▼
+                                                  X-Actor-User-ID  (billing, always)
+
+channel_contacts.merged_id  ──►  tenant_users.user_id  ───►  RunRequest.UserID  (identity)
+       │
+       └─ NULL or unresolved ───►  fall back to bot owner ───►  RunRequest.UserID  (identity)
+```
+
+The fallback in `cmd/gateway_consumer_normal.go` is the key safety net:
+
+```go
+// Identity falls back to bot owner when resolver returns nothing.
+// Prevents raw sender id (e.g. Telegram numeric) from leaking into
+// session.UserID, memory keys, or actor headers.
+if msg.CreatedBy != "" && userID == msg.SenderID {
+    slog.Debug("identity.fallback_to_bot_owner", ...)
+    userID = msg.CreatedBy
+}
+```
+
+### Field plumbing
+
+`BaseChannel.CreatedBy()` returns the bot owner UUID. Set by `InstanceLoader` from `channel_instances.created_by` at boot.
+
+`bus.InboundMessage.CreatedBy` carries it across the message bus into the consumer.
+
+`RunRequest.BillingUserID` carries it into the agent loop. `agent/loop_context.go` consumes:
+
+```go
+actorUserID := req.BillingUserID
+if actorUserID == "" {           // in-app channels (extension chat, dashboard)
+    actorUserID = req.UserID     //   — the user IS the actor, no separate bot owner
+}
+actor["X-Actor-User-ID"] = actorUserID
+```
+
+In-app channels (extension chat, dashboard WS) leave `BillingUserID` empty and fall back to `UserID`, preserving existing behaviour.
+
+### Guarantees this gives
+
+- **Bot owner pays.** Whoever ran `connect_telegram` (`channel_instances.created_by`) is charged for every message through that bot, deterministically. No state in `channel_contacts` or any other table can re-route the bill.
+- **`X-Actor-User-ID` is always a real platform UUID.** Numeric Telegram IDs cannot leak downstream.
+- **Memory still cross-channel-aware.** If a Telegram contact was explicitly linked to a profile via `link_telegram_profile`, identity still resolves through `merged_id` for that contact. Billing remains anchored to the bot owner.
+- **Unlinked contacts work out-of-the-box.** A fresh user writing to a freshly-connected bot gets a working session immediately, with identity defaulted to the bot owner.
+
+### Future opt-in: sender-pays mode
+
+The current design is "bot owner pays". For shared bots where each sender should be charged individually (e.g. a customer-support bot where each visitor has their own quota), add an opt-in `billing_mode='sender'` flag on `channel_instances` and conditionally set `BillingUserID = resolved_sender_user` when the sender has a linked profile. Not currently implemented.
+
+### Files
+
+- `internal/bus/types.go` — `InboundMessage.CreatedBy`
+- `internal/channels/channel.go` — `BaseChannel.createdBy` + `CreatedBy()` / `SetCreatedBy()`
+- `internal/channels/instance_loader.go` — stamps `CreatedBy` from `channel_instances.created_by`
+- `internal/channels/telegram/handlers.go` — emits `CreatedBy: c.CreatedBy()` on every inbound
+- `cmd/gateway_consumer_normal.go` — identity fallback + `BillingUserID` plumbing
+- `internal/agent/loop_types.go` — `RunRequest.BillingUserID`
+- `internal/agent/loop_context.go` — `X-Actor-User-ID = BillingUserID || UserID`
+
+---
+
+## 16. Pairing System
 
 The pairing system provides a DM authentication flow for channels using the `pairing` DM policy.
 

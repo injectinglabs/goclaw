@@ -100,6 +100,10 @@ type Loop struct {
 	// Copied once at Loop construction; used to build AgentAudioSnapshot at tool dispatch.
 	agentOtherConfig json.RawMessage
 	agentType        string    // "open" or "predefined"
+	// customInstructions holds the agent's agents.system_prompt (migration 000063).
+	// Empty for the tenant default agent. Threaded into SystemPromptConfig
+	// on every BuildSystemPrompt call from loop_history.go.
+	customInstructions string
 	defaultTimezone  string    // system default timezone for bootstrap pre-fill
 	provider         providers.Provider
 	model            string
@@ -117,6 +121,13 @@ type Loop struct {
 	subagentsCfg *config.SubagentsConfig
 	memoryCfg    *config.MemoryConfig
 	sandboxCfg   *sandbox.Config
+
+	// subagentMgr is the in-process SubagentManager so Loop.Run can drain
+	// spawned children before emitting run.completed. Nil-safe: when the
+	// manager isn't wired (older configurations, lite edition) the run still
+	// completes normally and the legacy announce queue handles the async
+	// fan-out fallback.
+	subagentMgr *tools.SubagentManager
 
 	// v3 memory/retrieval flags removed — always true at runtime.
 	// Memory flush runs if callback != nil; auto-inject runs if AutoInjector != nil.
@@ -138,6 +149,10 @@ type Loop struct {
 	ownerIDs       []string
 	skillsLoader   *skills.Loader
 	skillAllowList []string // nil = all, [] = none, ["x","y"] = filter
+	// skillAccess sources per-tenant skills (DB) for the prompt summary. The
+	// loader is filesystem-only and never sees DB-stored / per-tenant skills,
+	// so when this is set the summary is built from ListAccessible instead.
+	skillAccess    store.SkillAccessStore
 	hasMemory      bool
 	contextFiles   []bootstrap.ContextFile
 
@@ -290,6 +305,14 @@ type AgentEvent struct {
 	RunID   string `json:"runId"`
 	RunKind string `json:"runKind,omitempty"` // "delegation", "announce" — omitted for user-initiated runs
 	Payload any    `json:"payload,omitempty"`
+	// Seq is the monotonic per-run sequence number assigned by the router
+	// at emit time (see Router.StampAndBufferEvent). The client stores the
+	// last seq it received and asks for events.since(N) on reconnect via
+	// the runs.subscribe method, so the UI can heal a partial stream
+	// without falling back to a full sessions.preview reload. Zero when
+	// the event was emitted on a code path that bypasses the router
+	// (legacy / tests / channel handlers).
+	Seq     int64 `json:"seq,omitempty"`
 
 	// Delegation context (omitempty — only present when agent runs inside a delegation)
 	DelegationID  string `json:"delegationId,omitempty"`
@@ -330,6 +353,11 @@ type LoopConfig struct {
 	MemoryCfg    *config.MemoryConfig
 	SandboxCfg   *sandbox.Config
 
+	// SubagentMgr is required when the pre-finalize barrier is in use
+	// (BarrierMode on the manager). When nil the loop skips the barrier
+	// entirely and falls back to the legacy announce queue path.
+	SubagentMgr *tools.SubagentManager
+
 	// ModelRegistry resolves provider/model → ModelSpec for per-run context
 	// window lookup. Nil = fall back to static LoopConfig.ContextWindow.
 	ModelRegistry providers.ModelRegistry
@@ -347,6 +375,8 @@ type LoopConfig struct {
 	OwnerIDs       []string
 	SkillsLoader   *skills.Loader
 	SkillAllowList []string // nil = all, [] = none, ["x","y"] = filter
+	// SkillAccessStore sources per-tenant skills (DB) for the prompt summary.
+	SkillAccessStore store.SkillAccessStore
 	HasMemory      bool
 	ContextFiles   []bootstrap.ContextFile
 
@@ -373,6 +403,11 @@ type LoopConfig struct {
 	AgentType        string           // "open" or "predefined"
 	DisplayName string    // human-readable agent display name (for runtime section)
 	IsTeamLead bool      // agent leads a team (from resolver detection)
+	// CustomInstructions is the agent's own configured system prompt
+	// (agents.system_prompt column from migration 000063). Threaded
+	// through to BuildSystemPrompt so it's injected near the top of the
+	// generated prompt. Empty falls through to the default behaviour.
+	CustomInstructions string
 
 	// Per-user profile + file seeding + dynamic context loading
 	EnsureUserProfile EnsureUserProfileFunc // preferred: separate profile + workspace
@@ -508,6 +543,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		externalOrgID:          cfg.ExternalOrgID,
 		agentOtherConfig:       append([]byte(nil), cfg.AgentOtherConfig...), // defensive copy
 		agentType:              cfg.AgentType,
+		customInstructions:     cfg.CustomInstructions,
 		provider:               cfg.Provider,
 		model:                  cfg.Model,
 		modelRegistry:          cfg.ModelRegistry,
@@ -522,6 +558,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		autoInjector:           cfg.AutoInjector,
 		restrictToWs:           cfg.RestrictToWs,
 		subagentsCfg:           cfg.SubagentsCfg,
+		subagentMgr:            cfg.SubagentMgr,
 		memoryCfg:              cfg.MemoryCfg,
 		sandboxCfg:             cfg.SandboxCfg,
 		eventPub:               cfg.Bus,
@@ -536,6 +573,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		ownerIDs:               cfg.OwnerIDs,
 		skillsLoader:           cfg.SkillsLoader,
 		skillAllowList:         cfg.SkillAllowList,
+		skillAccess:            cfg.SkillAccessStore,
 		hasMemory:              cfg.HasMemory,
 		contextFiles:           cfg.ContextFiles,
 		defaultTimezone:        cfg.DefaultTimezone,
@@ -600,7 +638,8 @@ type RunRequest struct {
 	ChatID            string             // source chat ID
 	PeerKind          string             // "direct" or "group" (for session key building and tool context)
 	RunID             string             // unique run identifier
-	UserID            string             // external user ID (TEXT, free-form) for multi-tenant scoping
+	UserID            string             // IDENTITY user ID (TEXT, free-form) for memory / session scope. May be a sender numeric (Telegram chat_id) when no merged contact is set. NOT used for billing.
+	BillingUserID     string             // BILLING owner — channel_instance.created_by, always a real platform UUID. Used in actor headers (X-Actor-User-ID) so downstream attribution (ai_tasks.user_id, org quota) charges the bot owner. Falls back to UserID for in-app callers (extension chat) where there's no separate bot owner.
 	SenderID          string             // original individual sender ID (preserved in group chats for permission checks)
 	SenderName        string             // display name from channel metadata (for bootstrap auto-contact)
 	Role              string             // caller's RBAC role (admin/operator/viewer/owner); bypasses per-user grants for authenticated admins (#915)

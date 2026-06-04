@@ -94,7 +94,8 @@ const agentSelectCols = `id, agent_key, display_name, frontmatter, owner_id, pro
 		 self_evolve, skill_evolve, skill_nudge_interval,
 		 reasoning_config, workspace_sharing, chatgpt_oauth_routing,
 		 shell_deny_groups, kg_dedup_config,
-		 agent_type, is_default, status, budget_monthly_cents, created_at, updated_at, tenant_id`
+		 COALESCE(system_prompt, '') AS system_prompt,
+		 agent_type, is_default, is_locked, status, budget_monthly_cents, created_at, updated_at, tenant_id`
 
 func (s *PGAgentStore) Create(ctx context.Context, agent *store.AgentData) error {
 	if agent.ID == uuid.Nil {
@@ -107,6 +108,21 @@ func (s *PGAgentStore) Create(ctx context.Context, agent *store.AgentData) error
 	if tenantID == uuid.Nil {
 		tenantID = store.MasterTenantID
 	}
+	// Server-side invariant: the canonical tenant default (system-owned
+	// `default`) is always locked. Callers (auth-proxy provisioning) cannot
+	// turn it off because the API allowlist already excludes is_locked, and
+	// they cannot turn it on because the column isn't in the wire schema.
+	// Folding the rule into Create keeps the source-of-truth here, not
+	// scattered across every caller.
+	if agent.AgentKey == "default" && agent.OwnerID == "system" {
+		agent.IsLocked = true
+	}
+	// system_prompt persists the agent's custom instructions (migration 000063).
+	// NULL when caller omits it — falls back to tenant default in BuildSystemPrompt.
+	var sysPrompt sql.NullString
+	if agent.SystemPrompt != "" {
+		sysPrompt = sql.NullString{String: agent.SystemPrompt, Valid: true}
+	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO agents (id, agent_key, display_name, frontmatter, owner_id, provider, model,
 		 context_window, max_tool_iterations, workspace, restrict_to_workspace,
@@ -115,10 +131,10 @@ func (s *PGAgentStore) Create(ctx context.Context, agent *store.AgentData) error
 		 emoji, agent_description, thinking_level, max_tokens,
 		 self_evolve, skill_evolve, skill_nudge_interval,
 		 reasoning_config, workspace_sharing, chatgpt_oauth_routing,
-		 shell_deny_groups, kg_dedup_config,
-		 agent_type, is_default, status, budget_monthly_cents, created_at, updated_at, tenant_id)
+		 shell_deny_groups, kg_dedup_config, system_prompt,
+		 agent_type, is_default, is_locked, status, budget_monthly_cents, created_at, updated_at, tenant_id)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-		         $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37)`,
+		         $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39)`,
 		agent.ID, agent.AgentKey, agent.DisplayName, sql.NullString{String: agent.Frontmatter, Valid: agent.Frontmatter != ""}, agent.OwnerID, agent.Provider, agent.Model,
 		agent.ContextWindow, agent.MaxToolIterations, agent.Workspace, agent.RestrictToWorkspace,
 		jsonOrEmpty(agent.ToolsConfig), jsonOrNull(agent.SandboxConfig), jsonOrNull(agent.SubagentsConfig), jsonOrNull(agent.MemoryConfig),
@@ -126,8 +142,8 @@ func (s *PGAgentStore) Create(ctx context.Context, agent *store.AgentData) error
 		agent.Emoji, agent.AgentDescription, agent.ThinkingLevel, agent.MaxTokens,
 		agent.SelfEvolve, agent.SkillEvolve, agent.SkillNudgeInterval,
 		jsonOrEmpty(agent.ReasoningConfig), jsonOrEmpty(agent.WorkspaceSharing), jsonOrEmpty(agent.ChatGPTOAuthRouting),
-		jsonOrEmpty(agent.ShellDenyGroups), jsonOrEmpty(agent.KGDedupConfig),
-		agent.AgentType, agent.IsDefault, agent.Status, agent.BudgetMonthlyCents, now, now, tenantID,
+		jsonOrEmpty(agent.ShellDenyGroups), jsonOrEmpty(agent.KGDedupConfig), sysPrompt,
+		agent.AgentType, agent.IsDefault, agent.IsLocked, agent.Status, agent.BudgetMonthlyCents, now, now, tenantID,
 	)
 	if err != nil {
 		return err
@@ -376,22 +392,22 @@ func (s *PGAgentStore) ListShares(ctx context.Context, agentID uuid.UUID) ([]sto
 }
 
 func (s *PGAgentStore) CanAccess(ctx context.Context, agentID uuid.UUID, userID string) (bool, string, error) {
-	// Check ownership + default flag
-	var ownerID string
+	// Check ownership + default flag + agent_type (for predefined-system tenant-wide branch)
+	var ownerID, agentType string
 	var isDefault bool
 	var err error
 	if store.IsCrossTenant(ctx) {
 		err = s.db.QueryRowContext(ctx,
-			"SELECT owner_id, is_default FROM agents WHERE id = $1 AND deleted_at IS NULL", agentID,
-		).Scan(&ownerID, &isDefault)
+			"SELECT owner_id, is_default, agent_type FROM agents WHERE id = $1 AND deleted_at IS NULL", agentID,
+		).Scan(&ownerID, &isDefault, &agentType)
 	} else {
 		tid := store.TenantIDFromContext(ctx)
 		if tid == uuid.Nil {
 			return false, "", fmt.Errorf("agent not found")
 		}
 		err = s.db.QueryRowContext(ctx,
-			"SELECT owner_id, is_default FROM agents WHERE id = $1 AND deleted_at IS NULL AND tenant_id = $2", agentID, tid,
-		).Scan(&ownerID, &isDefault)
+			"SELECT owner_id, is_default, agent_type FROM agents WHERE id = $1 AND deleted_at IS NULL AND tenant_id = $2", agentID, tid,
+		).Scan(&ownerID, &isDefault, &agentType)
 	}
 	if err != nil {
 		return false, "", fmt.Errorf("agent not found")
@@ -404,6 +420,12 @@ func (s *PGAgentStore) CanAccess(ctx context.Context, agentID uuid.UUID, userID 
 	}
 	if ownerID == userID {
 		return true, "owner", nil
+	}
+	// System-owned predefined templates (seeded by auth-proxy) are tenant-wide
+	// siblings of the default agent — every member of the tenant can chat with
+	// them. Mirrors the predefined-system branch in ListAccessible above.
+	if agentType == "predefined" && ownerID == "system" {
+		return true, "user", nil
 	}
 	// Check shares
 	var role string
@@ -434,6 +456,7 @@ func (s *PGAgentStore) ListAccessible(ctx context.Context, userID string) ([]sto
 			 WHERE deleted_at IS NULL AND (
 			     owner_id = $1
 			     OR is_default = true
+			     OR (agent_type = 'predefined' AND owner_id = 'system')
 			     OR id IN (SELECT agent_id FROM agent_shares WHERE user_id = $1)
 			     OR (
 			         agent_type = 'predefined'
@@ -464,6 +487,7 @@ func (s *PGAgentStore) ListAccessible(ctx context.Context, userID string) ([]sto
 		 WHERE deleted_at IS NULL AND tenant_id = $2 AND (
 		     owner_id = $1
 		     OR is_default = true
+		     OR (agent_type = 'predefined' AND owner_id = 'system')
 		     OR id IN (SELECT agent_id FROM agent_shares WHERE user_id = $1 AND tenant_id = $2)
 		     OR (
 		         agent_type = 'predefined'
@@ -497,13 +521,15 @@ func scanAgentRow(row agentRowScanner) (*store.AgentData, error) {
 	// pgx: scan nullable JSONB into *[]byte (NOT *json.RawMessage — pgx can't scan NULL into defined types)
 	var toolsCfg, sandboxCfg, subagentsCfg, memoryCfg, compactionCfg, pruningCfg, otherCfg *[]byte
 	var reasoningCfg, wsCfg, oauthCfg, shellCfg, kgCfg *[]byte
+	// system_prompt is scanned as plain string (COALESCE in SELECT) so we
+	// don't need sql.NullString gymnastics on the scan side.
 	err := row.Scan(&d.ID, &d.AgentKey, &d.DisplayName, &frontmatter, &d.OwnerID, &d.Provider, &d.Model,
 		&d.ContextWindow, &d.MaxToolIterations, &d.Workspace, &d.RestrictToWorkspace,
 		&toolsCfg, &sandboxCfg, &subagentsCfg, &memoryCfg, &compactionCfg, &pruningCfg, &otherCfg,
 		&d.Emoji, &d.AgentDescription, &d.ThinkingLevel, &d.MaxTokens,
 		&d.SelfEvolve, &d.SkillEvolve, &d.SkillNudgeInterval,
-		&reasoningCfg, &wsCfg, &oauthCfg, &shellCfg, &kgCfg,
-		&d.AgentType, &d.IsDefault, &d.Status, &d.BudgetMonthlyCents, &d.CreatedAt, &d.UpdatedAt, &d.TenantID)
+		&reasoningCfg, &wsCfg, &oauthCfg, &shellCfg, &kgCfg, &d.SystemPrompt,
+		&d.AgentType, &d.IsDefault, &d.IsLocked, &d.Status, &d.BudgetMonthlyCents, &d.CreatedAt, &d.UpdatedAt, &d.TenantID)
 	if err != nil {
 		return nil, err
 	}

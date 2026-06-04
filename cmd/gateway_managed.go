@@ -60,6 +60,7 @@ func wireExtras(
 	sandboxMgr sandbox.Manager,
 	redisClient any, // nil when built without -tags redis or when Redis is unconfigured
 	domainBus eventbus.DomainEventBus,
+	subagentMgr *tools.SubagentManager,
 ) (*tools.ContextFileInterceptor, *mcpbridge.Pool, *media.Store, tools.PostTurnProcessor) {
 	// 1. Build cache instances (in-memory or Redis depending on build tags)
 	agentCtxCache, userCtxCache := makeCaches(redisClient)
@@ -264,6 +265,7 @@ func wireExtras(
 		EvolutionMetricsStore:  stores.EvolutionMetrics,
 		DomainBus:              domainBus,
 		HookDispatcher:         hookDispatcher,
+		SubagentMgr:            subagentMgr,
 		OnTextUploaded: func(ctx context.Context, path, content string) {
 			if vaultIntc != nil {
 				vaultIntc.AfterWrite(ctx, path, content)
@@ -332,7 +334,31 @@ func wireExtras(
 					}
 					m["media"] = signed
 				}
+				// Sign live tool.result `media` (PR #205 wire shape):
+				// []map[string]string with raw `path` keys from
+				// buildLiveMediaPayload. Same /v1/files/...?ft=... shape as
+				// the persisted MediaRef path so the SPA's existing
+				// rendering code (mediaRefToAttachment / liveMediaToAttachment)
+				// works unchanged. Skip items already containing ?ft=  for
+				// safety against double-sign on retried events.
+				if liveMedia, ok := m["media"].([]map[string]string); ok {
+					for _, item := range liveMedia {
+						p := item["path"]
+						if p == "" || strings.Contains(p, "?ft=") {
+							continue
+						}
+						item["path"] = httpapi.SignMediaPath(p, secret)
+					}
+				}
 			}
+			// Stamp the event with the per-run monotonic Seq and push to
+			// the run's ring buffer BEFORE broadcast. The client tracks
+			// the last Seq it received and calls runs.subscribe(runID,
+			// sinceSeq) on reconnect to replay anything it missed. This
+			// is the single source of truth for "what did the server
+			// emit for this run" — no separate sessions.preview /
+			// activeSessions reconciliation needed.
+			event = agentRouter.StampAndBufferEvent(event)
 			msgBus.Broadcast(bus.Event{
 				Name:     protocol.EventAgent,
 				Payload:  event,

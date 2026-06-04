@@ -198,9 +198,11 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 		BootstrapCleanup: cb.bootstrapCleanup,
 		MaybeSummarize:   cb.maybeSummarize,
 		HandleEmptyReply: func(ctx context.Context, history []providers.Message) string {
-			// One tools-disabled retry that forces the model to summarise
-			// the data already in history into a user-facing reply.
-			if rescued := l.rescueEmptyReply(ctx, history); rescued != "" {
+			// One tools-disabled retry that streams text back over the SAME
+			// WS subscription as the primary turn, so the assistant bubble
+			// fills live instead of staying empty until the user reloads.
+			emitChunk := l.makeRescueChunkEmitter(req)
+			if rescued := l.rescueEmptyReply(ctx, history, emitChunk); rescued != "" {
 				return SanitizeAssistantContent(rescued)
 			}
 			// Rescue also empty — return a localised sentence so the user
@@ -208,6 +210,51 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 			locale := store.LocaleFromContext(ctx)
 			return i18n.T(locale, i18n.MsgEmptyReplyFallback)
 		},
+
+		// In-pipeline barrier: keeps the entire user turn inside a single
+		// pipeline run, so FinalizeStage only flushes ONCE and the parent
+		// emits exactly one assistant row to history. Without this the
+		// older two-call barrier (run pipeline → drain → run pipeline
+		// again) produces two assistant rows, and a mid-stream page
+		// reload sees an "I'll spawn…" bubble PLUS a separate synthesis
+		// bubble (split UI).
+		WaitForChildren: l.makePipelineBarrier(req),
+	}
+}
+
+// makePipelineBarrier returns the pipeline.WaitForChildren callback. It
+// is nil-safe and returns false when the loop has no SubagentManager
+// attached or no children to drain — letting the pipeline exit normally.
+func (l *Loop) makePipelineBarrier(req *RunRequest) func(ctx context.Context, state *pipeline.RunState) bool {
+	consumedIDs := map[string]struct{}{}
+	passes := 0
+	return func(ctx context.Context, state *pipeline.RunState) bool {
+		if passes >= barrierMaxPasses {
+			return false
+		}
+		systemMsg, newConsumed, drained := l.drainSpawnedChildren(ctx, req.RunID, consumedIDs)
+		if !drained {
+			return false
+		}
+		for _, id := range newConsumed {
+			consumedIDs[id] = struct{}{}
+		}
+		passes++
+		logBarrierPass(req.RunID, passes, len(newConsumed), len(consumedIDs))
+		// Append the synthetic [System Message] to the EPHEMERAL buffer:
+		// visible to the LLM via state.Messages.All() on the synthesis
+		// iteration, but excluded from FlushPending → never reaches the
+		// session store. Persisting it would leave a stray `role:user`
+		// row in DB between the assistant's spawn turn and its synthesis
+		// turn, which breaks UI grouping on page reload (history loader
+		// renders user-role rows as separate user bubbles, so the model's
+		// reply gets split into two assistant bubbles around the fake
+		// user turn).
+		state.Messages.AppendEphemeral(providers.Message{
+			Role:    "user",
+			Content: systemMsg,
+		})
+		return true
 	}
 }
 

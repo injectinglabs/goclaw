@@ -264,7 +264,15 @@ func runGateway() {
 		}
 
 		toolsReg.Register(tools.NewSpawnTool(subagentMgr, "default", 0))
-		slog.Info("subagent system enabled", "tools", []string{"spawn"})
+		// Barrier mode: announce-queue is suppressed inside runTask; the
+		// agent Loop.Run drains finished children via WaitForChildren before
+		// emitting run.completed and synthesizes their results in the SAME
+		// run (same RunID, single WS stream, working Stop button). The
+		// announce queue stays wired above as a safety net for legacy team
+		// delegation paths that don't go through Loop.Run barrier — those
+		// publish via direct callback in makeDelegateAnnounceCallback.
+		subagentMgr.SetBarrierMode(true)
+		slog.Info("subagent system enabled", "tools", []string{"spawn"}, "barrier_mode", true)
 	}
 
 	skillsLoader, skillSearchTool, globalSkillsDir, bundledSkillsDir, builtinSkillsDir := setupSkillsSystem(cfg, workspace, dataDir, pgStores, toolsReg, providerRegistry, msgBus)
@@ -302,7 +310,7 @@ func runGateway() {
 	var mcpPool *mcpbridge.Pool
 	var mediaStore *media.Store
 	var postTurn tools.PostTurnProcessor
-	contextFileInterceptor, mcpPool, mediaStore, postTurn = wireExtras(pgStores, agentRouter, providerRegistry, modelReg, msgBus, pgStores.Sessions, toolsReg, toolPE, skillsLoader, hasMemory, traceCollector, workspace, cfg.Gateway.InjectionAction, cfg, sandboxMgr, redisClient, domainBus)
+	contextFileInterceptor, mcpPool, mediaStore, postTurn = wireExtras(pgStores, agentRouter, providerRegistry, modelReg, msgBus, pgStores.Sessions, toolsReg, toolPE, skillsLoader, hasMemory, traceCollector, workspace, cfg.Gateway.InjectionAction, cfg, sandboxMgr, redisClient, domainBus, subagentMgr)
 	if mcpPool != nil {
 		defer mcpPool.Stop()
 	}
@@ -333,7 +341,7 @@ func runGateway() {
 	httpapi.InitGatewayToken(cfg.Gateway.Token)
 	exportTokenStore := httpapi.InitExportTokenStore()
 	defer exportTokenStore.Stop()
-	agentsH, skillsH, tracesH, mcpH, channelInstancesH, providersH, builtinToolsH, pendingMessagesH, teamEventsH, secureCLIH, secureCLIGrantH, mcpUserCredsH := wireHTTP(pgStores, cfg.Agents.Defaults.Workspace, dataDir, bundledSkillsDir, msgBus, toolsReg, providerRegistry, permPE.IsOwner, gatewayAddr, mcpToolLister)
+	agentsH, skillsH, tracesH, mcpH, channelInstancesH, providersH, builtinToolsH, pendingMessagesH, teamEventsH, secureCLIH, secureCLIGrantH, mcpUserCredsH := wireHTTP(pgStores, cfg.Agents.Defaults.Workspace, dataDir, bundledSkillsDir, msgBus, toolsReg, providerRegistry, modelReg, permPE.IsOwner, gatewayAddr, mcpToolLister)
 
 	// Wire dependencies for system prompt preview parity.
 	if agentsH != nil {
@@ -389,7 +397,7 @@ func runGateway() {
 
 	// Register all RPC methods
 	server.SetLogTee(logTee)
-	pairingMethods, heartbeatMethods, chatMethods := registerAllMethods(server, agentRouter, pgStores.Sessions, pgStores.Cron, pgStores.Pairing, cfg, cfgPath, workspace, dataDir, msgBus, execApprovalMgr, pgStores.Agents, pgStores.Skills, pgStores.ConfigSecrets, pgStores.Teams, contextFileInterceptor, logTee, pgStores.Heartbeats, pgStores.ConfigPermissions, pgStores.SystemConfigs, pgStores.Tenants, pgStores.SkillTenantCfgs, audioMgr, pgStores.Reminders)
+	pairingMethods, heartbeatMethods, chatMethods := registerAllMethods(server, agentRouter, pgStores.Sessions, pgStores.Cron, pgStores.Pairing, cfg, cfgPath, workspace, dataDir, msgBus, execApprovalMgr, pgStores.Agents, pgStores.Skills, pgStores.ConfigSecrets, pgStores.Teams, contextFileInterceptor, logTee, pgStores.Heartbeats, pgStores.ConfigPermissions, pgStores.SystemConfigs, pgStores.Tenants, pgStores.SkillTenantCfgs, audioMgr, pgStores.Reminders, pgStores.SubagentTasks)
 	// Wire tool registry so chat.toolResult can route client-tool responses.
 	chatMethods.SetToolRegistry(toolsReg)
 	// Wire media store so chat.send can normalize client-supplied media
@@ -397,6 +405,13 @@ func runGateway() {
 	// cache for sibling-instance uploads). Nil for FS-only deploys.
 	if mediaStore != nil {
 		chatMethods.SetMediaStore(mediaStore)
+	}
+	// Wire subagent manager so chat.activeSessions can enrich each
+	// run snapshot with live in-memory subagent state (text + thinking
+	// + tool history). Without this the SPA's nested mini-chat shows
+	// empty after a page reload until the next live event arrives.
+	if subagentMgr != nil {
+		chatMethods.SetSubagentManager(subagentMgr)
 	}
 
 	// Phase 3: Agent hooks RPC methods (hooks.list/create/update/delete/toggle/test/history).

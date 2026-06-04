@@ -185,6 +185,16 @@ func (h *AgentsHandler) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// First-visit template seeding: if the caller has no personally-owned
+	// agents yet, drop researcher / writer / coder into their account as
+	// editable starters. They used to be tenant-shared system rows — but
+	// users couldn't customise prompts without affecting their team-mates,
+	// so we moved them per-user. The locked tenant default stays system-
+	// owned and visible regardless.
+	if !h.isOwnerUser(userID) {
+		h.maybeSeedStarterTemplates(r.Context(), userID)
+	}
+
 	var agents []store.AgentData
 	var err error
 	if h.isOwnerUser(userID) {
@@ -202,6 +212,62 @@ func (h *AgentsHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
 }
 
+// maybeSeedStarterTemplates creates one personal copy of every entry in
+// starterAgentTemplates for the caller, but only when they have zero personal
+// agents. Idempotent across re-visits — the user-owned count guard makes
+// re-runs cheap (one indexed COUNT query) and safe (no duplicates after a user
+// renames or deletes their starters). The function is best-effort: a failure
+// to seed never blocks the list — the user still sees the tenant default plus
+// whatever shared agents the legacy bootstrap left behind.
+func (h *AgentsHandler) maybeSeedStarterTemplates(ctx context.Context, userID string) {
+	owned, err := h.agents.List(ctx, userID)
+	if err != nil {
+		slog.Warn("agents.starter_seed.list_owner_failed", "user_id", userID, "error", err)
+		return
+	}
+	if len(owned) > 0 {
+		return
+	}
+
+	tenantID := store.TenantIDFromContext(ctx)
+	if tenantID == uuid.Nil {
+		return
+	}
+
+	for _, tmpl := range starterAgentTemplates {
+		newID := uuid.Must(uuid.NewV7())
+		suffix := newID.String()[:8]
+		agent := &store.AgentData{
+			AgentKey:          fmt.Sprintf("%s-%s", tmpl.Key, suffix),
+			DisplayName:       tmpl.DisplayName,
+			Emoji:             tmpl.Emoji,
+			OwnerID:           userID,
+			TenantID:          tenantID,
+			Provider:          "llm-service",
+			Model:             "gemini-3.5-flash",
+			AgentType:         store.AgentTypePredefined,
+			MaxToolIterations: tmpl.MaxIter,
+			Status:            store.AgentStatusActive,
+			Workspace:         fmt.Sprintf("%s/%s-%s", h.defaultWorkspace, tmpl.Key, suffix),
+			SystemPrompt:      tmpl.SystemPrompt,
+			MemoryConfig:      json.RawMessage(`{"enabled":true}`),
+			CompactionConfig:  json.RawMessage(`{}`),
+			OtherConfig:       json.RawMessage(`{"bootstrapMaxChars":24000}`),
+		}
+		agent.ID = newID
+		agent.RestrictToWorkspace = true
+		if err := h.agents.Create(ctx, agent); err != nil {
+			slog.Warn("agents.starter_seed.create_failed",
+				"user_id", userID, "tenant_id", tenantID,
+				"template", tmpl.Key, "error", err)
+			continue
+		}
+		slog.Info("agents.starter_seed.created",
+			"user_id", userID, "tenant_id", tenantID,
+			"agent_key", agent.AgentKey, "template", tmpl.Key)
+	}
+}
+
 func (h *AgentsHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	userID := store.UserIDFromContext(r.Context())
 	locale := store.LocaleFromContext(r.Context())
@@ -215,15 +281,69 @@ func (h *AgentsHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// agent_key is the routing slug (session keys, channel allow_from,
+	// agent_links, delegate(name=...)) — it must be unique per tenant. We
+	// treat it as an *implementation detail*, never something the user
+	// types or sees:
+	//
+	//   - System bootstrap (auth-proxy `seedAgentTemplates`) sends stable
+	//     human keys like "default" / "researcher" / "writer" / "coder"
+	//     that downstream code references by string. We accept those
+	//     verbatim and let the DB UNIQUE catch a re-bootstrap attempt
+	//     (idempotency is the caller's responsibility).
+	//
+	//   - User-created agents send the *display_name* and either omit
+	//     agent_key or send a slugified version of the name. We always
+	//     suffix it with a short hex derived from the row's own UUID,
+	//     so collisions are mathematically impossible (16^8 ≈ 4B per
+	//     base slug) and the user is free to create as many "Test"
+	//     agents as they want. The full agent_key is never surfaced in
+	//     the UI — it's only an internal routing handle.
+	//
+	// `isValidSlug` still gates the *base* portion so we never emit
+	// something with `/`, whitespace, or other URL-unfriendly chars
+	// into channel allow_from / session keys.
+	if req.AgentKey == "" {
+		if req.DisplayName == "" {
+			writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidRequest, "display_name or agent_key required"))
+			return
+		}
+		req.AgentKey = slugify(req.DisplayName)
+		if req.AgentKey == "" {
+			req.AgentKey = "agent"
+		}
+	}
 	if !isValidSlug(req.AgentKey) {
 		writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidSlug, "agent_key"))
 		return
 	}
 
-	// Check for duplicate agent_key before creating
-	if existing, _ := h.agents.GetByKey(r.Context(), req.AgentKey); existing != nil {
-		writeError(w, http.StatusConflict, protocol.ErrAlreadyExists, i18n.T(locale, i18n.MsgAlreadyExists, "agent", req.AgentKey))
-		return
+	// Non-system, non-reserved keys get the UUID suffix. Reserved keys
+	// ("default" et al.) bypass — they're system-owned and only one
+	// instance can exist per tenant. Anyone else trying to create
+	// "default" falls through to the suffix path, so a user creating
+	// "Default" gets "default-019e8e88" rather than colliding with the
+	// system agent.
+	isSystemReserved := userID == "system" && (req.AgentKey == "default" ||
+		req.AgentKey == "researcher" || req.AgentKey == "writer" || req.AgentKey == "coder")
+	if isSystemReserved {
+		// Idempotent re-bootstrap path. auth-proxy.seedAgentTemplates POSTs
+		// these keys on every login as a back-fill. If the row already
+		// exists, return 409 — the seeder treats 409 as success. Without
+		// this short-circuit we'd hit the DB UNIQUE constraint inside
+		// agents.Create() and return 500, which is functionally fine but
+		// pollutes logs.
+		if existing, _ := h.agents.GetByKey(r.Context(), req.AgentKey); existing != nil {
+			writeError(w, http.StatusConflict, protocol.ErrAlreadyExists, i18n.T(locale, i18n.MsgAlreadyExists, "agent", req.AgentKey))
+			return
+		}
+	} else {
+		newID := uuid.Must(uuid.NewV7())
+		req.ID = newID
+		// 8 hex chars from the UUID time-low portion. Stable for the
+		// row's lifetime, unique across the tenant by birthday math.
+		suffix := newID.String()[:8]
+		req.AgentKey = fmt.Sprintf("%s-%s", req.AgentKey, suffix)
 	}
 
 	req.OwnerID = userID
@@ -294,6 +414,45 @@ func (h *AgentsHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("failed to seed context files for new agent", "agent", req.AgentKey, "error", err)
 	}
 
+	// Inherit MCP grants from the tenant's default agent so the freshly-
+	// created agent can see Gmail / Calendar / Slack / Drive / Docs / etc.
+	// out of the box — matching the user's mental model "I connected Gmail
+	// to my account, all my agents should see it."
+	//
+	// Skipped when:
+	//   - the new agent IS the default agent (no source to copy from);
+	//   - the tenant has no default yet (first-time provisioning is still
+	//     in flight — auth-proxy's provisionStandardMCPServers will grant
+	//     the default a few seconds later, and operators can re-run the
+	//     copy via `POST /v1/agents/:id/mcp/grants/copy-from/default` if
+	//     a race left the new agent grant-less).
+	//   - the default has zero grants — the INSERT...SELECT just inserts
+	//     nothing, which is fine.
+	//
+	// Idempotent: ON CONFLICT (server_id, agent_id) DO NOTHING keeps re-
+	// running this safe.
+	if req.AgentKey != "default" && req.TenantID != uuid.Nil {
+		if _, copyErr := h.db.ExecContext(r.Context(),
+			`INSERT INTO mcp_agent_grants
+				(id, server_id, agent_id, enabled, tool_allow, tool_deny,
+				 config_overrides, granted_by, created_at, tenant_id)
+			 SELECT
+				gen_random_uuid(), g.server_id, $1, g.enabled, g.tool_allow,
+				g.tool_deny, g.config_overrides, $2, NOW(), g.tenant_id
+			 FROM mcp_agent_grants g
+			 JOIN agents a ON a.id = g.agent_id
+			 WHERE a.agent_key = 'default' AND a.tenant_id = $3
+			 ON CONFLICT (server_id, agent_id) DO NOTHING`,
+			req.ID, userID, req.TenantID,
+		); copyErr != nil {
+			// Soft-fail: the agent is created and usable; missing grants
+			// can be re-applied via the dashboard or by re-running this
+			// query. Log so operators notice if this becomes a pattern.
+			slog.Warn("agents.create: copy MCP grants from default failed",
+				"agent_key", req.AgentKey, "agent_id", req.ID, "error", copyErr)
+		}
+	}
+
 	// Start LLM summoning in background if applicable
 	if req.Status == store.AgentStatusSummoning {
 		go h.summoner.SummonAgent(req.ID, req.TenantID, req.Provider, req.Model, description)
@@ -358,6 +517,16 @@ func (h *AgentsHandler) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	ag, err := h.agents.GetByID(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, protocol.ErrNotFound, i18n.T(locale, i18n.MsgNotFound, "agent", id.String()))
+		return
+	}
+
+	// Locked system agents (canonical tenant default) are immutable end-to-end.
+	// The flag is set only by the bootstrap path, never by API mutations, and
+	// it survives RegisterAlias-style overwrites because it's a real column.
+	// Reject here BEFORE allowlist filtering so the response is a clean 409
+	// rather than a silent no-op on an empty diff.
+	if ag.IsLocked {
+		writeError(w, http.StatusConflict, protocol.ErrFailedPrecondition, "this agent is locked and cannot be edited")
 		return
 	}
 
@@ -517,6 +686,14 @@ func (h *AgentsHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	if userID != "" && ag.OwnerID != userID && !h.isOwnerUser(userID) {
 		writeError(w, http.StatusForbidden, protocol.ErrUnauthorized, i18n.T(locale, i18n.MsgOwnerOnly, "delete agent"))
+		return
+	}
+
+	// Locked agents (tenant's canonical default) can't be deleted, even by
+	// the tenant owner — chats, channels, and crons fall back to this agent
+	// when no other is specified, so losing it would orphan running flows.
+	if ag.IsLocked {
+		writeError(w, http.StatusConflict, protocol.ErrFailedPrecondition, "this agent is locked and cannot be deleted")
 		return
 	}
 

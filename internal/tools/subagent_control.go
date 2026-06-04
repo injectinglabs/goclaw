@@ -43,6 +43,63 @@ func (sm *SubagentManager) ListTasks(parentID string) []*SubagentTask {
 	return result
 }
 
+// SubagentSnapshotView is a value-copy of an in-memory SubagentTask,
+// safe to read after the SubagentManager mutex is released. Used by
+// the chat.activeSessions handler to enrich the WS snapshot with live
+// subagent state (text + thinking + tool history) — so the SPA can
+// rehydrate the nested mini-chat on page reload without waiting for
+// new live events. Persistent state (after the task completes) is
+// served by sessions.preview's collectSubagentsForHistory; this view
+// covers the gap while the subagent is still streaming.
+type SubagentSnapshotView struct {
+	ID                string
+	ParentToolCallID  string
+	Label             string
+	Task              string
+	Model             string
+	Status            string
+	Result            string
+	Thinking          string
+	ToolHistory       []SubagentToolRecord
+	TotalInputTokens  int64
+	TotalOutputTokens int64
+}
+
+// SnapshotsByParentToolCallID returns a value-copy snapshot of every
+// in-memory task that has a parent tool_call.id, keyed by that id.
+// Cheap: O(N) over the in-memory task map under a read lock; N is
+// bounded by the per-process active-tasks budget (default 4 × per-run
+// children, archived after ArchiveAfterMinutes). Tasks without a
+// ParentToolCallID (sync-run paths without a UI subscriber) are
+// skipped — there's no chip to attach them to on the client.
+func (sm *SubagentManager) SnapshotsByParentToolCallID() map[string]SubagentSnapshotView {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	out := make(map[string]SubagentSnapshotView, len(sm.tasks))
+	for _, t := range sm.tasks {
+		if t.ParentToolCallID == "" {
+			continue
+		}
+		view := SubagentSnapshotView{
+			ID:                t.ID,
+			ParentToolCallID:  t.ParentToolCallID,
+			Label:             t.Label,
+			Task:              t.Task,
+			Model:             t.Model,
+			Status:            t.Status,
+			Result:            t.Result,
+			Thinking:          t.Thinking,
+			TotalInputTokens:  t.TotalInputTokens,
+			TotalOutputTokens: t.TotalOutputTokens,
+		}
+		if len(t.ToolHistory) > 0 {
+			view.ToolHistory = append(view.ToolHistory[:0:0], t.ToolHistory...)
+		}
+		out[t.ParentToolCallID] = view
+	}
+	return out
+}
+
 // CancelTask cancels a running task by ID.
 // Special IDs: "all" cancels all running tasks for any parent,
 // "last" cancels the most recently created running task.
@@ -176,6 +233,66 @@ func (sm *SubagentManager) WaitForChildren(ctx context.Context, parentID string,
 			return sm.ListTasks(parentID), fmt.Errorf("timeout after %ds waiting for children", timeoutSec)
 		case <-ticker.C:
 			tasks := sm.ListTasks(parentID)
+			allDone := true
+			for _, t := range tasks {
+				if t.Status == TaskStatusRunning {
+					allDone = false
+					break
+				}
+			}
+			if allDone {
+				return tasks, nil
+			}
+		}
+	}
+}
+
+// ListTasksByRunID returns every task spawned under the given agent run.
+// Mirrors ListTasks(parentID) but matches the structured-concurrency
+// scope: one Loop.Run owns its children, so parallel runs on the same
+// agent (multi-chat per user) don't interfere with each other's
+// barriers. Empty runID returns no tasks — callers should fall back to
+// ListTasks(parentID) when the run id isn't known (announce / cron /
+// HTTP callers that don't propagate ctxToolRunID).
+func (sm *SubagentManager) ListTasksByRunID(runID string) []*SubagentTask {
+	if runID == "" {
+		return nil
+	}
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	var result []*SubagentTask
+	for _, t := range sm.tasks {
+		if t.ParentRunID == runID {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+// WaitForChildrenByRunID is the run-scoped variant of WaitForChildren.
+// Used by the agent loop's pre-finalize barrier so a parent run waits
+// for ONLY the subagents it itself spawned, not every task under the
+// same parent agent. Without this scope two parallel chats on the
+// same agent share a global task list and each chat's barrier
+// blocks on the other chat's children. Same poll cadence + timeout
+// semantics as the legacy WaitForChildren — only the task filter
+// differs.
+func (sm *SubagentManager) WaitForChildrenByRunID(ctx context.Context, runID string, timeoutSec int) ([]*SubagentTask, error) {
+	if timeoutSec <= 0 {
+		timeoutSec = 300
+	}
+	deadline := time.After(time.Duration(timeoutSec) * time.Second)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return sm.ListTasksByRunID(runID), ctx.Err()
+		case <-deadline:
+			return sm.ListTasksByRunID(runID), fmt.Errorf("timeout after %ds waiting for children", timeoutSec)
+		case <-ticker.C:
+			tasks := sm.ListTasksByRunID(runID)
 			allDone := true
 			for _, t := range tasks {
 				if t.Status == TaskStatusRunning {

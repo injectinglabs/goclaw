@@ -71,7 +71,11 @@ func (l *Loop) finalizeRun(
 	// tools) is still on the backlog — that needs the pipeline to
 	// re-execute a stage, which this file can't do.
 	if rs.finalContent == "" {
-		if rescued := l.rescueEmptyReply(ctx, history); rescued != "" {
+		// Stream the rescue retry's tokens back over the same WS subscription
+		// the parent run is using, so the UI bubble fills live instead of
+		// staying empty until reload pulls the saved finalContent from DB.
+		emitChunk := l.makeRescueChunkEmitter(req)
+		if rescued := l.rescueEmptyReply(ctx, history, emitChunk); rescued != "" {
 			rs.finalContent = SanitizeAssistantContent(rescued)
 		}
 	}
@@ -260,19 +264,29 @@ func (l *Loop) finalizeRun(
 	}
 }
 
-// rescueEmptyReply fires one provider.Chat with tools disabled and a
+// rescueEmptyReply fires one provider call with tools disabled and a
 // "finalise using the history above" nudge, to pull text out of a model
 // that ended its previous turn silent after a tool-call round.
 //
-// Scope kept deliberately narrow: single call, tools=nil, non-streaming.
-// If the model tries to call a tool here it'll be rejected at the provider
-// edge — that's fine, we want text only. If it still returns empty, the
-// caller falls through to the localised fallback sentence.
+// Streams the response via ChatStream when emitChunk is non-nil so the
+// website's assistant bubble fills live, exactly like the primary turn.
+// Without streaming the user used to see nothing during rescue (chunks
+// only arrive from streaming providers) and had to reload the page to
+// see the saved final text — a clearly broken UX. Falls back to a plain
+// Chat call when no emitter is wired (RunSync paths, tests).
+//
+// Scope kept narrow: single call, tools=nil. If the model tries to call
+// a tool it's rejected at the provider edge. If it still returns empty,
+// the caller falls through to the localised fallback sentence.
 //
 // Future work: a full retry-with-tools needs to re-enter the pipeline
 // stages (BuildFilteredTools → CallLLM → HandleToolCalls) and is blocked
 // on refactoring FinalizeStage to expose the provider/state plumbing.
-func (l *Loop) rescueEmptyReply(ctx context.Context, history []providers.Message) string {
+func (l *Loop) rescueEmptyReply(
+	ctx context.Context,
+	history []providers.Message,
+	emitChunk func(content string),
+) string {
 	if l.provider == nil || l.model == "" || len(history) == 0 {
 		return ""
 	}
@@ -289,14 +303,26 @@ func (l *Loop) rescueEmptyReply(ctx context.Context, history []providers.Message
 	msgs = append(msgs, history...)
 	msgs = append(msgs, nudge)
 
-	resp, err := l.provider.Chat(ctx, providers.ChatRequest{
+	req := providers.ChatRequest{
 		Messages: msgs,
 		Tools:    nil, // force text
 		Model:    l.model,
 		Options: map[string]any{
 			providers.OptStripThinking: true,
 		},
-	})
+	}
+
+	var resp *providers.ChatResponse
+	var err error
+	if emitChunk != nil {
+		resp, err = l.provider.ChatStream(ctx, req, func(chunk providers.StreamChunk) {
+			if chunk.Content != "" {
+				emitChunk(chunk.Content)
+			}
+		})
+	} else {
+		resp, err = l.provider.Chat(ctx, req)
+	}
 	if err != nil {
 		slog.Warn("agent: rescue retry failed", "error", err)
 		return ""
@@ -305,4 +331,30 @@ func (l *Loop) rescueEmptyReply(ctx context.Context, history []providers.Message
 		return ""
 	}
 	return strings.TrimSpace(resp.Content)
+}
+
+// makeRescueChunkEmitter builds a per-token chunk emitter targeting the
+// current run's WS subscription, so rescueEmptyReply's streamed content
+// reaches the same `chunk` event handler the primary turn used. Returns
+// nil if the run can't be addressed (no tenant, no emit machinery).
+//
+// We deliberately reuse `protocol.ChatEventChunk` rather than introducing
+// a new "rescue.chunk" type — the frontend doesn't need to distinguish
+// rescue from primary; both just append to the bubble.
+func (l *Loop) makeRescueChunkEmitter(req *RunRequest) func(string) {
+	if l == nil || req == nil {
+		return nil
+	}
+	emitRun := makeToolEmitRun(l, req)
+	return func(content string) {
+		if content == "" {
+			return
+		}
+		emitRun(AgentEvent{
+			Type:    "chunk", // protocol.ChatEventChunk
+			AgentID: l.id,
+			RunID:   req.RunID,
+			Payload: map[string]string{"content": content},
+		})
+	}
 }

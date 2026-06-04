@@ -178,6 +178,7 @@ type BaseChannel struct {
 	allowList        []string
 	agentID          string                  // for DB instances: routes to specific agent (empty = use resolveAgentRoute)
 	tenantID         uuid.UUID               // for DB instances: tenant scope (zero = master tenant fallback)
+	createdBy        string                  // for DB instances: channel_instances.created_by — the user who connected this channel. Used for BILLING attribution decoupled from IDENTITY (merged contact). See bus.InboundMessage.CreatedBy and gateway_consumer_normal.go.
 	contactCollector *store.ContactCollector // optional: auto-collect contacts from channel messages
 
 	// Shared policy + pairing fields (set via setters after construction).
@@ -227,6 +228,15 @@ func (c *BaseChannel) TenantID() uuid.UUID { return c.tenantID }
 
 // SetTenantID sets the tenant scope (used by InstanceLoader for DB instances).
 func (c *BaseChannel) SetTenantID(id uuid.UUID) { c.tenantID = id }
+
+// CreatedBy returns the user_id of whoever created this channel instance.
+// Used downstream as the BILLING owner for incoming messages, decoupled
+// from the linked merged contact (which controls memory/identity). Empty
+// for legacy in-config channels that don't track ownership.
+func (c *BaseChannel) CreatedBy() string { return c.createdBy }
+
+// SetCreatedBy sets the bot owner (used by InstanceLoader from DB row).
+func (c *BaseChannel) SetCreatedBy(userID string) { c.createdBy = userID }
 
 // SetContactCollector sets the contact collector for auto-collecting contacts from messages.
 func (c *BaseChannel) SetContactCollector(cc *store.ContactCollector) { c.contactCollector = cc }

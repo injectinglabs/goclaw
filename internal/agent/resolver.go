@@ -142,6 +142,10 @@ type ResolverDeps struct {
 	// HookDispatcher fires lifecycle hook events (Issue #875). Nil = noop.
 	HookDispatcher hooks.Dispatcher
 
+	// SubagentMgr is forwarded to every Loop so Loop.Run can drain spawned
+	// children on the pre-finalize barrier. Nil = legacy announce queue path.
+	SubagentMgr *tools.SubagentManager
+
 	// Vault hook: called when a text file is uploaded by user (nil = no vault registration)
 	OnTextUploaded func(ctx context.Context, path, content string)
 }
@@ -488,6 +492,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			AgentOtherConfig:       ag.OtherConfig,
 			AgentType:              ag.AgentType,
 			IsTeamLead:             isTeamLead,
+			CustomInstructions:     ag.SystemPrompt,
 			AutoInjector:          deps.AutoInjector,
 			Provider:               provider,
 			Model:                  ag.Model,
@@ -499,6 +504,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			DataDir:                dataDir,
 			RestrictToWs:           &restrictVal,
 			SubagentsCfg:           ag.ParseSubagentsConfig(),
+			SubagentMgr:            deps.SubagentMgr,
 			MemoryCfg:              ag.ParseMemoryConfig(),
 			SandboxCfg:             sandboxCfgOverride,
 			Bus:                    deps.Bus,
@@ -510,6 +516,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			AgentToolPolicy:        agentToolPolicyForTeam(agentToolPolicyWithWorkspace(agentToolPolicyWithMCP(ag.ParseToolsConfig(), hasMCPTools), hasTeam), isTeamLead),
 			SkillsLoader:           deps.Skills,
 			SkillAllowList:         skillAllowList,
+			SkillAccessStore:       deps.SkillAccessStore,
 			HasMemory:              hasMemory,
 			ContextFiles:           contextFiles,
 			EnsureUserProfile:      deps.EnsureUserProfile,

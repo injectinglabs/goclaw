@@ -49,8 +49,35 @@ func (l *Loop) makeExecuteToolCall(req *RunRequest, bridgeRS *runState) func(ctx
 			// Client tool: dispatch to browser extension, block on result channel.
 			result = l.dispatchClientTool(ctx, req, emitRun, tc)
 		} else {
-			result = l.tools.ExecuteWithContext(ctx, registryName, tc.Arguments,
-				req.Channel, req.ChatID, req.PeerKind, req.SessionKey, nil)
+			// asyncCB: when an async tool (spawn) eventually completes, fire a
+			// second `tool.result` event with the same toolCall.id so the
+			// website's expand-chip swaps the immediate accepted-response for
+			// the real deliverable + tool history. Upstream wires this to nil
+			// — there's no canonical channel between SubagentManager.runTask
+			// and the parent's run-event stream, so the subagent's announce
+			// only re-enters as an inbound system message. Result: the chip
+			// never updates and the user sees only "accepted, started..."
+			// forever. Fork-local fix: closure over emitRun + tc.ID so the
+			// re-emit lands on the same UI element.
+			asyncCB := l.makeAsyncToolCallback(req, emitRun, tc)
+			// Live subagent progress: stamp the spawn tool_call.id +
+			// event emitter onto context so the SubagentManager can
+			// emit tool.call / tool.result events on this same run's
+			// WS subscription, tagged with parent_tool_call_id so the
+			// website routes them to the right spawn chip. See
+			// internal/tools/context_keys.go for the keys and
+			// subagent_exec.go's tool loop for the emit sites.
+			execCtx := tools.WithParentToolCallID(ctx, tc.ID)
+			execCtx = tools.WithToolEventEmitter(execCtx, l.makeToolEventEmitterForRun(req))
+			// Stamp the agent run id so spawn-class tools can record it on
+			// the spawned SubagentTask. The barrier (loop_barrier.go) then
+			// waits on ONLY this run's children, not every task under the
+			// agent — required for parallel chats on the same agent
+			// (otherwise each chat's barrier blocks on the other chat's
+			// in-flight subagents).
+			execCtx = tools.WithToolRunID(execCtx, req.RunID)
+			result = l.tools.ExecuteWithContext(execCtx, registryName, tc.Arguments,
+				req.Channel, req.ChatID, req.PeerKind, req.SessionKey, asyncCB)
 		}
 		toolDuration := time.Since(toolStart)
 
@@ -113,8 +140,20 @@ func (l *Loop) makeExecuteToolRaw(req *RunRequest) func(ctx context.Context, tc 
 			// Parallel path — still one goroutine per call, so blocking here is fine.
 			result = l.dispatchClientTool(ctx, req, emitRun, tc)
 		} else {
-			result = l.tools.ExecuteWithContext(ctx, registryName, tc.Arguments,
-				req.Channel, req.ChatID, req.PeerKind, req.SessionKey, nil)
+			// See sequential-path comment above for why asyncCB is non-nil here.
+			asyncCB := l.makeAsyncToolCallback(req, emitRun, tc)
+			// Same live-progress ctx stamping as the sequential path.
+			execCtx := tools.WithParentToolCallID(ctx, tc.ID)
+			execCtx = tools.WithToolEventEmitter(execCtx, l.makeToolEventEmitterForRun(req))
+			// Stamp the agent run id so spawn-class tools can record it on
+			// the spawned SubagentTask. The barrier (loop_barrier.go) then
+			// waits on ONLY this run's children, not every task under the
+			// agent — required for parallel chats on the same agent
+			// (otherwise each chat's barrier blocks on the other chat's
+			// in-flight subagents).
+			execCtx = tools.WithToolRunID(execCtx, req.RunID)
+			result = l.tools.ExecuteWithContext(execCtx, registryName, tc.Arguments,
+				req.Channel, req.ChatID, req.PeerKind, req.SessionKey, asyncCB)
 		}
 		dur := time.Since(start)
 
@@ -229,6 +268,78 @@ func (l *Loop) recordToolMetric(ctx context.Context, sessionKey, toolName string
 			slog.Debug("evolution.metric.record_failed", "tool", toolName, "error", err)
 		}
 	}()
+}
+
+// makeToolEventEmitterForRun returns a tools.ToolEventEmitter that
+// publishes events on the parent run's WS subscription. Used by
+// SubagentManager to surface child tool.call/tool.result events
+// in real time under the parent's spawn chip on the UI.
+//
+// The agent package owns AgentEvent + protocol types; tools is a
+// lower layer and can't import them (would cycle). So the emitter
+// signature is plain (string, map[string]any). AgentEvent.Type is just
+// a string (see loop_types.go) — protocol.AgentEventToolCall et al.
+// are untyped string constants — so we pass the eventType straight
+// through with no cast.
+func (l *Loop) makeToolEventEmitterForRun(req *RunRequest) tools.ToolEventEmitter {
+	emitRun := makeToolEmitRun(l, req)
+	return func(eventType string, payload map[string]any) {
+		emitRun(AgentEvent{
+			Type:    eventType,
+			AgentID: l.id,
+			RunID:   req.RunID,
+			Payload: payload,
+		})
+	}
+}
+
+// makeAsyncToolCallback returns an AsyncCallback that re-emits a
+// `tool.result` event for the SAME toolCall.id once an async tool
+// (currently only `spawn`) finishes. The website's WS handler matches
+// `tool.result` events to existing toolCall chips by id, so the
+// expand body swaps the "accepted, started…" placeholder for the
+// real deliverable (which for subagents includes the Markdown tool
+// history table seeded by the announce callback in subagent_exec.go).
+//
+// Upstream goclaw passes nil here — there's no canonical bridge
+// from SubagentManager.runTask back to the parent's tool-event
+// channel, so the chip never updates and the user sees only the
+// immediate accepted response forever. Fork-local fix.
+//
+// Truncation cap is 8000 chars so the table + a few hundred chars of
+// subagent body comfortably fit (the immediate-result path uses 1000
+// chars which is too tight for the full deliverable).
+func (l *Loop) makeAsyncToolCallback(req *RunRequest, emitRun func(AgentEvent), tc providers.ToolCall) tools.AsyncCallback {
+	return func(_ context.Context, result *tools.Result) {
+		if result == nil {
+			return
+		}
+		payload := map[string]any{
+			"name":     tc.Name,
+			"id":       tc.ID,
+			"is_error": result.IsError,
+			"result":   truncateStr(result.ForLLM, 8000),
+		}
+		if result.ForLLM != "" {
+			// Frontend prefers `content` when present (sync path uses the
+			// same key for the unsanitised full result); keep both for
+			// symmetry so the chip's body shows the full deliverable.
+			payload["content"] = result.ForLLM
+		}
+		// Mirror the live-media attach the sync tool-result path does
+		// (loop_tools.go). For spawn this is the canonical "subagent
+		// produced N files" delivery — parent's nested chip updates to
+		// include the actual download buttons instead of just text.
+		if live := buildLiveMediaPayload(result.Media); live != nil {
+			payload["media"] = live
+		}
+		emitRun(AgentEvent{
+			Type:    protocol.AgentEventToolResult,
+			AgentID: l.id,
+			RunID:   req.RunID,
+			Payload: payload,
+		})
+	}
 }
 
 // makeToolEmitRun creates a tool event emitter with request context.

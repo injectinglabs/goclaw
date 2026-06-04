@@ -157,6 +157,17 @@ func processNormalMessage(
 		}
 	}
 
+	// Identity fallback. If the resolver returned nothing (no merged
+	// contact) `userID` is still the raw sender id (Telegram numeric, etc.)
+	// — which cannot be used as the agent's identity (it's not a platform
+	// UUID, memory/credential lookups would key on a foreign id). Fall
+	// back to the bot owner so sessions, USER.md, and BYOC creds work
+	// out-of-the-box for unlinked contacts.
+	if msg.CreatedBy != "" && userID == msg.SenderID {
+		slog.Debug("identity.fallback_to_bot_owner", "sender", msg.SenderID, "bot_owner", msg.CreatedBy)
+		userID = msg.CreatedBy
+	}
+
 	// --- Quota check ---
 	if deps.QuotaChecker != nil {
 		qResult := deps.QuotaChecker.Check(ctx, userID, msg.Channel, agentLoop.ProviderName())
@@ -382,6 +393,11 @@ func processNormalMessage(
 		PeerKind:          peerKind,
 		LocalKey:          msg.Metadata["local_key"],
 		UserID:            userID,
+		// BILLING owner — always the bot creator. Decoupled from UserID
+		// (which carries identity / memory scope). Empty for in-app channels
+		// (extension chat, dashboard) where there is no separate bot owner —
+		// loop_context.go falls back to UserID in that case.
+		BillingUserID:     msg.CreatedBy,
 		SenderID:          effectiveSenderID,
 		Role:              effectiveRole,
 		SenderName:        resolveSenderName(msg),
