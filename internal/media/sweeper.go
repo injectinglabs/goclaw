@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/nextlevelbuilder/goclaw/internal/diskutil"
 )
 
 // SweeperConfig controls the local media-cache cleanup loop.
@@ -135,7 +137,7 @@ func (b *S3Backend) evictByDiskPressure(ctx context.Context, limitPct int) (int,
 	if limitPct <= 0 || limitPct >= 100 {
 		return 0, 0, 0, 0
 	}
-	usageBefore, err := diskUsageFraction(b.cacheDir)
+	usageBefore, err := diskutil.Fraction(b.cacheDir)
 	if err != nil {
 		slog.Warn("media.cache.statfs_failed", "error", err)
 		return 0, 0, 0, 0
@@ -173,13 +175,13 @@ func (b *S3Backend) evictByDiskPressure(ctx context.Context, limitPct int) (int,
 		// Re-check the filesystem every 50 deletions — cheap enough but
 		// not per-file (statfs isn't free).
 		if count%50 == 0 {
-			if u, uerr := diskUsageFraction(b.cacheDir); uerr == nil && u < target {
+			if u, uerr := diskutil.Fraction(b.cacheDir); uerr == nil && u < target {
 				usageAfter := u
 				return count, bytes, usageBefore, usageAfter
 			}
 		}
 	}
-	usageAfter, _ := diskUsageFraction(b.cacheDir)
+	usageAfter, _ := diskutil.Fraction(b.cacheDir)
 	return count, bytes, usageBefore, usageAfter
 }
 
@@ -228,7 +230,9 @@ func (b *S3Backend) removeEmptyDirs() {
 	}
 }
 
-// diskUsageFraction is defined per-OS in sweeper_statfs_{unix,windows}.go.
+// diskUsageFraction now lives in internal/diskutil (Fraction) — shared
+// with skills/storage's sweeper so both touch one statfs path. See
+// internal/diskutil/fraction.go for the package rationale.
 
 // roundFloat rounds f to the given decimal places. Used for log
 // readability — saves operators counting digits in dashboards.
