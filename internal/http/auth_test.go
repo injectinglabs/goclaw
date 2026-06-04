@@ -102,6 +102,14 @@ func (m *mockTenantStore) GetUserRole(_ context.Context, tenantID uuid.UUID, use
 	}
 	return "", nil
 }
+func (m *mockTenantStore) IsOwnerOrAdmin(_ context.Context, tenantID uuid.UUID, userID string) (bool, error) {
+	members := m.roles[tenantID]
+	if len(members) <= 1 {
+		return true, nil
+	}
+	role := members[userID]
+	return role == store.TenantRoleOwner || role == store.TenantRoleAdmin, nil
+}
 func (m *mockTenantStore) ListUsers(context.Context, uuid.UUID) ([]store.TenantUserData, error) {
 	return nil, nil
 }

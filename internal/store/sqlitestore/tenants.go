@@ -192,6 +192,28 @@ func (s *SQLiteTenantStore) GetUserRole(ctx context.Context, tenantID uuid.UUID,
 	return role, err
 }
 
+// IsOwnerOrAdmin reports whether the user is allowed to perform team-wide
+// writes in the given tenant. Personal tenants (single tenant_users row) are
+// treated as implicitly admin for the single member. See PG implementation
+// for the canonical contract.
+func (s *SQLiteTenantStore) IsOwnerOrAdmin(ctx context.Context, tenantID uuid.UUID, userID string) (bool, error) {
+	var memberCount int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM tenant_users WHERE tenant_id = ?`,
+		tenantID,
+	).Scan(&memberCount); err != nil {
+		return false, err
+	}
+	if memberCount <= 1 {
+		return true, nil
+	}
+	role, err := s.GetUserRole(ctx, tenantID, userID)
+	if err != nil {
+		return false, err
+	}
+	return role == store.TenantRoleOwner || role == store.TenantRoleAdmin, nil
+}
+
 func (s *SQLiteTenantStore) ListUsers(ctx context.Context, tenantID uuid.UUID) ([]store.TenantUserData, error) {
 	var rows []tenantUserRow
 	err := pkgSqlxDB.SelectContext(ctx, &rows,

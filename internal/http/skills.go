@@ -59,6 +59,27 @@ func (h *SkillsHandler) skillUploadLock(scopeKey string) *sync.Mutex {
 	return actual.(*sync.Mutex)
 }
 
+// isOwnerOrAdmin reports whether the caller can perform team-wide skill
+// writes (publish/escalate/toggle a public skill, delete someone else's
+// public skill) in the active tenant. System owners and personal tenants
+// bypass the check. When the handler has no tenant store wired (unit tests
+// without DB), the call defaults to allow — the caller still has to clear
+// the upstream auth+role-gate before reaching this helper.
+func (h *SkillsHandler) isOwnerOrAdmin(ctx context.Context, tenantID uuid.UUID, userID string) (bool, error) {
+	if store.IsOwnerRole(ctx) {
+		return true, nil
+	}
+	if h.tenantStore == nil {
+		return true, nil
+	}
+	if tenantID == uuid.Nil {
+		// Treat unscoped contexts as master-tenant: they only reach this code
+		// path via system owner / dev mode (see resolveAuth fallback).
+		return true, nil
+	}
+	return h.tenantStore.IsOwnerOrAdmin(ctx, tenantID, userID)
+}
+
 // emitCacheInvalidate broadcasts a skill-related cache invalidation event.
 // tenantID == uuid.Nil means global invalidation (master admin path).
 // Existing grant-related callers pass tenantID == uuid.Nil since grants are
@@ -216,6 +237,29 @@ func (h *SkillsHandler) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	delete(updates, "is_system")
 	delete(updates, "enabled")
 
+	// Role gate: escalating a skill's visibility to "public" affects the whole
+	// team, so only owners/admins can do it. Lowering to private / internal is
+	// allowed for the skill owner (handled by the ownership check above).
+	if newVis, ok := updates["visibility"].(string); ok && newVis == "public" {
+		userID := store.UserIDFromContext(r.Context())
+		tenantID := store.TenantIDFromContext(r.Context())
+		ok, err := h.isOwnerOrAdmin(r.Context(), tenantID, userID)
+		if err != nil {
+			slog.Warn("skills.update: role lookup failed",
+				"skill_id", idStr, "user_id", userID, "tenant_id", tenantID, "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "role lookup")})
+			return
+		}
+		if !ok {
+			slog.Warn("security.skills.update_visibility_denied",
+				"skill_id", idStr, "user_id", userID, "tenant_id", tenantID)
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": "Only owners and admins can install skills for the team. Use visibility=private to install for yourself.",
+			})
+			return
+		}
+	}
+
 	if err := h.skills.UpdateSkill(r.Context(), id, updates); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -236,13 +280,46 @@ func (h *SkillsHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ownership check (admins bypass)
+	userID := store.UserIDFromContext(r.Context())
+	tenantID := store.TenantIDFromContext(r.Context())
+
+	// Combined ownership + role gate. Three permitted callers:
+	//   1. System-wide owner / API-key admin (bypass everything).
+	//   2. The skill row's own owner (can always delete their own skill).
+	//   3. A tenant owner/admin (can delete public skills owned by others).
+	// Everyone else gets 403.
 	auth := resolveAuth(r)
 	if !permissions.HasMinRole(auth.Role, permissions.RoleAdmin) {
-		userID := store.UserIDFromContext(r.Context())
-		if ownerID, found := h.skills.GetSkillOwnerID(r.Context(), id); found && ownerID != userID {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the skill owner can perform this action"})
-			return
+		ownerID, ownerFound := h.skills.GetSkillOwnerID(r.Context(), id)
+		isOwnerOfSkill := ownerFound && ownerID == userID
+		if !isOwnerOfSkill {
+			// Not the skill owner — only team owners/admins may delete a skill
+			// they don't own, and only when it's visibility=public (private
+			// skills owned by someone else are simply not theirs to touch).
+			sk, found := h.skills.GetSkillByID(r.Context(), id)
+			if !found {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": i18n.T(locale, i18n.MsgNotFound, "skill", idStr)})
+				return
+			}
+			if sk.Visibility != "public" {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the skill owner can perform this action"})
+				return
+			}
+			privileged, err := h.isOwnerOrAdmin(r.Context(), tenantID, userID)
+			if err != nil {
+				slog.Warn("skills.delete: role lookup failed",
+					"skill_id", idStr, "user_id", userID, "tenant_id", tenantID, "error", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "role lookup")})
+				return
+			}
+			if !privileged {
+				slog.Warn("security.skills.delete_role_denied",
+					"skill_id", idStr, "user_id", userID, "tenant_id", tenantID)
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "Only owners and admins can install skills for the team. Use visibility=private to install for yourself.",
+				})
+				return
+			}
 		}
 	}
 
@@ -527,16 +604,53 @@ func (h *SkillsHandler) handleRuntimes(w http.ResponseWriter, _ *http.Request) {
 // handleToggle enables or disables a skill.
 // Body: {"enabled": bool}
 // When enabling: re-checks deps and updates status to "active" or "archived" accordingly.
+//
+// Role gate: toggling a public skill flips it for the whole team, so it
+// requires owner/admin in the active tenant. Toggling a private skill is
+// limited to the skill row owner. System-wide owners bypass both checks.
 func (h *SkillsHandler) handleToggle(w http.ResponseWriter, r *http.Request) {
-	if !h.requireMasterTenant(w, r) {
-		return
-	}
 	locale := store.LocaleFromContext(r.Context())
 	idStr := r.PathValue("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidID, "skill")})
 		return
+	}
+
+	// Resolve the skill so we can branch on visibility.
+	sk, found := h.skills.GetSkillByID(r.Context(), id)
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": i18n.T(locale, i18n.MsgNotFound, "skill", idStr)})
+		return
+	}
+
+	if !store.IsOwnerRole(r.Context()) {
+		userID := store.UserIDFromContext(r.Context())
+		tenantID := store.TenantIDFromContext(r.Context())
+		switch sk.Visibility {
+		case "public", "internal":
+			privileged, err := h.isOwnerOrAdmin(r.Context(), tenantID, userID)
+			if err != nil {
+				slog.Warn("skills.toggle: role lookup failed",
+					"skill_id", idStr, "user_id", userID, "tenant_id", tenantID, "error", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "role lookup")})
+				return
+			}
+			if !privileged {
+				slog.Warn("security.skills.toggle_role_denied",
+					"skill_id", idStr, "user_id", userID, "tenant_id", tenantID,
+					"visibility", sk.Visibility)
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "Only owners and admins can install skills for the team. Use visibility=private to install for yourself.",
+				})
+				return
+			}
+		default: // "private" and anything else
+			if ownerID, ok := h.skills.GetSkillOwnerID(r.Context(), id); ok && ownerID != userID {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the skill owner can perform this action"})
+				return
+			}
+		}
 	}
 
 	var body struct {
