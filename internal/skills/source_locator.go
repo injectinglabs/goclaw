@@ -12,7 +12,10 @@ import (
 // repository or a direct tarball URL.
 //
 //   - Type == "github": Owner, Repo, Ref are populated. SHA may be filled in
-//     by the fetcher once the ref resolves.
+//     by the fetcher once the ref resolves. Path is optional: when set
+//     (e.g. "skills/pdf"), only the subdirectory of that path inside the
+//     fetched tarball is treated as the skill — used for monorepos that
+//     bundle multiple skills, like anthropics/skills.
 //   - Type == "url": URL holds the full https://... tarball address.
 //     SHA is the SHA-256 of the downloaded payload, computed by the fetcher.
 type SkillSource struct {
@@ -20,6 +23,7 @@ type SkillSource struct {
 	Owner string
 	Repo  string
 	Ref   string
+	Path  string // optional subdir within the repo (github only)
 	SHA   string
 	URL   string
 }
@@ -122,15 +126,28 @@ func parseGitHubShortForm(s string) (SkillSource, error) {
 		ref = rest[at+1:]
 		rest = rest[:at]
 	}
-	parts := strings.SplitN(rest, "/", 2)
-	if len(parts) != 2 {
-		return SkillSource{}, fmt.Errorf("%w: expected github:owner/repo[@ref]", ErrInvalidSource)
+	// Split into segments. Required: owner/repo. Optional trailing segments
+	// form a subdirectory path inside the repo (e.g. "skills/pdf"), used by
+	// monorepo marketplaces that bundle multiple skills.
+	segments := strings.Split(rest, "/")
+	if len(segments) < 2 || segments[0] == "" || segments[1] == "" {
+		return SkillSource{}, fmt.Errorf("%w: expected github:owner/repo[/subdir][@ref]", ErrInvalidSource)
 	}
-	owner, repo := parts[0], parts[1]
+	owner, repo := segments[0], segments[1]
+	var subPath string
+	if len(segments) > 2 {
+		subPath = strings.Trim(strings.Join(segments[2:], "/"), "/")
+	}
 	if !ghOwnerRE.MatchString(owner) || !ghRepoRE.MatchString(repo) || !ghRefRE.MatchString(ref) {
 		return SkillSource{}, fmt.Errorf("%w: invalid owner/repo/ref", ErrInvalidSource)
 	}
-	return SkillSource{Type: "github", Owner: owner, Repo: repo, Ref: ref}, nil
+	if subPath != "" {
+		// Reject path traversal sequences and absolute markers in the subdir.
+		if strings.Contains(subPath, "..") || strings.HasPrefix(subPath, "/") {
+			return SkillSource{}, fmt.Errorf("%w: invalid subdir path", ErrInvalidSource)
+		}
+	}
+	return SkillSource{Type: "github", Owner: owner, Repo: repo, Ref: ref, Path: subPath}, nil
 }
 
 func parseGitHubURL(u *url.URL) (SkillSource, error) {
@@ -170,4 +187,38 @@ func parseGitHubURL(u *url.URL) (SkillSource, error) {
 		return SkillSource{}, fmt.Errorf("%w: invalid github ref", ErrInvalidSource)
 	}
 	return SkillSource{Type: "github", Owner: owner, Repo: repo, Ref: ref}, nil
+}
+
+// ParseMarketplaceURL extracts owner/repo/ref/baseDir from a
+// raw.githubusercontent.com URL pointing at a marketplace.json. The base dir
+// is the directory containing the JSON file, used to resolve relative
+// in-repo paths inside the marketplace.
+//
+// Expected shape:
+//
+//	https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{...path}/marketplace.json
+//
+// Returns owner, repo, ref, and basePath (the dir slash-prefix; empty when
+// the JSON sits at repo root).
+func ParseMarketplaceURL(rawURL string) (owner, repo, ref, basePath string, err error) {
+	u, perr := url.Parse(rawURL)
+	if perr != nil {
+		return "", "", "", "", fmt.Errorf("%w: %v", ErrInvalidSource, perr)
+	}
+	if strings.ToLower(u.Hostname()) != "raw.githubusercontent.com" {
+		return "", "", "", "", fmt.Errorf("%w: expected raw.githubusercontent.com host", ErrInvalidSource)
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) < 4 {
+		return "", "", "", "", fmt.Errorf("%w: path too short", ErrInvalidSource)
+	}
+	owner, repo, ref = parts[0], parts[1], parts[2]
+	if !ghOwnerRE.MatchString(owner) || !ghRepoRE.MatchString(repo) || !ghRefRE.MatchString(ref) {
+		return "", "", "", "", fmt.Errorf("%w: invalid owner/repo/ref", ErrInvalidSource)
+	}
+	// Everything after ref except the final file segment is the base path.
+	if len(parts) > 4 {
+		basePath = strings.Join(parts[3:len(parts)-1], "/")
+	}
+	return owner, repo, ref, basePath, nil
 }

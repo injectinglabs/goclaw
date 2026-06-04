@@ -83,7 +83,7 @@ func (h *SkillsHandler) handlePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	if err := skills.ExtractTarball(tarPath, tmpDir); err != nil {
+	if err := skills.ExtractTarballSubdir(tarPath, tmpDir, src.Path); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidRequest, "extract: "+err.Error())})
 		return
 	}

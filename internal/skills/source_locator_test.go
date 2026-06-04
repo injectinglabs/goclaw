@@ -108,6 +108,64 @@ func TestParseSource_Errors(t *testing.T) {
 	}
 }
 
+func TestParseSource_GitHubSubdir(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantOwn  string
+		wantRepo string
+		wantPath string
+		wantRef  string
+	}{
+		{
+			name: "subdir at default ref",
+			input: "github:anthropics/skills/skills/pdf",
+			wantOwn: "anthropics", wantRepo: "skills", wantPath: "skills/pdf", wantRef: "main",
+		},
+		{
+			name: "subdir with explicit ref",
+			input: "github:anthropics/skills/skills/pdf@main",
+			wantOwn: "anthropics", wantRepo: "skills", wantPath: "skills/pdf", wantRef: "main",
+		},
+		{
+			name: "deep nested subdir",
+			input: "github:foo/bar/a/b/c/d@v1.2.3",
+			wantOwn: "foo", wantRepo: "bar", wantPath: "a/b/c/d", wantRef: "v1.2.3",
+		},
+		{
+			name: "owner/repo only — no subdir",
+			input: "github:foo/bar@main",
+			wantOwn: "foo", wantRepo: "bar", wantPath: "", wantRef: "main",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseSource(tt.input)
+			if err != nil {
+				t.Fatalf("ParseSource(%q) error = %v", tt.input, err)
+			}
+			if got.Type != "github" {
+				t.Fatalf("Type = %q, want github", got.Type)
+			}
+			if got.Owner != tt.wantOwn || got.Repo != tt.wantRepo || got.Path != tt.wantPath || got.Ref != tt.wantRef {
+				t.Fatalf("got = %+v, want owner=%s repo=%s path=%s ref=%s",
+					got, tt.wantOwn, tt.wantRepo, tt.wantPath, tt.wantRef)
+			}
+		})
+	}
+}
+
+func TestParseMarketplaceURL_Anthropic(t *testing.T) {
+	owner, repo, ref, base, err := ParseMarketplaceURL(
+		"https://raw.githubusercontent.com/anthropics/skills/main/.claude-plugin/marketplace.json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if owner != "anthropics" || repo != "skills" || ref != "main" || base != ".claude-plugin" {
+		t.Fatalf("got owner=%q repo=%q ref=%q base=%q", owner, repo, ref, base)
+	}
+}
+
 func TestIsHostAllowed(t *testing.T) {
 	for _, h := range []string{"github.com", "gitlab.com", "bitbucket.org", "raw.githubusercontent.com"} {
 		if !IsHostAllowed(h) {

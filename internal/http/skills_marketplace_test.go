@@ -1,10 +1,12 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,28 +62,59 @@ func TestMarketplace_OurIndexFormat(t *testing.T) {
 	}
 }
 
-func TestMarketplace_AnthropicFormat(t *testing.T) {
+func TestMarketplace_AnthropicNestedSkills(t *testing.T) {
 	resetMarketplaceCache(t)
+	// Mirrors the real anthropics/skills marketplace.json: plugins are
+	// bundles, each with a skills[] array of repo-relative paths.
 	const anthFormat = `{
-		"name": "Anthropic Skills",
-		"description": "Official",
+		"name": "anthropic-agent-skills",
+		"metadata": {"description": "Anthropic skills suite", "version": "1.0.0"},
 		"plugins": [
-			{"name": "PDF Reader", "description": "Read PDFs", "source": {"type": "github", "repo": "anthropics/skills"}, "tags": ["pdf"]},
-			{"name": "Excel Helper", "description": "XLSX", "source": {"type": "github", "repo": "anthropics/excel"}}
+			{
+				"name": "document-skills",
+				"description": "Collection of document processing suite",
+				"source": "./",
+				"strict": false,
+				"skills": ["./skills/xlsx", "./skills/docx", "./skills/pptx", "./skills/pdf"]
+			},
+			{
+				"name": "example-skills",
+				"description": "Collection of example skills",
+				"source": "./",
+				"skills": ["./skills/algorithmic-art", "./skills/skill-creator"]
+			}
 		]
 	}`
-	resp := parseOrFail(t, "https://raw.githubusercontent.com/anthropic/marketplace.json", anthFormat)
-	if resp.Name != "Anthropic Skills" {
+	resp := parseOrFail(t, "https://raw.githubusercontent.com/anthropics/skills/main/.claude-plugin/marketplace.json", anthFormat)
+
+	if resp.Name != "anthropic-agent-skills" {
 		t.Fatalf("name = %q", resp.Name)
 	}
-	if len(resp.Skills) != 2 {
-		t.Fatalf("translated skills = %d", len(resp.Skills))
+	if resp.Description != "Anthropic skills suite" {
+		t.Fatalf("description = %q (expected metadata.description fallback)", resp.Description)
 	}
-	if resp.Skills[0].Source != "github:anthropics/skills" {
-		t.Fatalf("translated source = %q", resp.Skills[0].Source)
+	if len(resp.Skills) != 6 {
+		t.Fatalf("flattened skills = %d, want 6", len(resp.Skills))
 	}
-	if resp.Skills[0].Slug != "pdf-reader" {
-		t.Fatalf("slug from name = %q", resp.Skills[0].Slug)
+
+	// Each entry must reference the marketplace URL's owner/repo/ref + the
+	// per-skill subdir.
+	bySlug := map[string]MarketplaceSkillEntry{}
+	for _, s := range resp.Skills {
+		bySlug[s.Slug] = s
+	}
+	for _, slug := range []string{"xlsx", "docx", "pptx", "pdf", "algorithmic-art", "skill-creator"} {
+		entry, ok := bySlug[slug]
+		if !ok {
+			t.Fatalf("missing flattened skill %q in %+v", slug, resp.Skills)
+		}
+		wantSource := "github:anthropics/skills/skills/" + slug + "@main"
+		if entry.Source != wantSource {
+			t.Errorf("skill %q source = %q, want %q", slug, entry.Source, wantSource)
+		}
+		if entry.Description == "" {
+			t.Errorf("skill %q has empty description (should carry plugin description)", slug)
+		}
 	}
 }
 
@@ -146,12 +179,12 @@ func TestMarketplace_CacheHit(t *testing.T) {
 func TestMarketplace_MalformedJSON(t *testing.T) {
 	resetMarketplaceCache(t)
 	// Parse-level test (host allowlist not exercised — we call the parser directly).
-	_, err := parseMarketplaceJSON([]byte("{not json"))
+	_, err := parseMarketplaceJSON([]byte("{not json"), "https://raw.githubusercontent.com/x/y/main/index.json")
 	if err == nil {
 		t.Fatal("expected error on malformed JSON")
 	}
 	// Empty/unsupported shape.
-	_, err = parseMarketplaceJSON([]byte(`{"unrelated": true}`))
+	_, err = parseMarketplaceJSON([]byte(`{"unrelated": true}`), "https://raw.githubusercontent.com/x/y/main/index.json")
 	if err == nil {
 		t.Fatal("expected error on unsupported shape")
 	}
@@ -182,13 +215,94 @@ func TestMarketplace_ListDefaults(t *testing.T) {
 
 // parseOrFail calls parseMarketplaceJSON directly — the host allowlist gate
 // only fires when going through the full HTTP handler. parseMarketplaceJSON
-// is the integration-tested unit.
-func parseOrFail(t *testing.T, _ string, body string) MarketplaceIndexResponse {
+// is the integration-tested unit. srcURL is required because the Anthropic
+// schema derives each skill's GitHub source from the marketplace URL itself.
+func parseOrFail(t *testing.T, srcURL string, body string) MarketplaceIndexResponse {
 	t.Helper()
-	parsed, err := parseMarketplaceJSON([]byte(body))
+	parsed, err := parseMarketplaceJSON([]byte(body), srcURL)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	return parsed
+}
+
+// fetchThroughTestServer routes a marketplace fetch at the real
+// fetchAndParseMarketplace path through a httptest.Server. Because the
+// production code only accepts allowlisted hostnames, we bypass the host
+// gate by calling fetchAndParseMarketplace directly with the test server URL.
+func fetchThroughTestServer(t *testing.T, body, contentType string) (MarketplaceIndexResponse, error) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if contentType != "" {
+			w.Header().Set("Content-Type", contentType)
+		} else {
+			// httptest's ResponseWriter defaults to text/plain; charset=utf-8
+			// once any body bytes are written. Force-clear the header so the
+			// caller sees an empty Content-Type for the bare-no-content-type
+			// test.
+			w.Header()["Content-Type"] = nil
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return fetchAndParseMarketplace(context.Background(), srv.URL)
+}
+
+func TestMarketplace_TextPlainAccepted(t *testing.T) {
+	resetMarketplaceCache(t)
+	const ourFormat = `{
+		"name": "TP",
+		"skills": [{"slug": "a", "name": "A", "source": "github:x/a"}]
+	}`
+	resp, err := fetchThroughTestServer(t, ourFormat, "text/plain; charset=utf-8")
+	if err != nil {
+		t.Fatalf("expected text/plain to be accepted, got %v", err)
+	}
+	if len(resp.Skills) != 1 {
+		t.Fatalf("skills = %d, want 1", len(resp.Skills))
+	}
+}
+
+func TestMarketplace_BareNoContentType(t *testing.T) {
+	resetMarketplaceCache(t)
+	const ourFormat = `{
+		"name": "Bare",
+		"skills": [{"slug": "a", "name": "A", "source": "github:x/a"}]
+	}`
+	resp, err := fetchThroughTestServer(t, ourFormat, "")
+	if err != nil {
+		t.Fatalf("expected empty Content-Type to be accepted, got %v", err)
+	}
+	if resp.Name != "Bare" {
+		t.Fatalf("name = %q", resp.Name)
+	}
+}
+
+func TestMarketplace_InvalidJSONStillRejected(t *testing.T) {
+	resetMarketplaceCache(t)
+	_, err := fetchThroughTestServer(t, "<html>not json</html>", "text/plain; charset=utf-8")
+	if err == nil {
+		t.Fatal("expected error on non-JSON body with text/plain content-type")
+	}
+}
+
+func TestMarketplace_RealAnthropicEndpoint(t *testing.T) {
+	if os.Getenv("SMOKE_REAL_NETWORK") == "" {
+		t.Skip("SMOKE_REAL_NETWORK not set — skipping live network smoke")
+	}
+	resetMarketplaceCache(t)
+	resp, err := fetchAndParseMarketplace(context.Background(),
+		"https://raw.githubusercontent.com/anthropics/skills/main/.claude-plugin/marketplace.json")
+	if err != nil {
+		t.Fatalf("real anthropic fetch failed: %v", err)
+	}
+	if len(resp.Skills) < 4 {
+		t.Fatalf("expected ≥4 flattened skills from real endpoint, got %d", len(resp.Skills))
+	}
+	for _, s := range resp.Skills {
+		if strings.TrimSpace(s.Slug) == "" {
+			t.Fatalf("real endpoint returned a skill with empty slug: %+v", s)
+		}
+	}
 }
 
