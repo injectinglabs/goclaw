@@ -12,7 +12,6 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
-	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 	"github.com/nextlevelbuilder/goclaw/internal/workspace"
@@ -88,32 +87,7 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 		if actorUserID == "" {
 			actorUserID = req.UserID
 		}
-		actor := map[string]string{
-			"X-Actor-User-ID": actorUserID,
-		}
-		orgID := l.externalOrgID
-		if orgID == "" {
-			orgID = store.TenantSlugFromContext(ctx)
-			if orgID == "" {
-				orgID = l.tenantSlug
-			}
-		}
-		if orgID != "" {
-			actor["X-Actor-Org-ID"] = orgID
-		}
-		// X-Actor-Agent-ID is the UUID of the agent whose loop is calling
-		// this tool. MCP sidecars (connectors-mcp) use it as the default
-		// owner when creating per-agent resources (Telegram channels, file
-		// scopes, etc.) — eliminates the "which agent should own this?"
-		// ambiguity that previously forced the tool to refuse with a
-		// picker prompt in multi-agent tenants. The session's agent is
-		// the user's expressed intent (they chose to chat with it), so
-		// it's a safe, explicit-feeling default. The user can still
-		// override by passing agent_id="<key>" in the tool args.
-		if l.agentUUID != uuid.Nil {
-			actor["X-Actor-Agent-ID"] = l.agentUUID.String()
-		}
-		ctx = providers.WithActorHeaders(ctx, actor)
+		ctx = l.ActorContext(ctx, actorUserID)
 	}
 	// Resolve merged tenant user identity for credential lookups.
 	// Keeps UserID unchanged (session/workspace scoping) but sets a separate
