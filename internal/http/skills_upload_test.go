@@ -314,7 +314,7 @@ func newTestUploadHandler(t *testing.T) (*SkillsHandler, *skillManageStoreStub, 
 	root := t.TempDir()
 	baseDir := filepath.Join(root, "skills-store")
 	skillStore := newSkillManageStoreStub(baseDir)
-	handler := NewSkillsHandler(skillStore, baseDir, root, "", bus.New(), nil, nil)
+	handler := NewSkillsHandler(skillStore, baseDir, root, "", bus.New(), nil, nil, nil)
 	ctx := store.WithLocale(
 		store.WithTenantID(
 			store.WithUserID(context.Background(), "user-1"),

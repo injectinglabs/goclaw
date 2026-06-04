@@ -12,13 +12,15 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
-// resetMarketplaceCache clears the package-level marketplace cache between
+// resetHubFetchCache clears the package-level marketplace cache between
 // subtests so they don't see each other's entries.
-func resetMarketplaceCache(t *testing.T) {
+func resetHubFetchCache(t *testing.T) {
 	t.Helper()
-	marketplaceCache = sync.Map{}
+	hubFetchCache = sync.Map{}
 }
 
 // allowHost temporarily adds host to the skills allowlist for the duration of
@@ -38,8 +40,8 @@ func startAllowedTestServer(t *testing.T, body string, contentType string) *http
 	return srv
 }
 
-func TestMarketplace_OurIndexFormat(t *testing.T) {
-	resetMarketplaceCache(t)
+func TestHub_OurIndexFormat(t *testing.T) {
+	resetHubFetchCache(t)
 	const ourFormat = `{
 		"name": "Our Hub",
 		"description": "Curated skills",
@@ -62,8 +64,8 @@ func TestMarketplace_OurIndexFormat(t *testing.T) {
 	}
 }
 
-func TestMarketplace_AnthropicNestedSkills(t *testing.T) {
-	resetMarketplaceCache(t)
+func TestHub_AnthropicNestedSkills(t *testing.T) {
+	resetHubFetchCache(t)
 	// Mirrors the real anthropics/skills marketplace.json: plugins are
 	// bundles, each with a skills[] array of repo-relative paths.
 	const anthFormat = `{
@@ -99,7 +101,7 @@ func TestMarketplace_AnthropicNestedSkills(t *testing.T) {
 
 	// Each entry must reference the marketplace URL's owner/repo/ref + the
 	// per-skill subdir.
-	bySlug := map[string]MarketplaceSkillEntry{}
+	bySlug := map[string]HubSkillEntry{}
 	for _, s := range resp.Skills {
 		bySlug[s.Slug] = s
 	}
@@ -118,12 +120,12 @@ func TestMarketplace_AnthropicNestedSkills(t *testing.T) {
 	}
 }
 
-func TestMarketplace_HostAllowlistRejected(t *testing.T) {
-	resetMarketplaceCache(t)
+func TestHub_HostAllowlistRejected(t *testing.T) {
+	resetHubFetchCache(t)
 	h := &SkillsHandler{}
-	req := httptest.NewRequest(http.MethodGet, "/v1/skills/marketplace?source="+url.QueryEscape("https://evil.example.com/x.json"), nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/skills/hubs/fetch?source="+url.QueryEscape("https://evil.example.com/x.json"), nil)
 	w := httptest.NewRecorder()
-	h.handleMarketplaceFetch(w, req)
+	h.handleHubFetch(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
@@ -132,8 +134,8 @@ func TestMarketplace_HostAllowlistRejected(t *testing.T) {
 	}
 }
 
-func TestMarketplace_CacheHit(t *testing.T) {
-	resetMarketplaceCache(t)
+func TestHub_CacheHit(t *testing.T) {
+	resetHubFetchCache(t)
 	const body = `{"name": "X", "skills": [{"slug": "a", "name": "A", "source": "github:x/a"}]}`
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -148,23 +150,23 @@ func TestMarketplace_CacheHit(t *testing.T) {
 	// non-allowlisted localhost, so we exercise the cache hit path by
 	// pre-populating the cache directly.
 	rawURL := "https://raw.githubusercontent.com/cache-hit/index.json"
-	resp := MarketplaceIndexResponse{
+	resp := HubIndexResponse{
 		URL:       rawURL,
 		Name:      "X",
-		Skills:    []MarketplaceSkillEntry{{Slug: "a", Name: "A", Source: "github:x/a"}},
+		Skills:    []HubSkillEntry{{Slug: "a", Name: "A", Source: "github:x/a"}},
 		FetchedAt: time.Now(),
 	}
-	marketplaceCache.Store(rawURL, marketplaceCacheEntry{value: resp, expiry: time.Now().Add(time.Minute)})
+	hubFetchCache.Store(rawURL, hubFetchCacheEntry{value: resp, expiry: time.Now().Add(time.Minute)})
 
 	h := &SkillsHandler{}
-	req := httptest.NewRequest(http.MethodGet, "/v1/skills/marketplace?source="+url.QueryEscape(rawURL), nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/skills/hubs/fetch?source="+url.QueryEscape(rawURL), nil)
 	w := httptest.NewRecorder()
-	h.handleMarketplaceFetch(w, req)
+	h.handleHubFetch(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	var got MarketplaceIndexResponse
+	var got HubIndexResponse
 	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -176,50 +178,68 @@ func TestMarketplace_CacheHit(t *testing.T) {
 	}
 }
 
-func TestMarketplace_MalformedJSON(t *testing.T) {
-	resetMarketplaceCache(t)
+func TestHub_MalformedJSON(t *testing.T) {
+	resetHubFetchCache(t)
 	// Parse-level test (host allowlist not exercised — we call the parser directly).
-	_, err := parseMarketplaceJSON([]byte("{not json"), "https://raw.githubusercontent.com/x/y/main/index.json")
+	_, err := parseHubJSON([]byte("{not json"), "https://raw.githubusercontent.com/x/y/main/index.json")
 	if err == nil {
 		t.Fatal("expected error on malformed JSON")
 	}
 	// Empty/unsupported shape.
-	_, err = parseMarketplaceJSON([]byte(`{"unrelated": true}`), "https://raw.githubusercontent.com/x/y/main/index.json")
+	_, err = parseHubJSON([]byte(`{"unrelated": true}`), "https://raw.githubusercontent.com/x/y/main/index.json")
 	if err == nil {
 		t.Fatal("expected error on unsupported shape")
 	}
 }
 
-func TestMarketplace_ListDefaults(t *testing.T) {
-	resetMarketplaceCache(t)
-	h := &SkillsHandler{}
-	req := httptest.NewRequest(http.MethodGet, "/v1/skills/marketplaces", nil)
+// stubHubStore returns a fixed list — exercises the handler shape without
+// a real DB. The DB-level path is covered by the live skill_hubs SQL seed
+// migration verified at stage roll-out.
+type stubHubStore struct{ rows []store.SkillHub }
+
+func (s *stubHubStore) ListEnabled(_ context.Context) ([]store.SkillHub, error) {
+	return s.rows, nil
+}
+
+func TestHub_List_FromStore(t *testing.T) {
+	resetHubFetchCache(t)
+	h := &SkillsHandler{hubStore: &stubHubStore{rows: []store.SkillHub{
+		{Name: "Anthropic Skills", URL: "https://example.com/a.json", TrustLevel: "community"},
+	}}}
+	req := httptest.NewRequest(http.MethodGet, "/v1/skills/hubs", nil)
 	w := httptest.NewRecorder()
-	h.handleMarketplacesList(w, req)
+	h.handleHubsList(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
 	}
 	var resp struct {
-		Marketplaces []MarketplaceEntry `json:"marketplaces"`
+		Hubs []store.SkillHub `json:"hubs"`
 	}
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(resp.Marketplaces) != 2 {
-		t.Fatalf("expected 2 default marketplaces, got %d", len(resp.Marketplaces))
-	}
-	if resp.Marketplaces[0].Name == "" || resp.Marketplaces[0].URL == "" {
-		t.Fatalf("first marketplace incomplete: %+v", resp.Marketplaces[0])
+	if len(resp.Hubs) != 1 || resp.Hubs[0].Name != "Anthropic Skills" {
+		t.Fatalf("unexpected hubs response: %+v", resp.Hubs)
 	}
 }
 
-// parseOrFail calls parseMarketplaceJSON directly — the host allowlist gate
-// only fires when going through the full HTTP handler. parseMarketplaceJSON
+func TestHub_List_NoStore_EmptyArray(t *testing.T) {
+	h := &SkillsHandler{}
+	req := httptest.NewRequest(http.MethodGet, "/v1/skills/hubs", nil)
+	w := httptest.NewRecorder()
+	h.handleHubsList(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+}
+
+// parseOrFail calls parseHubJSON directly — the host allowlist gate
+// only fires when going through the full HTTP handler. parseHubJSON
 // is the integration-tested unit. srcURL is required because the Anthropic
 // schema derives each skill's GitHub source from the marketplace URL itself.
-func parseOrFail(t *testing.T, srcURL string, body string) MarketplaceIndexResponse {
+func parseOrFail(t *testing.T, srcURL string, body string) HubIndexResponse {
 	t.Helper()
-	parsed, err := parseMarketplaceJSON([]byte(body), srcURL)
+	parsed, err := parseHubJSON([]byte(body), srcURL)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -227,10 +247,10 @@ func parseOrFail(t *testing.T, srcURL string, body string) MarketplaceIndexRespo
 }
 
 // fetchThroughTestServer routes a marketplace fetch at the real
-// fetchAndParseMarketplace path through a httptest.Server. Because the
+// fetchAndParseHub path through a httptest.Server. Because the
 // production code only accepts allowlisted hostnames, we bypass the host
-// gate by calling fetchAndParseMarketplace directly with the test server URL.
-func fetchThroughTestServer(t *testing.T, body, contentType string) (MarketplaceIndexResponse, error) {
+// gate by calling fetchAndParseHub directly with the test server URL.
+func fetchThroughTestServer(t *testing.T, body, contentType string) (HubIndexResponse, error) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if contentType != "" {
@@ -245,11 +265,11 @@ func fetchThroughTestServer(t *testing.T, body, contentType string) (Marketplace
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
-	return fetchAndParseMarketplace(context.Background(), srv.URL)
+	return fetchAndParseHub(context.Background(), srv.URL)
 }
 
-func TestMarketplace_TextPlainAccepted(t *testing.T) {
-	resetMarketplaceCache(t)
+func TestHub_TextPlainAccepted(t *testing.T) {
+	resetHubFetchCache(t)
 	const ourFormat = `{
 		"name": "TP",
 		"skills": [{"slug": "a", "name": "A", "source": "github:x/a"}]
@@ -263,8 +283,8 @@ func TestMarketplace_TextPlainAccepted(t *testing.T) {
 	}
 }
 
-func TestMarketplace_BareNoContentType(t *testing.T) {
-	resetMarketplaceCache(t)
+func TestHub_BareNoContentType(t *testing.T) {
+	resetHubFetchCache(t)
 	const ourFormat = `{
 		"name": "Bare",
 		"skills": [{"slug": "a", "name": "A", "source": "github:x/a"}]
@@ -278,20 +298,20 @@ func TestMarketplace_BareNoContentType(t *testing.T) {
 	}
 }
 
-func TestMarketplace_InvalidJSONStillRejected(t *testing.T) {
-	resetMarketplaceCache(t)
+func TestHub_InvalidJSONStillRejected(t *testing.T) {
+	resetHubFetchCache(t)
 	_, err := fetchThroughTestServer(t, "<html>not json</html>", "text/plain; charset=utf-8")
 	if err == nil {
 		t.Fatal("expected error on non-JSON body with text/plain content-type")
 	}
 }
 
-func TestMarketplace_RealAnthropicEndpoint(t *testing.T) {
+func TestHub_RealAnthropicEndpoint(t *testing.T) {
 	if os.Getenv("SMOKE_REAL_NETWORK") == "" {
 		t.Skip("SMOKE_REAL_NETWORK not set — skipping live network smoke")
 	}
-	resetMarketplaceCache(t)
-	resp, err := fetchAndParseMarketplace(context.Background(),
+	resetHubFetchCache(t)
+	resp, err := fetchAndParseHub(context.Background(),
 		"https://raw.githubusercontent.com/anthropics/skills/main/.claude-plugin/marketplace.json")
 	if err != nil {
 		t.Fatalf("real anthropic fetch failed: %v", err)

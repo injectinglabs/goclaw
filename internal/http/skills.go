@@ -37,13 +37,23 @@ type SkillsHandler struct {
 	msgBus         *bus.MessageBus
 	tenantCfgStore store.SkillTenantConfigStore
 	tenantStore    store.TenantStore
-	db             *sql.DB // for export/import direct queries
-	uploadLocks    sync.Map // per-slug mutex; bounded by validated slug set, entries are tiny (*sync.Mutex)
+	hubStore       store.SkillHubStore // optional — drives GET /v1/skills/hubs
+	db             *sql.DB             // for export/import direct queries
+	uploadLocks    sync.Map            // per-slug mutex; bounded by validated slug set, entries are tiny (*sync.Mutex)
 }
 
 // NewSkillsHandler creates a handler for skill management endpoints.
-func NewSkillsHandler(skills store.SkillManageStore, baseDir, dataDir, bundledDir string, msgBus *bus.MessageBus, tenantCfgStore store.SkillTenantConfigStore, tenantStore store.TenantStore) *SkillsHandler {
-	return &SkillsHandler{skills: skills, baseDir: baseDir, dataDir: dataDir, bundledDir: bundledDir, msgBus: msgBus, tenantCfgStore: tenantCfgStore, tenantStore: tenantStore}
+func NewSkillsHandler(skills store.SkillManageStore, baseDir, dataDir, bundledDir string, msgBus *bus.MessageBus, tenantCfgStore store.SkillTenantConfigStore, tenantStore store.TenantStore, hubStore store.SkillHubStore) *SkillsHandler {
+	return &SkillsHandler{
+		skills:         skills,
+		baseDir:        baseDir,
+		dataDir:        dataDir,
+		bundledDir:     bundledDir,
+		msgBus:         msgBus,
+		tenantCfgStore: tenantCfgStore,
+		tenantStore:    tenantStore,
+		hubStore:       hubStore,
+	}
 }
 
 // tenantSkillsDir returns the skills-store directory scoped to the requesting tenant.
@@ -134,8 +144,8 @@ func (h *SkillsHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/skills/export", h.adminMiddleware(h.handleSkillsExport))
 	mux.HandleFunc("POST /v1/skills/import", h.adminMiddleware(h.handleSkillsImport))
 	// Marketplace browser + update detection + audit log (Phase 2)
-	mux.HandleFunc("GET /v1/skills/marketplace", h.authMiddleware(h.handleMarketplaceFetch))
-	mux.HandleFunc("GET /v1/skills/marketplaces", h.authMiddleware(h.handleMarketplacesList))
+	mux.HandleFunc("GET /v1/skills/hubs", h.authMiddleware(h.handleHubsList))
+	mux.HandleFunc("GET /v1/skills/hubs/fetch", h.authMiddleware(h.handleHubFetch))
 	mux.HandleFunc("POST /v1/skills/check-updates", h.authMiddleware(h.handleCheckUpdates))
 	mux.HandleFunc("POST /v1/skills/{id}/update", h.authMiddleware(h.handleSkillUpdate))
 	mux.HandleFunc("GET /v1/skills/install-events", h.adminMiddleware(h.handleInstallEvents))
