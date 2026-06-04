@@ -133,12 +133,6 @@ type ResolverDeps struct {
 	// TTS auto mode from config: "off", "always", "inbound", "tagged"
 	TTSAutoMode string
 
-	// LockedAgentPreamble is the deployment-wide identity + capability
-	// prelude (from GatewayConfig.LockedAgentPreamble). Threaded into each
-	// Loop via LoopConfig.LockedAgentPreamble; BuildSystemPrompt only emits
-	// it when the resolved agent has IsLocked=true.
-	LockedAgentPreamble string
-
 	// V3 auto-inject: episodic memory injection into system prompt (nil = disabled)
 	AutoInjector memory.AutoInjector
 
@@ -500,7 +494,6 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			IsTeamLead:             isTeamLead,
 			CustomInstructions:     ag.SystemPrompt,
 			IsLocked:               ag.IsLocked,
-			LockedAgentPreamble:    deps.LockedAgentPreamble,
 			AutoInjector:          deps.AutoInjector,
 			Provider:               provider,
 			Model:                  ag.Model,

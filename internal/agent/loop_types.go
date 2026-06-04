@@ -105,12 +105,9 @@ type Loop struct {
 	// on every BuildSystemPrompt call from loop_history.go.
 	customInstructions string
 	// isLocked mirrors agents.is_locked; threaded into SystemPromptConfig
-	// so BuildSystemPrompt can decide whether to inject LockedAgentPreamble.
+	// so BuildSystemPrompt can decide whether to inject the locked-agent
+	// preamble (lockedAgentPreamble const).
 	isLocked bool
-	// lockedAgentPreamble holds the deployment-wide identity + capability
-	// prelude (GatewayConfig.LockedAgentPreamble) injected ABOVE everything
-	// when isLocked=true. Empty disables the injection.
-	lockedAgentPreamble string
 	defaultTimezone  string    // system default timezone for bootstrap pre-fill
 	provider         providers.Provider
 	model            string
@@ -417,10 +414,6 @@ type LoopConfig struct {
 	CustomInstructions string
 	// IsLocked passes through from agents.is_locked. See Loop.isLocked.
 	IsLocked bool
-	// LockedAgentPreamble is the deployment-wide identity + capability
-	// prelude (GatewayConfig.LockedAgentPreamble) — injected by
-	// BuildSystemPrompt only when IsLocked=true. Empty disables.
-	LockedAgentPreamble string
 
 	// Per-user profile + file seeding + dynamic context loading
 	EnsureUserProfile EnsureUserProfileFunc // preferred: separate profile + workspace
@@ -558,7 +551,6 @@ func NewLoop(cfg LoopConfig) *Loop {
 		agentType:              cfg.AgentType,
 		customInstructions:     cfg.CustomInstructions,
 		isLocked:               cfg.IsLocked,
-		lockedAgentPreamble:    cfg.LockedAgentPreamble,
 		provider:               cfg.Provider,
 		model:                  cfg.Model,
 		modelRegistry:          cfg.ModelRegistry,
