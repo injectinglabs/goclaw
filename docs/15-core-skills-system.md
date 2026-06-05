@@ -2,6 +2,8 @@
 
 How bundled (system) skills are loaded, stored, injected into agents, and managed throughout their lifecycle — including dependency checking, toggle control, and hot-reload.
 
+> **See also**: [§22 — Per-User Skill Ownership Model](22-skills-per-user-ownership.md) for the data model and lifecycle of **custom user-installed skills** (install from URL, sharing, per-user Disable). Migrations 71 + 72 rolled out 2026-06-05.
+
 ---
 
 ## 1. Overview
