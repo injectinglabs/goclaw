@@ -133,9 +133,18 @@ func (s *PGSkillStore) ListSkillsForUser(ctx context.Context, userID, role strin
 	if tid == uuid.Nil {
 		tid = store.MasterTenantID
 	}
-	isAdmin := role == store.TenantRoleOwner || role == store.TenantRoleAdmin
+	// Role used to gate an "admin sees everything in the tenant" branch
+	// (including other members' private skills). That was a privacy
+	// leak — a tenant owner has admin authority over the workspace, but
+	// that doesn't grant clairvoyance over what each member has installed
+	// privately on their own. Skills are a per-user resource just like
+	// integrations: tenant_users.role only governs sharing decisions
+	// (publish to team / unshare), not visibility on the inventory list.
+	// We still keep the parameter to avoid breaking call sites; it's
+	// folded into the cache key so a role change still invalidates.
+	_ = role
 
-	key := listForUserCacheKey{tenant: tid, user: userID, isAdmin: isAdmin}
+	key := listForUserCacheKey{tenant: tid, user: userID, isAdmin: false}
 	s.mu.RLock()
 	if entry := s.listForUserCache[key]; entry != nil && entry.ver == currentVer && time.Since(entry.time) < s.ttl {
 		result := entry.skills
@@ -144,21 +153,20 @@ func (s *PGSkillStore) ListSkillsForUser(ctx context.Context, userID, role strin
 	}
 	s.mu.RUnlock()
 
-	// Admins/owners get the unfiltered list — same query as ListSkills.
-	// Skipping the visibility predicate avoids a needless Bitmap-OR for the
-	// hot path of "owner opens Skills page", where they must see everything
-	// they can share/unshare anyway.
-	visibilityClause := ""
-	args := []any{tid}
-	if !isAdmin {
-		visibilityClause = ` AND (
-			is_system = true
-			OR visibility = 'public'
-			OR owner_id = $2
-			OR EXISTS (SELECT 1 FROM skill_user_grants g WHERE g.skill_id = skills.id AND g.user_id = $2)
-		)`
-		args = append(args, userID)
-	}
+	// Per-user visibility filter is the ONLY shape now. Caller sees:
+	//   - system skills (global)
+	//   - their own rows (owner_id matches)
+	//   - tenant-public rows (admin published to team)
+	//   - explicit grants (skill_user_grants)
+	// Other members' private rows are invisible to everyone, including
+	// the workspace owner.
+	visibilityClause := ` AND (
+		is_system = true
+		OR visibility = 'public'
+		OR owner_id = $2
+		OR EXISTS (SELECT 1 FROM skill_user_grants g WHERE g.skill_id = skills.id AND g.user_id = $2)
+	)`
+	args := []any{tid, userID}
 
 	var scanned []skillInfoRowWithFrontmatter
 	if err := pkgSqlxDB.SelectContext(ctx, &scanned,
