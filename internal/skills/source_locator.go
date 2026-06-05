@@ -26,6 +26,22 @@ type SkillSource struct {
 	Path  string // optional subdir within the repo (github only)
 	SHA   string
 	URL   string
+	// AmbiguousRefCandidates lists alternative (ref, path) splits the caller
+	// can fall back to when the primary (Ref/Path) interpretation fails to
+	// resolve at the fetcher. Populated only for HTTPS GitHub URLs of the
+	// form /tree/<x>/<y>/<z> where x, x/y, x/y/z are all valid candidate
+	// refs for a slash-branch — the parser commits to the most likely one
+	// (greedy first-segment) but exposes the longer joins so the fetcher
+	// retries them on 404 instead of giving up.
+	AmbiguousRefCandidates []RefCandidate
+}
+
+// RefCandidate is one (ref, path) interpretation of an ambiguous source URL.
+// `Ref` is the candidate ref string to try; `Path` is the in-repo subpath
+// the caller should use as the skill root if this ref resolves.
+type RefCandidate struct {
+	Ref  string
+	Path string
 }
 
 // Sentinel errors emitted by ParseSource.
@@ -163,22 +179,39 @@ func parseGitHubURL(u *url.URL) (SkillSource, error) {
 	}
 	ref := "main"
 	var subPath string
+	var ambiguousCandidates []RefCandidate
 	// Look for /tree/<ref>/[subpath], /commit/<sha>/[subpath],
 	// /releases/tag/<tag>, /archive/refs/heads/<branch>.
 	if len(parts) >= 4 {
 		switch parts[2] {
 		case "tree", "commit":
-			// GitHub's URL shape is genuinely ambiguous: /tree/main/foo/bar
-			// could mean ref="main"+path="foo/bar" OR ref="main/foo"+path="bar"
-			// (branches with slashes like `feature/x` are legal). We assume
-			// the FIRST segment after /tree/ is the ref and the rest is the
-			// in-repo subpath. This is what GitHub's own UI emits when you
-			// click "Copy link" on a subdirectory, so it's the dominant
-			// real-world shape. Users with slash-branches can still use the
-			// short form `github:owner/repo/subdir@feature/x` to disambiguate.
+			// GitHub's URL is genuinely ambiguous: /tree/main/foo/bar can
+			// mean ref="main"+path="foo/bar" (the common monorepo case)
+			// OR ref="main/foo"+path="bar" OR ref="main/foo/bar" with no
+			// subpath (legal slash-branches). We commit to the first
+			// interpretation as the primary — that's what GitHub's UI
+			// emits when copying a subdir link — and expose the remaining
+			// joins as fallback candidates so the fetcher can retry on
+			// 404 without us having to call the branches API up-front.
 			ref = parts[3]
 			if len(parts) > 4 {
 				subPath = strings.Trim(strings.Join(parts[4:], "/"), "/")
+				// Tail segments after the primary ref. Each progressively
+				// longer join is a fallback candidate. Order: longest →
+				// shortest, because the longer joins (less specific
+				// primary path) are rarer in real URLs and we want the
+				// fetcher to try them before giving up.
+				tail := parts[3:]
+				for i := 2; i <= len(tail); i++ {
+					candRef := strings.Join(tail[:i], "/")
+					var candPath string
+					if i < len(tail) {
+						candPath = strings.Trim(strings.Join(tail[i:], "/"), "/")
+					}
+					ambiguousCandidates = append(ambiguousCandidates, RefCandidate{
+						Ref: candRef, Path: candPath,
+					})
+				}
 			}
 		case "blob":
 			// /blob/<ref>/<path>/file.md is what GitHub gives for individual
@@ -216,7 +249,14 @@ func parseGitHubURL(u *url.URL) (SkillSource, error) {
 			return SkillSource{}, fmt.Errorf("%w: invalid subdir path", ErrInvalidSource)
 		}
 	}
-	return SkillSource{Type: "github", Owner: owner, Repo: repo, Ref: ref, Path: subPath}, nil
+	return SkillSource{
+		Type:                   "github",
+		Owner:                  owner,
+		Repo:                   repo,
+		Ref:                    ref,
+		Path:                   subPath,
+		AmbiguousRefCandidates: ambiguousCandidates,
+	}, nil
 }
 
 // ParseMarketplaceURL extracts owner/repo/ref/baseDir from a

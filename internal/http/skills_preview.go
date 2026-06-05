@@ -86,7 +86,10 @@ func (h *SkillsHandler) handlePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tarPath, resolvedSHA, fetchCleanup, _, sourceRef, err := h.fetchSkillTarball(r.Context(), src)
+	// &src so the fetcher's ambiguous-URL fallback (longer ref / shorter
+	// path) lands in src.Path → the bundle/skill-root locator below sees
+	// the resolved subpath, not the request-time guess.
+	tarPath, resolvedSHA, fetchCleanup, _, sourceRef, err := h.fetchSkillTarball(r.Context(), &src)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "fetch: "+err.Error())})
 		return
