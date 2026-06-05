@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"sort"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -14,82 +13,48 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
-const defaultSkillsCacheTTL = 5 * time.Minute
-
 // PGSkillStore implements store.SkillStore backed by Postgres.
 // Skills metadata lives in DB; content files on filesystem.
-// ListSkills() is cached with version-based invalidation + TTL safety net.
+// List queries hit PG on every call — no in-process list cache. The
+// earlier per-tenant / per-(tenant,user) caches kept a version counter
+// that was bumped on local mutations only; with >1 instance behind the
+// ALB that left siblings serving stale lists until TTL expiry (the UI
+// symptom: "I just installed/deleted a skill but it still shows the
+// old state until I reload"). Postgres handles list queries well under
+// realistic load — /v1/skills is a low-RPS endpoint — and a fresh
+// SELECT is the simplest invariant that scales correctly to N instances
+// without Redis/PG-NOTIFY plumbing.
+//
 // Also implements store.EmbeddingSkillSearcher for vector-based skill search.
 type PGSkillStore struct {
 	db      *sql.DB
 	baseDir string // filesystem base for skill content
-	mu      sync.RWMutex
-	cache   map[string]*store.SkillInfo
 	version atomic.Int64
-
-	// List cache: per-tenant cached result of ListSkills() with version + TTL validation.
-	// Key is tenant UUID; uuid.Nil = cross-tenant (system admin).
-	listCache map[uuid.UUID]*listCacheEntry
-	// listForUserCache: per-(tenant, user, isAdmin) cached result of
-	// ListSkillsForUser(). Sharing the same version counter as listCache
-	// means a Share/Unshare/install bumps both caches in lockstep — see
-	// BumpVersion() callers in skills_grants.go / skills_crud.go.
-	listForUserCache map[listForUserCacheKey]*listCacheEntry
-	ttl              time.Duration
 
 	// Embedding provider for vector-based skill search
 	embProvider store.EmbeddingProvider
 }
 
-// listCacheEntry holds per-tenant cached skill list with version + TTL.
-type listCacheEntry struct {
-	skills []store.SkillInfo
-	ver    int64
-	time   time.Time
-}
-
-// listForUserCacheKey identifies a per-(tenant, user, isAdmin) cache slot.
-// Role collapses to a boolean — admins/owners see everything, everyone else
-// sees the same filtered set, so caching by role-string would just bloat the
-// map without changing behaviour.
-type listForUserCacheKey struct {
-	tenant  uuid.UUID
-	user    string
-	isAdmin bool
-}
-
 func NewPGSkillStore(db *sql.DB, baseDir string) *PGSkillStore {
 	return &PGSkillStore{
-		db:               db,
-		baseDir:          baseDir,
-		cache:            make(map[string]*store.SkillInfo),
-		listCache:        make(map[uuid.UUID]*listCacheEntry),
-		listForUserCache: make(map[listForUserCacheKey]*listCacheEntry),
-		ttl:              defaultSkillsCacheTTL,
+		db:      db,
+		baseDir: baseDir,
 	}
 }
 
+// Version / BumpVersion remain on the interface for the filesystem-backed
+// SkillStore and the long-lived seeder/watcher goroutines, which key off
+// it to decide when to re-scan. Inside PGSkillStore the counter no longer
+// gates anything (no list cache to invalidate), but bumps are still cheap.
 func (s *PGSkillStore) Version() int64 { return s.version.Load() }
 func (s *PGSkillStore) BumpVersion()   { s.version.Store(time.Now().UnixMilli()) }
 func (s *PGSkillStore) Dirs() []string { return []string{s.baseDir} }
 
 func (s *PGSkillStore) ListSkills(ctx context.Context) []store.SkillInfo {
-	currentVer := s.version.Load()
 	tid := store.TenantIDFromContext(ctx)
 	if tid == uuid.Nil {
 		tid = store.MasterTenantID
 	}
-
-	// Check per-tenant cache
-	s.mu.RLock()
-	if entry := s.listCache[tid]; entry != nil && entry.ver == currentVer && time.Since(entry.time) < s.ttl {
-		result := entry.skills
-		s.mu.RUnlock()
-		return result
-	}
-	s.mu.RUnlock()
-
-	// Cache miss or TTL expired → query DB
 	// Returns active + archived + system skills. Archived skills are shown dimmed in the UI
 	// so admins can see missing deps and re-activate after installing them.
 	// Tenant filter: system skills visible globally, custom skills scoped to tenant.
@@ -102,16 +67,10 @@ func (s *PGSkillStore) ListSkills(ctx context.Context) []store.SkillInfo {
 		 ORDER BY name`, tid); err != nil {
 		return nil
 	}
-
 	result := make([]store.SkillInfo, 0, len(scanned))
 	for i := range scanned {
 		result = append(result, scanned[i].toSkillInfo(s.baseDir))
 	}
-
-	s.mu.Lock()
-	s.listCache[tid] = &listCacheEntry{skills: result, ver: currentVer, time: time.Now()}
-	s.mu.Unlock()
-
 	return result
 }
 
@@ -129,7 +88,6 @@ func (s *PGSkillStore) ListSkills(ctx context.Context) []store.SkillInfo {
 // idx_skills_visibility (partial WHERE status='active'),
 // skill_user_grants(skill_id, user_id) unique. No new indexes required.
 func (s *PGSkillStore) ListSkillsForUser(ctx context.Context, userID, role string) []store.SkillInfo {
-	currentVer := s.version.Load()
 	tid := store.TenantIDFromContext(ctx)
 	if tid == uuid.Nil {
 		tid = store.MasterTenantID
@@ -141,18 +99,8 @@ func (s *PGSkillStore) ListSkillsForUser(ctx context.Context, userID, role strin
 	// privately on their own. Skills are a per-user resource just like
 	// integrations: tenant_users.role only governs sharing decisions
 	// (publish to team / unshare), not visibility on the inventory list.
-	// We still keep the parameter to avoid breaking call sites; it's
-	// folded into the cache key so a role change still invalidates.
+	// Parameter kept to avoid breaking call sites.
 	_ = role
-
-	key := listForUserCacheKey{tenant: tid, user: userID, isAdmin: false}
-	s.mu.RLock()
-	if entry := s.listForUserCache[key]; entry != nil && entry.ver == currentVer && time.Since(entry.time) < s.ttl {
-		result := entry.skills
-		s.mu.RUnlock()
-		return result
-	}
-	s.mu.RUnlock()
 
 	// Per-user visibility filter is the ONLY shape now. Caller sees:
 	//   - system skills (global)
@@ -239,10 +187,6 @@ func (s *PGSkillStore) ListSkillsForUser(ctx context.Context, userID, role strin
 			}
 		}
 	}
-
-	s.mu.Lock()
-	s.listForUserCache[key] = &listCacheEntry{skills: result, ver: currentVer, time: time.Now()}
-	s.mu.Unlock()
 
 	return result
 }
