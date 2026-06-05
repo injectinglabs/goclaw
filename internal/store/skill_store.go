@@ -162,23 +162,15 @@ type SkillManageStore interface {
 	GrantToUser(ctx context.Context, skillID uuid.UUID, userID, grantedBy string) error
 	RevokeFromUser(ctx context.Context, skillID uuid.UUID, userID string) error
 
-	// Per-user disable overlay (migration 72). A row in skill_user_disables
-	// makes the canonical skill invisible to that caller + excluded from
-	// their agent's ListAccessible, without touching the row's enabled
-	// flag (which the row owner controls). Re-enable = clear the row.
-	SetUserDisable(ctx context.Context, skillID uuid.UUID, userID string) error
-	ClearUserDisable(ctx context.Context, skillID uuid.UUID, userID string) error
-	IsDisabledForUser(ctx context.Context, skillID uuid.UUID, userID string) bool
-
-	// Cascade-by-slug helpers used by the user-facing Toggle button:
-	// one click should turn the skill OFF (or ON) across every row the
-	// caller can see for that slug — their own row PLUS rows shared by
-	// other tenant members. Resolves the "I disabled mine but the
-	// shared version still works" footgun. Caller identity comes from
-	// the context.
+	// Per-user disable overlay (migration 72). Cascade-by-slug helpers
+	// used by the user-facing Toggle: one click turns the skill OFF (or
+	// ON) across every row the caller can see for that slug — their own
+	// row PLUS rows shared by other tenant members. The dashboard
+	// (`GET /v1/skills`) folds the same overlay into the returned
+	// `enabled` column via a NOT EXISTS subquery in ListSkillsForUser.
+	// Caller identity comes from the context.
 	SetUserDisableBySlug(ctx context.Context, slug string) (int, error)
 	ClearUserDisableBySlug(ctx context.Context, slug string) (int, error)
-	IsSlugDisabledForUser(ctx context.Context, slug, userID string) bool
 	ListWithGrantStatus(ctx context.Context, agentID uuid.UUID) ([]SkillWithGrantStatus, error)
 	// Files
 	GetSkillFilePath(ctx context.Context, id uuid.UUID) (filePath string, slug string, version int, isSystem bool, ok bool)

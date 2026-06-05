@@ -323,8 +323,12 @@ func TestRoleGate_TeamTenant_AdminCanEscalateToPublic(t *testing.T) {
 
 // ---- POST /v1/skills/{id}/toggle ----
 
-// Toggling a public skill on/off requires owner/admin in the active tenant.
-func TestRoleGate_TeamTenant_MemberCannotTogglePublicSkill(t *testing.T) {
+// Toggling a public skill that a member doesn't own succeeds — but
+// scopes the change to the caller via skill_user_disables (cascade-
+// by-slug), never touching the canonical row's enabled flag. Response
+// must say scope="user" so the SPA can distinguish from an admin-
+// owned global flip.
+func TestRoleGate_TeamTenant_MemberTogglePublicScopesToUser(t *testing.T) {
 	ts := newMockTenantStore()
 	tenantID := uuid.New()
 	ts.addTenant(tenantID, "team")
@@ -349,8 +353,16 @@ func TestRoleGate_TeamTenant_MemberCannotTogglePublicSkill(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.handleToggle(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("member toggle public: status = %d, body = %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("member toggle public: status = %d, body = %s; want 200", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"scope":"user"`) {
+		t.Fatalf("body = %s, expected scope=user (per-user overlay, not global flip)", w.Body.String())
+	}
+	// The shared row itself must still be enabled in the store —
+	// only the per-user overlay table changed.
+	if got := skillStore.skills[skillID]; !got.Enabled {
+		t.Fatalf("canonical row enabled was flipped (got %v); cascade should only write skill_user_disables", got.Enabled)
 	}
 }
 
