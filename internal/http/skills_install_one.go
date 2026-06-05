@@ -132,22 +132,68 @@ func (h *SkillsHandler) installOneSkillFromDir(p installOneSkillParams) (install
 	uploadLock.Lock()
 	defer uploadLock.Unlock()
 
-	// Content-hash idempotency. Re-run of the same install with identical
-	// SKILL.md returns the existing version unchanged.
+	// Slug uniqueness in this tenant is (tenant_id, slug) — only ONE row
+	// per skill per workspace. Decide whether the caller is allowed to
+	// rewrite that row or whether they should get a grant on it instead.
+	//
+	//   - caller is the existing row's owner → idempotent upsert path
+	//     (re-extract files, bump version if SKILL.md changed)
+	//   - caller is NOT the owner → grant-shared-catalog: don't touch the
+	//     row's content/files (those belong to the existing owner), just
+	//     issue skill_user_grants(skill_id, caller) so the caller's
+	//     Skills page and the agent's use_skill can resolve it.
+	//
+	// This is the same pattern as integrations: one canonical record,
+	// per-user grants for visibility. Without this branch every member
+	// re-install of an admin's private skill silently overwrote the
+	// admin's row OR returned a misleading "unchanged" while the member
+	// still couldn't see the skill (no owner_id match, no public flag,
+	// no grant).
 	contentHash := fmt.Sprintf("%x", sha256.Sum256(skillBytes))
 	existingHash, existingVer, skillExists := h.skills.GetSkillHashBySlug(p.ctx, slug)
-	if skillExists && existingHash != "" && existingHash == contentHash {
-		return installOneSkillResult{
-			slug:      slug,
-			unchanged: true,
-			response: map[string]any{
-				"slug":       slug,
-				"version":    existingVer,
-				"name":       name,
-				"status":     "unchanged",
-				"source_sha": p.resolvedSHA,
-			},
-		}, nil
+	if skillExists {
+		existingOwner, _ := h.skills.GetSkillOwnerIDBySlug(p.ctx, slug)
+		if existingOwner != "" && existingOwner != p.userID {
+			if existing, ok := h.skills.GetSkill(p.ctx, slug); ok && existing != nil {
+				existingID, idErr := uuid.Parse(existing.ID)
+				if idErr != nil {
+					slog.Warn("skills.install: bad existing skill ID", "id", existing.ID, "error", idErr)
+					return installOneSkillResult{}, newInstallErr(http.StatusInternalServerError,
+						i18n.T(p.locale, i18n.MsgInternalError, "parse id"))
+				}
+				if err := h.skills.GrantToUser(p.ctx, existingID, p.userID, p.userID); err != nil {
+					slog.Warn("skills.install: grant to caller failed",
+						"slug", slug, "user_id", p.userID, "skill_id", existing.ID, "error", err)
+					return installOneSkillResult{}, newInstallErr(http.StatusInternalServerError,
+						i18n.T(p.locale, i18n.MsgInternalError, "grant"))
+				}
+				return installOneSkillResult{
+					slug: slug,
+					response: map[string]any{
+						"slug":       slug,
+						"version":    existing.Version,
+						"name":       existing.Name,
+						"status":     "granted",
+						"is_new":     true,
+						"source_sha": p.resolvedSHA,
+					},
+				}, nil
+			}
+		}
+		// Caller IS the owner — idempotent: same SKILL.md → no-op.
+		if existingHash != "" && existingHash == contentHash {
+			return installOneSkillResult{
+				slug:      slug,
+				unchanged: true,
+				response: map[string]any{
+					"slug":       slug,
+					"version":    existingVer,
+					"name":       name,
+					"status":     "unchanged",
+					"source_sha": p.resolvedSHA,
+				},
+			}, nil
+		}
 	}
 
 	version := h.skills.GetNextVersion(p.ctx, slug)
