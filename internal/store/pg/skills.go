@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -160,6 +161,17 @@ func (s *PGSkillStore) ListSkillsForUser(ctx context.Context, userID, role strin
 	//   - explicit grants (skill_user_grants)
 	// Other members' private rows are invisible to everyone, including
 	// the workspace owner.
+	//
+	// DISTINCT ON (slug) collapses duplicates that show up when both the
+	// caller AND another tenant member have installed the same slug:
+	// without it the UI would render "aeo" twice — once as the caller's
+	// own row, once as "Shared by …". The ORDER BY picks the row to
+	// keep, preferring:
+	//   1. system skills (is_system desc)
+	//   2. the caller's own row (owner_id = caller desc) — they can
+	//      Delete/Disable/Share their copy
+	//   3. shared rows (visibility='public') over granted rows
+	//   4. higher version, then lexicographic id for determinism
 	visibilityClause := ` AND (
 		is_system = true
 		OR visibility = 'public'
@@ -170,18 +182,62 @@ func (s *PGSkillStore) ListSkillsForUser(ctx context.Context, userID, role strin
 
 	var scanned []skillInfoRowWithFrontmatter
 	if err := pkgSqlxDB.SelectContext(ctx, &scanned,
-		`SELECT id, name, slug, description, visibility, tags, version, is_system, status, enabled, deps, frontmatter, file_path,
+		`SELECT DISTINCT ON (slug)
+		        id, name, slug, description, visibility, tags, version, is_system, status, enabled, deps, frontmatter, file_path,
 		        source_url, source_sha, source_ref, installed_by, installed_at,
 		        update_available_sha, update_available_ref, last_update_check
-		 FROM skills WHERE (status IN ('active', 'archived') OR is_system = true)
+		 FROM skills
+		 WHERE (status IN ('active', 'archived') OR is_system = true)
 		   AND (is_system = true OR tenant_id = $1)`+visibilityClause+`
-		 ORDER BY name`, args...); err != nil {
+		 ORDER BY slug,
+		          is_system DESC,
+		          (owner_id = $2) DESC,
+		          (visibility = 'public') DESC,
+		          version DESC,
+		          id ASC`, args...); err != nil {
 		return nil
 	}
+	// DISTINCT ON sorts by (slug, …); a stable display order by name
+	// happens here in Go to avoid wrapping the SELECT in a subquery
+	// just for ORDER BY name. Few enough rows per tenant that this is
+	// negligible.
+	sort.Slice(scanned, func(i, j int) bool { return scanned[i].Name < scanned[j].Name })
 
 	result := make([]store.SkillInfo, 0, len(scanned))
 	for i := range scanned {
 		result = append(result, scanned[i].toSkillInfo(s.baseDir))
+	}
+
+	// Per-user disable overlay (migration 72): the canonical `enabled`
+	// column belongs to the row owner, but the user-facing Toggle
+	// cascades by slug into skill_user_disables. The list result must
+	// reflect that overlay or the SPA renders "enabled: true" for slugs
+	// the caller just toggled off, with no visible change. Query once
+	// per ListSkillsForUser call (cheap — index on (user_id, skill_id)
+	// joined to skills.slug), collect into a set, then flip `enabled`
+	// on any returned row whose slug shows up disabled.
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT sk.slug
+		   FROM skill_user_disables d
+		   JOIN skills sk ON sk.id = d.skill_id
+		  WHERE d.user_id = $1 AND sk.tenant_id = $2`,
+		userID, tid)
+	if err == nil {
+		disabledSlugs := map[string]struct{}{}
+		for rows.Next() {
+			var slug string
+			if scanErr := rows.Scan(&slug); scanErr == nil {
+				disabledSlugs[slug] = struct{}{}
+			}
+		}
+		rows.Close()
+		if len(disabledSlugs) > 0 {
+			for i := range result {
+				if _, off := disabledSlugs[result[i].Slug]; off {
+					result[i].Enabled = false
+				}
+			}
+		}
 	}
 
 	s.mu.Lock()
