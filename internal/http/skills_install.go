@@ -92,8 +92,11 @@ func (h *SkillsHandler) handleInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Fetch the tarball into a temp file.
-	tarPath, resolvedSHA, fetchCleanup, sourceURL, sourceRef, err := h.fetchSkillTarball(r.Context(), src)
+	// 1. Fetch the tarball into a temp file. Pass &src so the fetcher can
+	// rewrite Ref/Path if it had to fall back to one of the parser's
+	// AmbiguousRefCandidates — downstream code reads src.Path for the
+	// tarball-subdir extract and needs the resolved value.
+	tarPath, resolvedSHA, fetchCleanup, sourceURL, sourceRef, err := h.fetchSkillTarball(r.Context(), &src)
 	if err != nil {
 		slog.Warn("skills.install: fetch failed", "user_id", userID, "source", body.Source, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "fetch: "+err.Error())})
@@ -229,10 +232,33 @@ func (h *SkillsHandler) handleInstall(w http.ResponseWriter, r *http.Request) {
 // fetchSkillTarball resolves a SkillSource to a temp tarball path. Returns
 // the resolved SHA (commit for github, sha-256 for url), a cleanup func, and
 // canonical source URL / ref strings for DB storage.
-func (h *SkillsHandler) fetchSkillTarball(ctx context.Context, src skills.SkillSource) (string, string, func(), string, string, error) {
+//
+// For HTTPS GitHub URLs of the form /tree/<x>/<y>/<z> the parser commits to
+// a single (Ref, Path) split as primary but exposes AmbiguousRefCandidates
+// with the alternative joins (longer refs / shorter paths). When the primary
+// 404s at GitHub we walk the candidate list and retry — this is how we
+// support both monorepo subdir links (the common case) and slash-branches
+// like `feature/x` without hardcoding branch-name heuristics. The mutator
+// updates src.Ref / src.Path in place so the caller's extract step uses the
+// path that actually resolved.
+func (h *SkillsHandler) fetchSkillTarball(ctx context.Context, src *skills.SkillSource) (string, string, func(), string, string, error) {
 	switch src.Type {
 	case "github":
 		tarPath, sha, cleanup, err := skills.FetchGitHubTarball(ctx, src.Owner, src.Repo, src.Ref)
+		if err != nil && isGitHubRefNotFound(err) {
+			// Walk candidates: each is a (longer ref, shorter path) split of
+			// the URL tail. Stop at the first success.
+			for _, cand := range src.AmbiguousRefCandidates {
+				slog.Info("skills.install: retrying github fetch with alternate ref",
+					"primary_ref", src.Ref, "candidate_ref", cand.Ref, "candidate_path", cand.Path)
+				if p, s, c, e := skills.FetchGitHubTarball(ctx, src.Owner, src.Repo, cand.Ref); e == nil {
+					tarPath, sha, cleanup, err = p, s, c, nil
+					src.Ref = cand.Ref
+					src.Path = cand.Path
+					break
+				}
+			}
+		}
 		if err != nil {
 			return "", "", noopCleanupFn, "", "", err
 		}
@@ -250,6 +276,17 @@ func (h *SkillsHandler) fetchSkillTarball(ctx context.Context, src skills.SkillS
 	default:
 		return "", "", noopCleanupFn, "", "", fmt.Errorf("unsupported source type %q", src.Type)
 	}
+}
+
+// isGitHubRefNotFound reports whether an error from FetchGitHubTarball is
+// the "ref doesn't exist" case (HTTP 404 at the refs resolver). Used to
+// gate the alternate-candidate retry — we don't want to retry on, say, a
+// timeout, because the candidate would hit the same timeout.
+func isGitHubRefNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "github_fetcher: ref not found")
 }
 
 func noopCleanupFn() {}

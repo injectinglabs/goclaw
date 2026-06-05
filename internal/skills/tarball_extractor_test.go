@@ -119,6 +119,9 @@ func TestTarballExtractor_AbsolutePathRejected(t *testing.T) {
 // CLAUDE.md) remain installable. Materialising the link itself is what
 // would be unsafe (eval-time escape), and S3 mirror can't store links
 // anyway.
+// ExtractTarball strips the first path segment (matches GitHub's
+// `{repo}-{sha7}/` wrapper), so tar entries `skill/SKILL.md` land at
+// `dst/SKILL.md` — that's the path the assertion checks.
 func TestTarballExtractor_SymlinkDropped(t *testing.T) {
 	path := buildTar(t, []tarEntry{
 		{Name: "skill/", Typeflag: tar.TypeDir},
@@ -129,16 +132,17 @@ func TestTarballExtractor_SymlinkDropped(t *testing.T) {
 	if err := ExtractTarball(path, dst); err != nil {
 		t.Fatalf("ExtractTarball returned %v; symlinks should be dropped not errored", err)
 	}
-	if _, err := os.Stat(filepath.Join(dst, "skill", "SKILL.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(dst, "SKILL.md")); err != nil {
 		t.Fatalf("SKILL.md missing after symlink-skip extraction: %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(dst, "skill", "escape")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(dst, "escape")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("symlink leaked through extraction: lstat err=%v (want ErrNotExist)", err)
 	}
 }
 
 func TestTarballExtractor_HardlinkDropped(t *testing.T) {
 	path := buildTar(t, []tarEntry{
+		{Name: "skill/", Typeflag: tar.TypeDir},
 		{Name: "skill/SKILL.md", Body: []byte("ok")},
 		{Name: "skill/hard", Typeflag: tar.TypeLink, Linkname: "../../etc/passwd"},
 	})
@@ -146,10 +150,10 @@ func TestTarballExtractor_HardlinkDropped(t *testing.T) {
 	if err := ExtractTarball(path, dst); err != nil {
 		t.Fatalf("ExtractTarball returned %v; hardlinks should be dropped not errored", err)
 	}
-	if _, err := os.Stat(filepath.Join(dst, "skill", "SKILL.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(dst, "SKILL.md")); err != nil {
 		t.Fatalf("SKILL.md missing after hardlink-skip extraction: %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(dst, "skill", "hard")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(dst, "hard")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("hardlink leaked through extraction: lstat err=%v (want ErrNotExist)", err)
 	}
 }
