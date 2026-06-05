@@ -44,10 +44,20 @@ func TestParseSource_GitHubURL(t *testing.T) {
 		wantOwner string
 		wantRepo  string
 		wantRef   string
+		wantPath  string
 	}{
 		{name: "bare", input: "https://github.com/foo/bar", wantOwner: "foo", wantRepo: "bar", wantRef: "main"},
 		{name: "tree ref", input: "https://github.com/foo/bar/tree/v1.0", wantOwner: "foo", wantRepo: "bar", wantRef: "v1.0"},
-		{name: "tree branch", input: "https://github.com/foo/bar/tree/feature/x", wantOwner: "foo", wantRepo: "bar", wantRef: "feature/x"},
+		// GitHub URLs of the form /tree/<ref>/<subpath> are how the UI's
+		// "Copy link" emits subdirectory references in monorepos. We
+		// always treat the first segment after /tree/ as the ref and the
+		// rest as the in-repo subpath — the dominant real-world shape.
+		// Slash-branches (`feature/x`) with NO subpath collide with this
+		// rule and need the short form `github:foo/bar@feature/x`.
+		{name: "tree branch (single segment)", input: "https://github.com/foo/bar/tree/feature", wantOwner: "foo", wantRepo: "bar", wantRef: "feature"},
+		{name: "tree ref with subdir", input: "https://github.com/foo/bar/tree/main/path/to/skill", wantOwner: "foo", wantRepo: "bar", wantRef: "main", wantPath: "path/to/skill"},
+		{name: "tree ref with single-segment subdir", input: "https://github.com/foo/bar/tree/main/skill", wantOwner: "foo", wantRepo: "bar", wantRef: "main", wantPath: "skill"},
+		{name: "blob file", input: "https://github.com/foo/bar/blob/main/path/to/SKILL.md", wantOwner: "foo", wantRepo: "bar", wantRef: "main", wantPath: "path/to"},
 		{name: "commit", input: "https://github.com/foo/bar/commit/abcdef0", wantOwner: "foo", wantRepo: "bar", wantRef: "abcdef0"},
 		{name: "releases tag", input: "https://github.com/foo/bar/releases/tag/v2.3", wantOwner: "foo", wantRepo: "bar", wantRef: "v2.3"},
 		{name: ".git suffix stripped", input: "https://github.com/foo/bar.git", wantOwner: "foo", wantRepo: "bar", wantRef: "main"},
@@ -61,9 +71,9 @@ func TestParseSource_GitHubURL(t *testing.T) {
 			if got.Type != "github" {
 				t.Fatalf("Type = %q, want github", got.Type)
 			}
-			if got.Owner != tt.wantOwner || got.Repo != tt.wantRepo || got.Ref != tt.wantRef {
-				t.Fatalf("got = %+v, want owner=%s repo=%s ref=%s",
-					got, tt.wantOwner, tt.wantRepo, tt.wantRef)
+			if got.Owner != tt.wantOwner || got.Repo != tt.wantRepo || got.Ref != tt.wantRef || got.Path != tt.wantPath {
+				t.Fatalf("got = %+v, want owner=%s repo=%s ref=%s path=%s",
+					got, tt.wantOwner, tt.wantRepo, tt.wantRef, tt.wantPath)
 			}
 		})
 	}

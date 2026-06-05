@@ -162,11 +162,33 @@ func parseGitHubURL(u *url.URL) (SkillSource, error) {
 		return SkillSource{}, fmt.Errorf("%w: invalid github owner/repo", ErrInvalidSource)
 	}
 	ref := "main"
-	// Look for /tree/<ref>, /commit/<sha>, /releases/tag/<tag>, /archive/refs/heads/<branch>.
+	var subPath string
+	// Look for /tree/<ref>/[subpath], /commit/<sha>/[subpath],
+	// /releases/tag/<tag>, /archive/refs/heads/<branch>.
 	if len(parts) >= 4 {
 		switch parts[2] {
 		case "tree", "commit":
-			ref = strings.Join(parts[3:], "/")
+			// GitHub's URL shape is genuinely ambiguous: /tree/main/foo/bar
+			// could mean ref="main"+path="foo/bar" OR ref="main/foo"+path="bar"
+			// (branches with slashes like `feature/x` are legal). We assume
+			// the FIRST segment after /tree/ is the ref and the rest is the
+			// in-repo subpath. This is what GitHub's own UI emits when you
+			// click "Copy link" on a subdirectory, so it's the dominant
+			// real-world shape. Users with slash-branches can still use the
+			// short form `github:owner/repo/subdir@feature/x` to disambiguate.
+			ref = parts[3]
+			if len(parts) > 4 {
+				subPath = strings.Trim(strings.Join(parts[4:], "/"), "/")
+			}
+		case "blob":
+			// /blob/<ref>/<path>/file.md is what GitHub gives for individual
+			// files. Treat the directory containing that file as the skill
+			// root — same convention as `tree`, just stripping the trailing
+			// file segment.
+			ref = parts[3]
+			if len(parts) > 5 {
+				subPath = strings.Trim(strings.Join(parts[4:len(parts)-1], "/"), "/")
+			}
 		case "releases":
 			if parts[3] == "tag" && len(parts) >= 5 {
 				ref = strings.Join(parts[4:], "/")
@@ -186,7 +208,15 @@ func parseGitHubURL(u *url.URL) (SkillSource, error) {
 	if !ghRefRE.MatchString(ref) {
 		return SkillSource{}, fmt.Errorf("%w: invalid github ref", ErrInvalidSource)
 	}
-	return SkillSource{Type: "github", Owner: owner, Repo: repo, Ref: ref}, nil
+	if subPath != "" {
+		// Same path-traversal guard as the short-form parser. Belt and braces
+		// because subPath comes from a URL the user pasted, not from a hub
+		// JSON we've already validated.
+		if strings.Contains(subPath, "..") {
+			return SkillSource{}, fmt.Errorf("%w: invalid subdir path", ErrInvalidSource)
+		}
+	}
+	return SkillSource{Type: "github", Owner: owner, Repo: repo, Ref: ref, Path: subPath}, nil
 }
 
 // ParseMarketplaceURL extracts owner/repo/ref/baseDir from a
