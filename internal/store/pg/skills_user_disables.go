@@ -64,14 +64,21 @@ func (s *PGSkillStore) SetUserDisableBySlug(ctx context.Context, slug string) (i
 		return 0, nil
 	}
 	tid := tenantIDForInsert(ctx)
+	// userID passed twice as $1 + $4 — using a single $1 in both the
+	// SELECT projection and the predicate triggers Postgres
+	// SQLSTATE 42P08 ("inconsistent types deduced for parameter $1")
+	// because the prepared-statement type inference can't pin one type
+	// across both use sites with this driver version. Two distinct
+	// parameters skip the deduction step entirely. Same fix in
+	// ClearUserDisableBySlug below.
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO skill_user_disables (id, skill_id, user_id, tenant_id, created_at)
 		 SELECT gen_random_uuid(), s.id, $1, s.tenant_id, NOW()
 		   FROM skills s
 		  WHERE s.tenant_id = $2 AND s.slug = $3 AND s.status != 'deleted'
-		    AND (s.owner_id = $1 OR s.visibility = 'public')
+		    AND (s.owner_id = $4 OR s.visibility = 'public')
 		 ON CONFLICT (skill_id, user_id) DO NOTHING`,
-		userID, tid, slug)
+		userID, tid, slug, userID)
 	if err != nil {
 		return 0, err
 	}
@@ -91,7 +98,7 @@ func (s *PGSkillStore) ClearUserDisableBySlug(ctx context.Context, slug string) 
 		`DELETE FROM skill_user_disables d
 		 USING skills s
 		 WHERE d.skill_id = s.id
-		   AND d.user_id = $1
+		   AND d.user_id = $1::text
 		   AND s.tenant_id = $2 AND s.slug = $3`,
 		userID, tid, slug)
 	if err != nil {
