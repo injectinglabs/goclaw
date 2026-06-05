@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -165,17 +166,39 @@ func (s *PGSkillStore) ListAccessible(ctx context.Context, agentID uuid.UUID, us
 		stcJoin = fmt.Sprintf(" LEFT JOIN skill_tenant_configs stc ON s.id = stc.skill_id AND stc.tenant_id = $%d", 4)
 		stcFilter = " AND (stc.enabled IS NULL OR stc.enabled = true)"
 	}
+	// DISTINCT ON (slug): per-user model (migration 71) allows multiple
+	// rows for the same slug across tenant users. The agent must resolve
+	// a slug to EXACTLY ONE row at use_skill time — otherwise it would
+	// see "aeo" twice and the LLM has to guess which to call. Order
+	// prefers the caller's own row (it's their content), then public
+	// (the shared catalog fallback), then internal (granted), then
+	// higher version as a tiebreaker. Display sorting by name happens
+	// in Go after the query.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT DISTINCT s.name, s.slug, s.description, s.version, s.file_path FROM skills s
+		`SELECT DISTINCT ON (s.slug)
+		        s.name, s.slug, s.description, s.version, s.file_path FROM skills s
 		LEFT JOIN skill_agent_grants sag ON s.id = sag.skill_id AND sag.agent_id = $1
 		LEFT JOIN skill_user_grants sug ON s.id = sug.skill_id AND (sug.user_id = $2 OR sug.user_id = $3)`+stcJoin+`
-		WHERE s.status = 'active'`+tenantCond+stcFilter+` AND (
+		WHERE s.status = 'active' AND s.enabled = true`+tenantCond+stcFilter+` AND (
 			s.is_system = true
 			OR s.visibility = 'public'
 			OR (s.visibility = 'private' AND (s.owner_id = $2 OR s.owner_id = $3))
 			OR (s.visibility = 'internal' AND (sag.id IS NOT NULL OR sug.id IS NOT NULL))
 		)
-		ORDER BY s.name`, append([]any{agentID, userID, actorID}, tcArgs...)...)
+		-- Per-user disable overlay (migration 72). A caller who personally
+		-- opted out of a skill (own row OR shared) gets it excluded from
+		-- their agent. handleToggle cascades by slug across all rows the
+		-- caller can see, so this single NOT EXISTS covers both branches.
+		AND NOT EXISTS (
+			SELECT 1 FROM skill_user_disables d
+			WHERE d.skill_id = s.id AND d.user_id IN ($2, $3)
+		)
+		ORDER BY s.slug,
+		         s.is_system DESC,
+		         (s.owner_id = $2 OR s.owner_id = $3) DESC,
+		         (s.visibility = 'public') DESC,
+		         s.version DESC,
+		         s.id ASC`, append([]any{agentID, userID, actorID}, tcArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -193,6 +216,9 @@ func (s *PGSkillStore) ListAccessible(ctx context.Context, agentID uuid.UUID, us
 		}
 		result = append(result, buildSkillInfo("", name, slug, desc, version, s.baseDir, filePath))
 	}
+	// DISTINCT ON sorts by (slug, …); re-sort by display name for the
+	// agent's available_skills XML to stay alphabetic.
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	return result, rows.Err()
 }
 

@@ -702,35 +702,6 @@ func (h *SkillsHandler) handleToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !store.IsOwnerRole(r.Context()) {
-		userID := store.UserIDFromContext(r.Context())
-		tenantID := store.TenantIDFromContext(r.Context())
-		switch sk.Visibility {
-		case "public", "internal":
-			privileged, err := h.isOwnerOrAdmin(r.Context(), tenantID, userID)
-			if err != nil {
-				slog.Warn("skills.toggle: role lookup failed",
-					"skill_id", idStr, "user_id", userID, "tenant_id", tenantID, "error", err)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "role lookup")})
-				return
-			}
-			if !privileged {
-				slog.Warn("security.skills.toggle_role_denied",
-					"skill_id", idStr, "user_id", userID, "tenant_id", tenantID,
-					"visibility", sk.Visibility)
-				writeJSON(w, http.StatusForbidden, map[string]string{
-					"error": "Only owners and admins can install skills for the team. Use visibility=private to install for yourself.",
-				})
-				return
-			}
-		default: // "private" and anything else
-			if ownerID, ok := h.skills.GetSkillOwnerID(r.Context(), id); ok && ownerID != userID {
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the skill owner can perform this action"})
-				return
-			}
-		}
-	}
-
 	var body struct {
 		Enabled bool `json:"enabled"`
 	}
@@ -738,36 +709,47 @@ func (h *SkillsHandler) handleToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.skills.ToggleSkill(r.Context(), id, body.Enabled); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	// Per-user, cascade-by-slug Disable semantics. One click means
+	// "this skill is OFF for me, period" — regardless of which physical
+	// row id the caller happened to send (their own row, a shared row
+	// from another member, doesn't matter). The handler resolves the
+	// slug and writes/clears skill_user_disables for every row of that
+	// slug the caller can access in their tenant. Without the cascade
+	// the old behaviour was the "I disabled mine but the shared
+	// version still works" footgun — the agent would fall through to
+	// the still-enabled shared row right after a Disable click.
+	//
+	// The canonical `skills.enabled` column is reserved for system
+	// state (missing deps → auto-archive). User-facing Toggle never
+	// touches it.
+	if sk.Slug == "" {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "skill has no slug"})
 		return
 	}
-
-	newStatus := ""
+	var (
+		affected int
+		err2     error
+	)
 	if body.Enabled {
-		// Re-check deps for this skill so its status reflects reality after being re-enabled.
-		sk, ok := h.skills.GetSkillByID(r.Context(), id)
-		if ok {
-			manifest := h.scanWithFallback(sk)
-			if manifest != nil && !manifest.IsEmpty() {
-				depOk, missing := skills.CheckSkillDeps(manifest)
-				_ = h.skills.StoreMissingDeps(r.Context(), id, missing)
-				if depOk {
-					newStatus = "active"
-				} else {
-					newStatus = "archived"
-				}
-			} else {
-				newStatus = "active"
-			}
-			_ = h.skills.UpdateSkill(r.Context(), id, map[string]any{"status": newStatus})
-		}
+		affected, err2 = h.skills.ClearUserDisableBySlug(r.Context(), sk.Slug)
+	} else {
+		affected, err2 = h.skills.SetUserDisableBySlug(r.Context(), sk.Slug)
 	}
-
+	if err2 != nil {
+		slog.Warn("skills.toggle: user-disable cascade failed",
+			"skill_id", idStr, "slug", sk.Slug, "enabled", body.Enabled, "error", err2)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "toggle")})
+		return
+	}
 	h.skills.BumpVersion()
 	h.emitCacheInvalidate(bus.CacheKindSkills, idStr, uuid.Nil)
-	emitAudit(h.msgBus, r, "skill.toggled", "skill", idStr)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "enabled": body.Enabled, "status": newStatus})
+	emitAudit(h.msgBus, r, "skill.user_toggled", "skill", sk.Slug)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":            "true",
+		"enabled":       body.Enabled,
+		"scope":         "user",
+		"affected_rows": affected,
+	})
 }
 
 // handleSetTenantConfig sets a per-tenant override for a skill.
