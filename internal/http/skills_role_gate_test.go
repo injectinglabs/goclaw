@@ -428,7 +428,12 @@ func TestRoleGate_TeamTenant_MemberCanDeleteOwnPrivateSkill(t *testing.T) {
 	}
 }
 
-func TestRoleGate_TeamTenant_MemberCannotDeleteOthersPublicSkill(t *testing.T) {
+// Grant-shared-catalog: a member calling DELETE on a public skill they
+// don't own gets their grant revoked ("removed from my catalog"), not a
+// 403. The canonical row stays for the owner + other grantees, but the
+// caller's Skills page no longer shows it. The response body says
+// action=revoked so the SPA can distinguish from a real delete.
+func TestRoleGate_TeamTenant_MemberDeleteOnOthersPublicRevokesGrant(t *testing.T) {
 	enableTokenedAuth(t)
 	ts := newMockTenantStore()
 	tenantID := uuid.New()
@@ -452,15 +457,23 @@ func TestRoleGate_TeamTenant_MemberCannotDeleteOthersPublicSkill(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.handleDelete(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("member delete others' public: status = %d, body = %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("member delete on others' public: status = %d, body = %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), roleGateDeniedSubstring) {
-		t.Fatalf("body = %s, expected substring %q", w.Body.String(), roleGateDeniedSubstring)
+	if !strings.Contains(w.Body.String(), `"action":"revoked"`) {
+		t.Fatalf("body = %s, expected action=revoked (grant-revoke shouldn't full-delete)", w.Body.String())
+	}
+	// The skill row itself must still exist — only the grant was touched.
+	if _, ok := skillStore.skills[skillID]; !ok {
+		t.Fatalf("skill row disappeared after grant revoke; expected canonical row intact for the owner")
 	}
 }
 
-func TestRoleGate_TeamTenant_AdminCanDeleteOthersPublicSkill(t *testing.T) {
+// Admins ARE NOT special for non-owner deletes either: a tenant admin
+// who didn't install a skill still only gets revoke on the public row.
+// Old code let admins nuke other admins' public skills which is bad UX
+// in a team workspace (senior wipes junior's shared catalog entry).
+func TestRoleGate_TeamTenant_AdminDeleteOnOthersPublicRevokesGrant(t *testing.T) {
 	enableTokenedAuth(t)
 	ts := newMockTenantStore()
 	tenantID := uuid.New()
@@ -486,6 +499,12 @@ func TestRoleGate_TeamTenant_AdminCanDeleteOthersPublicSkill(t *testing.T) {
 	h.handleDelete(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("admin delete others' public: status = %d, body = %s", w.Code, w.Body.String())
+		t.Fatalf("admin delete on others' public: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"action":"revoked"`) {
+		t.Fatalf("body = %s, expected action=revoked", w.Body.String())
+	}
+	if _, ok := skillStore.skills[skillID]; !ok {
+		t.Fatalf("skill row disappeared after admin grant revoke; expected canonical row intact")
 	}
 }

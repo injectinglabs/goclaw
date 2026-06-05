@@ -302,9 +302,15 @@ func (h *SkillsHandler) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ownership check (admins bypass)
-	auth := resolveAuth(r)
-	if !permissions.HasMinRole(auth.Role, permissions.RoleAdmin) {
+	// Ownership check. System-wide owner role (operator, set via gateway
+	// token + GOCLAW_OWNER_IDS) bypasses for support / migration tooling.
+	// Every other caller (including tenant admins authed by their own API
+	// key — whose api-key-derived role is RoleAdmin, not RoleOwner) must
+	// be the skill's owner_id to update it. Without the IsOwnerRole gate
+	// the old HasMinRole(auth.Role, RoleAdmin) check was always FALSE for
+	// regular users (their API key already grants RoleAdmin scope to
+	// reach this handler), making the inner ownership branch dead code.
+	if !store.IsOwnerRole(r.Context()) {
 		userID := store.UserIDFromContext(r.Context())
 		if ownerID, found := h.skills.GetSkillOwnerID(r.Context(), id); found && ownerID != userID {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the skill owner can perform this action"})
@@ -367,45 +373,51 @@ func (h *SkillsHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := store.UserIDFromContext(r.Context())
-	tenantID := store.TenantIDFromContext(r.Context())
 
-	// Combined ownership + role gate. Three permitted callers:
-	//   1. System-wide owner / API-key admin (bypass everything).
-	//   2. The skill row's own owner (can always delete their own skill).
-	//   3. A tenant owner/admin (can delete public skills owned by others).
-	// Everyone else gets 403.
-	auth := resolveAuth(r)
-	if !permissions.HasMinRole(auth.Role, permissions.RoleAdmin) {
+	// Grant-shared-catalog delete semantics. Match the integrations
+	// pattern so "Delete" never silently nukes a team-wide resource the
+	// caller doesn't own:
+	//
+	//   1. System owner role (operator) — full delete (cross-tenant ops).
+	//   2. The skill row's owner_id — full delete (their content).
+	//      Cascade kills skill_user_grants, S3 mirror, etc.
+	//   3. Anyone else — REVOKE their own grant (they "delete it from
+	//      their view"). The canonical row stays for the owner + other
+	//      grantees + public visibility. Returns 200 with action=revoked
+	//      so the SPA can re-render the row as "not in your catalog".
+	//
+	// Tenant admins are NOT special here — being admin doesn't give you
+	// rights over someone else's installed skill. Sharing is a permission
+	// the owner controls. (Old code let tenant admins delete any public
+	// skill, which meant a senior admin could wipe a junior admin's
+	// shared catalog entry. Bug — now disallowed.)
+	if !store.IsOwnerRole(r.Context()) {
 		ownerID, ownerFound := h.skills.GetSkillOwnerID(r.Context(), id)
 		isOwnerOfSkill := ownerFound && ownerID == userID
 		if !isOwnerOfSkill {
-			// Not the skill owner — only team owners/admins may delete a skill
-			// they don't own, and only when it's visibility=public (private
-			// skills owned by someone else are simply not theirs to touch).
-			sk, found := h.skills.GetSkillByID(r.Context(), id)
-			if !found {
+			// Confirm the row exists at all (else 404).
+			if _, found := h.skills.GetSkillByID(r.Context(), id); !found {
 				writeJSON(w, http.StatusNotFound, map[string]string{"error": i18n.T(locale, i18n.MsgNotFound, "skill", idStr)})
 				return
 			}
-			if sk.Visibility != "public" {
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the skill owner can perform this action"})
+			// Revoke the caller's grant. If they had no grant the operation
+			// is a no-op — return 200 anyway so the SPA can dismiss the row
+			// idempotently. (Revoke is the right action even when access
+			// came from visibility=public: a public row remains reachable
+			// to everyone in the tenant, and there is no per-user "hide"
+			// mechanism yet. Members who want to opt out of a public skill
+			// should disable it on their account-skill row, not delete it.)
+			if err := h.skills.RevokeFromUser(r.Context(), id, userID); err != nil {
+				slog.Warn("skills.delete: revoke grant failed",
+					"skill_id", idStr, "user_id", userID, "error", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "revoke grant")})
 				return
 			}
-			privileged, err := h.isOwnerOrAdmin(r.Context(), tenantID, userID)
-			if err != nil {
-				slog.Warn("skills.delete: role lookup failed",
-					"skill_id", idStr, "user_id", userID, "tenant_id", tenantID, "error", err)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "role lookup")})
-				return
-			}
-			if !privileged {
-				slog.Warn("security.skills.delete_role_denied",
-					"skill_id", idStr, "user_id", userID, "tenant_id", tenantID)
-				writeJSON(w, http.StatusForbidden, map[string]string{
-					"error": "Only owners and admins can install skills for the team. Use visibility=private to install for yourself.",
-				})
-				return
-			}
+			h.skills.BumpVersion()
+			h.emitCacheInvalidate(bus.CacheKindSkills, idStr, uuid.Nil)
+			emitAudit(h.msgBus, r, "skill.grant_revoked", "skill", idStr)
+			writeJSON(w, http.StatusOK, map[string]string{"ok": "true", "action": "revoked"})
+			return
 		}
 	}
 
@@ -421,7 +433,7 @@ func (h *SkillsHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 	h.skills.BumpVersion()
 	h.emitCacheInvalidate(bus.CacheKindSkills, idStr, uuid.Nil)
 	emitAudit(h.msgBus, r, "skill.deleted", "skill", idStr)
-	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "true", "action": "deleted"})
 }
 
 // handleInstallDeps installs missing dependencies for all system skills, then re-checks status.
