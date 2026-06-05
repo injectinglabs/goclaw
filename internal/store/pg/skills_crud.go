@@ -107,6 +107,21 @@ func tenantSlugAdvisoryLock(tenantID uuid.UUID, slug string) int64 {
 	return int64(h.Sum64())
 }
 
+// tenantSlugOwnerAdvisoryLock returns a stable int64 lock key derived
+// from tenant ID + slug + owner. Per-user model: two DIFFERENT users in
+// the same tenant installing the same slug don't contend on the lock
+// (they create separate rows); only concurrent installs by the SAME
+// user serialize. Used by CreateSkillManaged after migration 000071.
+func tenantSlugOwnerAdvisoryLock(tenantID uuid.UUID, slug, ownerID string) int64 {
+	h := fnv.New64a()
+	h.Write(tenantID[:])
+	h.Write([]byte{0})
+	h.Write([]byte(slug))
+	h.Write([]byte{0})
+	h.Write([]byte(ownerID))
+	return int64(h.Sum64())
+}
+
 // CreateSkillManaged creates or updates a skill from upload parameters.
 // It uses a transaction with an advisory lock on the slug to prevent concurrent
 // callers from racing on version calculation and upsert.
@@ -145,17 +160,22 @@ func (s *PGSkillStore) CreateSkillManaged(ctx context.Context, p store.SkillCrea
 		tenantID = store.MasterTenantID
 	}
 
-	// Acquire advisory lock scoped to this transaction so concurrent calls for
-	// the same (tenant, slug) pair serialize version calculation and the upsert atomically.
-	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock($1)", tenantSlugAdvisoryLock(tenantID, p.Slug)); err != nil {
+	// Advisory lock scoped to (tenant, slug, owner) so two concurrent
+	// installs of the same skill BY THE SAME USER serialize on version
+	// bump. Two DIFFERENT users installing the same slug don't contend —
+	// they get distinct rows under the new (tenant, slug, owner) unique
+	// constraint (migration 000071).
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock($1)", tenantSlugOwnerAdvisoryLock(tenantID, p.Slug, p.OwnerID)); err != nil {
 		return uuid.Nil, fmt.Errorf("advisory lock: %w", err)
 	}
 
-	// Compute next version atomically under the lock, scoped to tenant.
+	// Next version is scoped to THIS user's history of this slug.
+	// Two members reinstalling the same skill keep independent
+	// version numbers — no shared sequence to drift.
 	var version int
 	if err := tx.QueryRowContext(ctx,
-		"SELECT COALESCE(MAX(version), 0) + 1 FROM skills WHERE slug = $1 AND tenant_id = $2",
-		p.Slug, tenantID,
+		"SELECT COALESCE(MAX(version), 0) + 1 FROM skills WHERE slug = $1 AND tenant_id = $2 AND owner_id = $3",
+		p.Slug, tenantID, p.OwnerID,
 	).Scan(&version); err != nil {
 		return uuid.Nil, fmt.Errorf("get next version: %w", err)
 	}
@@ -171,9 +191,14 @@ func (s *PGSkillStore) CreateSkillManaged(ctx context.Context, p store.SkillCrea
 	id := store.GenNewID()
 	var returnedID uuid.UUID
 	err = tx.QueryRowContext(ctx,
+		// ON CONFLICT target is (tenant_id, slug, owner_id) — matches
+		// the per-user unique index from migration 000071. A second
+		// user installing the same slug INSERTs a new row instead of
+		// updating someone else's. The owner re-installing their own
+		// skill triggers the upsert branch and refreshes content.
 		`INSERT INTO skills (id, name, slug, description, owner_id, tenant_id, visibility, version, status, deps, frontmatter, file_path, file_size, file_hash, source_url, source_sha, source_ref, installed_by, installed_at, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW(), NOW())
-		 ON CONFLICT (tenant_id, slug) DO UPDATE SET
+		 ON CONFLICT (tenant_id, slug, owner_id) WHERE status != 'deleted' DO UPDATE SET
 		   name = EXCLUDED.name, description = EXCLUDED.description,
 		   version = EXCLUDED.version, frontmatter = EXCLUDED.frontmatter,
 		   file_path = EXCLUDED.file_path, deps = EXCLUDED.deps,
@@ -225,30 +250,54 @@ func (s *PGSkillStore) GetSkillFilePath(ctx context.Context, id uuid.UUID) (file
 	return filePath, slug, version, isSystem, err == nil
 }
 
-// GetNextVersion returns the next version number for a skill slug, scoped to tenant.
-// NOTE: This function has an inherent race condition — two concurrent callers
-// for the same slug can receive the same version number. Use it only for
-// informational purposes (e.g. display). For write paths, use CreateSkillManaged
-// which computes the version atomically under a pg_advisory_xact_lock.
+// GetNextVersion returns the next version number for the CURRENT
+// caller's row for this slug. Per-user model: each user has their own
+// version sequence, so two members reinstalling the same skill at
+// different times don't share version numbers (M1 may be on v3 while
+// M2 is on v1).
+//
+// NOTE: This function has an inherent race condition — two concurrent
+// installs by the SAME user can receive the same version. Use only for
+// informational purposes. For write paths, CreateSkillManaged computes
+// version atomically under tenantSlugOwnerAdvisoryLock.
 func (s *PGSkillStore) GetNextVersion(ctx context.Context, slug string) int {
 	tid := tenantIDForInsert(ctx)
+	ownerID := store.UserIDFromContext(ctx)
 	var maxVersion int
-	s.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM skills WHERE slug = $1 AND tenant_id = $2", slug, tid).Scan(&maxVersion)
+	if ownerID == "" {
+		// Fallback: cross-user view of slug (preview/admin tooling).
+		s.db.QueryRowContext(ctx,
+			"SELECT COALESCE(MAX(version), 0) FROM skills WHERE slug = $1 AND tenant_id = $2",
+			slug, tid).Scan(&maxVersion)
+	} else {
+		s.db.QueryRowContext(ctx,
+			"SELECT COALESCE(MAX(version), 0) FROM skills WHERE slug = $1 AND tenant_id = $2 AND owner_id = $3",
+			slug, tid, ownerID).Scan(&maxVersion)
+	}
 	return maxVersion + 1
 }
 
-// GetSkillHashBySlug returns the file_hash and version of the latest non-deleted skill
-// version for the given slug, scoped to the current tenant.
-// Returns ok=false when no matching row exists.
+// GetSkillHashBySlug returns the file_hash and version of the CURRENT
+// caller's latest non-deleted skill row for this slug. Per-user model:
+// the lookup is scoped by (tenant, slug, owner=caller) so two users in
+// the same tenant don't see each other's hashes. Returns ok=false when
+// the caller has never installed this slug.
 func (s *PGSkillStore) GetSkillHashBySlug(ctx context.Context, slug string) (string, int, bool) {
 	tid := tenantIDForInsert(ctx)
+	ownerID := store.UserIDFromContext(ctx)
+	if ownerID == "" {
+		// No caller user → nothing to lookup. The install handler must
+		// always set X-User-ID; return ok=false rather than leak a
+		// random row from someone else.
+		return "", 0, false
+	}
 	var hash string
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		`SELECT COALESCE(file_hash, ''), version FROM skills
-		 WHERE slug = $1 AND tenant_id = $2 AND status != 'deleted'
+		 WHERE slug = $1 AND tenant_id = $2 AND owner_id = $3 AND status != 'deleted'
 		 ORDER BY version DESC LIMIT 1`,
-		slug, tid,
+		slug, tid, ownerID,
 	).Scan(&hash, &version)
 	return hash, version, err == nil
 }
