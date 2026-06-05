@@ -2,7 +2,6 @@ package http
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -126,197 +124,106 @@ func (h *SkillsHandler) handleInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Locate SKILL.md (root, or single subdir level).
-	skillRoot, err := locateSkillRoot(tmpDir)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidRequest, err.Error())})
-		return
+	// 3. Discover SKILL.md location(s). Two paths:
+	//    - Single skill (Anthropic-style): SKILL.md at archive root or in a
+	//      single top-level dir. locateSkillRoot returns it directly.
+	//    - Bundle (community-style): the archive is a container with
+	//      skills/<sub>/SKILL.md inside. locateBundleSkillDirs walks the
+	//      tree up to 4 levels deep and returns each leaf containing a
+	//      SKILL.md. We loop the per-skill install in that case.
+	//
+	// Depth cap 4 lets us catch the realistic "marketing-skill/skills/foo/
+	// SKILL.md" layout without mining vendor trees.
+	skillRoots, bundle := []string{}, false
+	if root, lerr := locateSkillRoot(tmpDir); lerr == nil {
+		skillRoots = []string{root}
+	} else {
+		bundleDirs, _ := locateBundleSkillDirs(tmpDir, 4)
+		if len(bundleDirs) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": i18n.T(locale, i18n.MsgInvalidRequest, lerr.Error()),
+			})
+			return
+		}
+		skillRoots = bundleDirs
+		bundle = len(bundleDirs) > 1
 	}
 
-	skillMDPath := filepath.Join(skillRoot, "SKILL.md")
-	skillBytes, err := os.ReadFile(skillMDPath)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidRequest, "read SKILL.md: "+err.Error())})
-		return
-	}
-	skillContent := string(skillBytes)
-	if strings.TrimSpace(skillContent) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidRequest, "SKILL.md is empty")})
-		return
-	}
-
-	// 4. Security scan SKILL.md before any disk/DB write.
-	violations, safe := skills.GuardSkillContent(skillContent)
-	if !safe {
-		slog.Warn("security.skills.install_rejected",
-			"user_id", userID,
-			"source", body.Source,
-			"violations", len(violations),
-			"first_rule", violations[0].Reason)
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error":      i18n.T(locale, i18n.MsgInvalidRequest, "skill content failed security scan"),
-			"violations": skills.FormatGuardViolations(violations),
-		})
-		return
-	}
-
-	// 5. Parse frontmatter.
-	name, description, slug, frontmatter := skills.ParseSkillFrontmatter(skillContent)
-	if name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgRequired, "name in SKILL.md frontmatter")})
-		return
-	}
-	if slug == "" {
-		slug = skills.Slugify(name)
-	}
-	if !skills.SlugRegexp.MatchString(slug) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidSlug, "slug")})
-		return
-	}
-	if h.skills.IsSystemSkill(slug) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidRequest, "slug conflicts with a system skill")})
-		return
-	}
-
-	// 6. Determine version + destination dir, under per-tenant slug lock.
-	tenantSkillsBase := h.tenantSkillsDir(r)
-	uploadLock := h.skillUploadLock(filepath.Join(tenantSkillsBase, slug))
-	uploadLock.Lock()
-	defer uploadLock.Unlock()
-
-	// Content-hash idempotency: rerunning the same install with identical
-	// SKILL.md returns the existing version unchanged. We use the SKILL.md
-	// content hash (not the tarball hash) so mirrors / re-archived payloads
-	// dedupe cleanly.
-	contentHash := fmt.Sprintf("%x", sha256.Sum256(skillBytes))
-	existingHash, existingVer, skillExists := h.skills.GetSkillHashBySlug(r.Context(), slug)
-	if skillExists && existingHash != "" && existingHash == contentHash {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"slug":       slug,
-			"version":    existingVer,
-			"name":       name,
-			"status":     "unchanged",
-			"source_sha": resolvedSHA,
-		})
-		return
-	}
-
-	version := h.skills.GetNextVersion(r.Context(), slug)
-	destDir := filepath.Join(tenantSkillsBase, slug, fmt.Sprintf("%d", version))
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "mkdir dest")})
-		return
-	}
-
-	// 7. Copy extracted files from skillRoot → destDir.
-	totalSize, err := copyTreeFiltered(skillRoot, destDir)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "copy: "+err.Error())})
-		return
-	}
-
-	// 8. Scan deps + check.
-	desc := description
-	hashCopy := contentHash
-	sourceURLCopy := sourceURL
-	resolvedSHACopy := resolvedSHA
-	sourceRefCopy := sourceRef
-	installedByCopy := userID
-
-	skill := store.SkillCreateParams{
-		Name:        name,
-		Slug:        slug,
-		Description: &desc,
-		OwnerID:     userID,
-		Visibility:  visibility,
-		Version:     version,
-		FilePath:    destDir,
-		FileSize:    totalSize,
-		FileHash:    &hashCopy,
-		Frontmatter: frontmatter,
-		SourceURL:   &sourceURLCopy,
-		SourceSHA:   &resolvedSHACopy,
-		SourceRef:   &sourceRefCopy,
-		InstalledBy: &installedByCopy,
-	}
-
-	isNew := !skillExists
-	response := map[string]any{
-		"slug":       slug,
-		"version":    version,
-		"name":       name,
-		"status":     "active",
-		"is_new":     isNew,
-		"source_sha": resolvedSHA,
-	}
-
-	depState := uploadSkillDepState{}
+	// Shared deps context — survives request cancellation so an HTTP
+	// timeout/disconnect doesn't orphan partially-written DB rows.
 	depsCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), uploadDepsInstallTimeout)
 	defer cancel()
 
-	manifest := skills.ScanSkillDeps(destDir)
-	if manifest != nil && !manifest.IsEmpty() {
-		if ok, missing := checkUploadedSkillDeps(manifest); !ok {
-			depState = h.reconcileUploadedSkillDeps(
-				depsCtx,
-				slug,
-				manifest,
-				missing,
-				canAutoInstallUploadedSkillDeps(r.Context()),
-			)
-			skill.Status = depState.status
-			skill.MissingDeps = depState.missing
-			for k, v := range depState.response {
-				response[k] = v
+	tenantSkillsBase := h.tenantSkillsDir(r)
+	tenantSlugForMirror := store.TenantSlugFromContext(r.Context())
+
+	// 4. Install each discovered skill. For the single-skill path we
+	// surface any failure as the HTTP response so the existing client
+	// contract is preserved. For a bundle we log per-skill failures and
+	// keep going — half a bundle is better than no bundle, and the user
+	// can re-install any missed sub-skills explicitly.
+	installed := make([]map[string]any, 0, len(skillRoots))
+	var bundleFirstErr *installOneSkillError
+	for _, skillRoot := range skillRoots {
+		res, ierr := h.installOneSkillFromDir(installOneSkillParams{
+			ctx:              depsCtx,
+			r:                r,
+			locale:           locale,
+			skillRoot:        skillRoot,
+			extractRoot:      tmpDir,
+			userID:           userID,
+			visibility:       visibility,
+			parentSourceURL:  sourceURL,
+			resolvedSHA:      resolvedSHA,
+			sourceRef:        sourceRef,
+			tenantSkillsBase: tenantSkillsBase,
+			tenantSlug:       tenantSlugForMirror,
+			originalSource:   body.Source,
+		})
+		if ierr != nil {
+			if !bundle {
+				writeJSON(w, ierr.statusCode, ierr.body)
+				return
 			}
+			slog.Warn("skills.install.bundle.sub_install_failed",
+				"skill_root", skillRoot, "error", ierr.Error())
+			if bundleFirstErr == nil {
+				bundleFirstErr = ierr
+			}
+			continue
 		}
+		installed = append(installed, res.response)
 	}
 
-	// 9. DB write (uses non-cancellable depsCtx so disconnects don't orphan files).
-	id, err := h.skills.CreateSkillManaged(depsCtx, skill)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgFailedToCreate, "skill", err.Error())})
+	// 5. Respond. Single-skill keeps the historical shape; bundle returns
+	// a wrapped envelope so the SPA can show "Installed N skills" toast.
+	if !bundle {
+		if len(installed) > 0 {
+			// Idempotent reruns (status=unchanged) use 200; new installs
+			// use 201. Both shapes are unchanged from the pre-refactor API.
+			status := http.StatusCreated
+			if s, _ := installed[0]["status"].(string); s == "unchanged" {
+				status = http.StatusOK
+			}
+			writeJSON(w, status, installed[0])
+		}
 		return
 	}
-	response["id"] = id
-
-	// 10. Auto-grant to calling user so the installer immediately sees the
-	// skill via ListAccessible. Best-effort — log on failure.
-	if err := h.skills.GrantToUser(depsCtx, id, userID, userID); err != nil {
-		slog.Warn("skills.install: auto-grant failed", "skill", slug, "user", userID, "error", err)
+	if len(installed) == 0 {
+		// Whole bundle failed. Surface the first error so the user has
+		// something actionable, not a generic "0 skills installed".
+		body := map[string]any{"error": "bundle install: no sub-skills could be installed"}
+		if bundleFirstErr != nil {
+			body["first_error"] = bundleFirstErr.Error()
+		}
+		writeJSON(w, http.StatusBadRequest, body)
+		return
 	}
-
-	// 11. Audit row in skill_install_events.
-	h.insertInstallEvent(depsCtx, slug, "installed", sourceURL, resolvedSHA, userID, map[string]any{
-		"ref":     sourceRef,
-		"version": version,
-		"is_new":  isNew,
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"bundle":    true,
+		"count":     len(installed),
+		"installed": installed,
 	})
-
-	// 12. Bump cache + emit invalidate.
-	h.skills.BumpVersion()
-	h.emitCacheInvalidate(bus.CacheKindSkills, id.String(), uuid.Nil)
-	emitAudit(h.msgBus, r, "skill.installed", "skill", slug)
-	depState.emit(h, slug)
-
-	// 13. Mirror to S3 so sibling ASG nodes can serve this skill from a
-	//     cold local cache. Async + detached context: the handler's
-	//     depsCtx is cancelled by `defer cancel()` as soon as we return,
-	//     so the goroutine needs its own deadline. 5 min covers the
-	//     largest realistic skill (Anthropic algorithmic-art is ~1 MB,
-	//     skill-creator ~3 MB).
-	tenantSlugForMirror := store.TenantSlugFromContext(r.Context())
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		h.mirrorSkillToS3(bgCtx, tenantSlugForMirror, slug, version, destDir)
-	}()
-
-	slog.Info("skill installed from source",
-		"id", id, "slug", slug, "version", version,
-		"source", body.Source, "source_sha", resolvedSHA)
-
-	writeJSON(w, http.StatusCreated, response)
 }
 
 // fetchSkillTarball resolves a SkillSource to a temp tarball path. Returns
@@ -371,6 +278,48 @@ func locateSkillRoot(dir string) (string, error) {
 		}
 	}
 	return "", errors.New("SKILL.md not found at archive root or in single top-level directory")
+}
+
+// locateBundleSkillDirs walks dir up to maxDepth levels looking for every
+// directory that contains a SKILL.md. Used when the archive is a community
+// "plugin" — a container whose actual skill files live deeper, typically
+// under skills/<sub-name>/SKILL.md or <sub-name>/SKILL.md.
+//
+// Returned paths are absolute and exclude any directory locateSkillRoot
+// would already have caught — the bundle path is only meaningful when the
+// straightforward lookup failed. Order is lexicographic so a bundle install
+// always produces a deterministic skill order in the response.
+func locateBundleSkillDirs(dir string, maxDepth int) ([]string, error) {
+	rootAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	var found []string
+	err = filepath.WalkDir(rootAbs, func(p string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			// Skip system/hidden artifacts (.git, __MACOSX, node_modules, …)
+			if p != rootAbs && skills.IsSystemArtifact(d.Name()) {
+				return filepath.SkipDir
+			}
+			// Depth cap: avoid mining N-level vendor trees by accident.
+			rel, _ := filepath.Rel(rootAbs, p)
+			if rel != "." && strings.Count(rel, string(filepath.Separator)) >= maxDepth {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() == "SKILL.md" {
+			found = append(found, filepath.Dir(p))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return found, nil
 }
 
 // copyTreeFiltered copies regular files from src to dst recursively, skipping
