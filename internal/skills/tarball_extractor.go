@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -31,10 +32,10 @@ const (
 // or tail components that re-emerge after filepath.Clean.
 var pathTraversalRE = regexp.MustCompile(`(^|[/\\])\.\.([/\\]|$)`)
 
-// Sentinels for extraction failures.
+// Sentinels for extraction failures. Symlinks/hardlinks are silently
+// dropped rather than errored — see the link case below for the rationale.
 var (
 	ErrTarballPathTraversal = errors.New("tarball_extractor: path traversal rejected")
-	ErrTarballSymlinkEscape = errors.New("tarball_extractor: symlink escape rejected")
 	ErrTarballTooManyFiles  = errors.New("tarball_extractor: file count exceeds 500")
 	ErrTarballTooLarge      = errors.New("tarball_extractor: extracted size exceeds 20MB")
 )
@@ -192,8 +193,24 @@ func extractTarballInternal(tarballPath, destDir, subdir string) error {
 		case tar.TypeReg, tar.TypeRegA:
 			// fall through
 		case tar.TypeSymlink, tar.TypeLink:
-			return fmt.Errorf("%w: symlink/hardlink %q -> %q",
-				ErrTarballSymlinkEscape, entryName, hdr.Linkname)
+			// We deliberately drop symlinks/hardlinks instead of refusing
+			// the whole archive. Materialising them would invite escape
+			// attacks (a link to `../../../etc/passwd` resolved at read
+			// time bypasses the path-traversal guard), and S3 mirroring
+			// has no concept of links anyway — they'd just become broken
+			// references downstream.
+			//
+			// Dropping is correct for the common case we see in the wild:
+			// docs cross-references (`AGENTS.md -> CLAUDE.md`, source
+			// trees that symlink siblings). The skill loses the linked
+			// file's content, but the SKILL.md and primary scripts —
+			// which are what the agent actually executes — remain intact.
+			//
+			// This matches the policy already used by archive_extract.go
+			// for the same reason.
+			slog.Warn("tarball_extractor: dropping link entry",
+				"name", entryName, "target", hdr.Linkname, "type", string(hdr.Typeflag))
+			continue
 		default:
 			// Devices, FIFOs, sparse markers, etc. — skip silently.
 			continue
