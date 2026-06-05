@@ -71,14 +71,16 @@ func (h *SkillsHandler) handleInstall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if visibility == "" {
-		// Default visibility: privileged callers publish team-wide, others install
-		// for themselves only. This preserves the "shared catalog by default"
-		// behaviour for owners/admins while keeping member installs from leaking.
-		if isPrivilegedWriter {
-			visibility = "public"
-		} else {
-			visibility = "private"
-		}
+		// Default visibility is ALWAYS private — even for admins/owners.
+		// Matches the install-modal helper text the user just saw
+		// ("Skill will be installed privately. You can share it with
+		// your team after install.") and mirrors the integrations
+		// pattern: connect an account privately, click "Share with team"
+		// when ready. Sharing-on-install was the old behaviour but it
+		// surprised admins who were just trying a skill — a public
+		// install in a team org silently exposed an unvetted third-party
+		// skill to everyone on the next chat turn.
+		visibility = "private"
 	}
 
 	if visibility == "public" && !isPrivilegedWriter {
