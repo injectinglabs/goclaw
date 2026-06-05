@@ -314,7 +314,7 @@ func newTestUploadHandler(t *testing.T) (*SkillsHandler, *skillManageStoreStub, 
 	root := t.TempDir()
 	baseDir := filepath.Join(root, "skills-store")
 	skillStore := newSkillManageStoreStub(baseDir)
-	handler := NewSkillsHandler(skillStore, baseDir, root, "", bus.New(), nil, nil)
+	handler := NewSkillsHandler(skillStore, baseDir, root, "", bus.New(), nil, nil, nil)
 	ctx := store.WithLocale(
 		store.WithTenantID(
 			store.WithUserID(context.Background(), "user-1"),
@@ -366,21 +366,25 @@ func skillMarkdown(name, slug string) string {
 }
 
 type skillManageStoreStub struct {
-	baseDir    string
-	version    int64
-	nextBySlug map[string]int
-	skills     map[uuid.UUID]store.SkillInfo
-	systemDirs map[string]string
-	hashBySlug map[string]string // slug -> SKILL.md content hash (most recent)
+	baseDir     string
+	version     int64
+	nextBySlug  map[string]int
+	skills      map[uuid.UUID]store.SkillInfo
+	systemDirs  map[string]string
+	hashBySlug  map[string]string // slug -> SKILL.md content hash (most recent)
+	ownerBySlug map[string]string // slug -> owner_id (most recent)
+	ownerByID   map[uuid.UUID]string
 }
 
 func newSkillManageStoreStub(baseDir string) *skillManageStoreStub {
 	return &skillManageStoreStub{
-		baseDir:    baseDir,
-		nextBySlug: map[string]int{},
-		skills:     map[uuid.UUID]store.SkillInfo{},
-		systemDirs: map[string]string{},
-		hashBySlug: map[string]string{},
+		baseDir:     baseDir,
+		nextBySlug:  map[string]int{},
+		skills:      map[uuid.UUID]store.SkillInfo{},
+		systemDirs:  map[string]string{},
+		hashBySlug:  map[string]string{},
+		ownerBySlug: map[string]string{},
+		ownerByID:   map[uuid.UUID]string{},
 	}
 }
 
@@ -401,6 +405,13 @@ func (s *skillManageStoreStub) seedSystemSkill(slug, dir string) {
 }
 
 func (s *skillManageStoreStub) ListSkills(context.Context) []store.SkillInfo {
+	return s.ListAllSkills(context.Background())
+}
+
+// ListSkillsForUser mirrors ListSkills for the upload-handler stub — the
+// upload tests don't exercise the per-user visibility filter (covered by
+// pg/skills_visibility_test.go).
+func (s *skillManageStoreStub) ListSkillsForUser(_ context.Context, _, _ string) []store.SkillInfo {
 	return s.ListAllSkills(context.Background())
 }
 
@@ -442,11 +453,20 @@ func (s *skillManageStoreStub) CreateSkillManaged(_ context.Context, p store.Ski
 		Slug:        p.Slug,
 		Path:        filepath.Join(p.FilePath, "SKILL.md"),
 		BaseDir:     p.FilePath,
+		Visibility:  p.Visibility,
 		Version:     version,
 		Status:      status,
 		Enabled:     true,
 		MissingDeps: append([]string(nil), p.MissingDeps...),
 	}
+	if s.ownerBySlug == nil {
+		s.ownerBySlug = map[string]string{}
+	}
+	if s.ownerByID == nil {
+		s.ownerByID = map[uuid.UUID]string{}
+	}
+	s.ownerBySlug[p.Slug] = p.OwnerID
+	s.ownerByID[id] = p.OwnerID
 	// Track the content hash for idempotency checks (mirrors handler behaviour).
 	if p.FileHash != nil {
 		s.hashBySlug[p.Slug] = *p.FileHash
@@ -472,6 +492,9 @@ func (s *skillManageStoreStub) UpdateSkill(_ context.Context, id uuid.UUID, upda
 	if status, ok := updates["status"].(string); ok {
 		skill.Status = status
 	}
+	if vis, ok := updates["visibility"].(string); ok {
+		skill.Visibility = vis
+	}
 	s.skills[id] = skill
 	return nil
 }
@@ -482,10 +505,16 @@ func (s *skillManageStoreStub) GetSkillByID(_ context.Context, id uuid.UUID) (st
 	info, ok := s.skills[id]
 	return info, ok
 }
-func (s *skillManageStoreStub) GetSkillOwnerID(context.Context, uuid.UUID) (string, bool) {
+func (s *skillManageStoreStub) GetSkillOwnerID(_ context.Context, id uuid.UUID) (string, bool) {
+	if owner, ok := s.ownerByID[id]; ok && owner != "" {
+		return owner, true
+	}
 	return "", false
 }
-func (s *skillManageStoreStub) GetSkillOwnerIDBySlug(context.Context, string) (string, bool) {
+func (s *skillManageStoreStub) GetSkillOwnerIDBySlug(_ context.Context, slug string) (string, bool) {
+	if owner, ok := s.ownerBySlug[slug]; ok && owner != "" {
+		return owner, true
+	}
 	return "", false
 }
 func (s *skillManageStoreStub) GetNextVersion(_ context.Context, slug string) int {

@@ -51,7 +51,15 @@ var skillGuardRules = []guardRule{
 	{regexp.MustCompile(`(?i)(curl|wget)\s+\S+.*\$\{?(HOME|USER|PASS|KEY|SECRET|TOKEN)`), "env var exfiltration via HTTP"},
 
 	// --- Path traversal ---
-	{regexp.MustCompile(`\.\./\.\./\.\./`),                          "deep path traversal (../../..)"},
+	// Only reject deep path traversal when followed by a known sensitive
+	// destination — bare "../../.." appears in legitimate documentation
+	// (e.g. community skill repos like Alireza Skills explain relative
+	// paths inline) and a blanket rule produced too many false positives.
+	// The dangerous shapes are reach-into-system-dir attempts, captured
+	// explicitly here. If a real-world attack adds a new target we expand
+	// this list rather than reverting to the blanket pattern.
+	{regexp.MustCompile(`\.\./\.\./\.\./(etc|proc|root|sys|var|home)/`), "deep path traversal to sensitive dir"},
+	{regexp.MustCompile(`\.\./\.\./\.\./[^\s]*\.(ssh|aws|kube|docker)`), "deep path traversal to credential dir"},
 
 	// --- SQL injection ---
 	{regexp.MustCompile(`(?i)\bDROP\s+TABLE\b`),                     "SQL DROP TABLE"},

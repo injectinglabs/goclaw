@@ -81,4 +81,11 @@ type TenantStore interface {
 	// CreateTenantUserReturning creates a tenant_user and returns the row.
 	// On conflict (tenant_id, user_id), updates role/display_name and returns existing row.
 	CreateTenantUserReturning(ctx context.Context, tenantID uuid.UUID, userID, displayName, role string) (*TenantUserData, error)
+
+	// IsOwnerOrAdmin returns true when userID can perform team-wide writes
+	// in tenantID. Personal tenants (single tenant_users row) are treated
+	// as implicitly admin for that single member, so single-user installs
+	// never get blocked. Otherwise the call returns true iff the user's
+	// role is "owner" or "admin".
+	IsOwnerOrAdmin(ctx context.Context, tenantID uuid.UUID, userID string) (bool, error)
 }

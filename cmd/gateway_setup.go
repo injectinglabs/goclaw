@@ -521,7 +521,8 @@ func setupSkillsSystem(
 	skillsLoader := skills.NewLoader(workspace, globalSkillsDir, builtinSkillsDir)
 	skillSearchTool := tools.NewSkillSearchTool(skillsLoader)
 	toolsReg.Register(skillSearchTool)
-	toolsReg.Register(tools.NewUseSkillTool())
+	useSkillTool := tools.NewUseSkillTool()
+	toolsReg.Register(useSkillTool)
 	slog.Info("skill_search tool registered", "skills", len(skillsLoader.ListSkills(context.Background())))
 
 	// Wire skills-store directory into filesystem loader so agents
@@ -582,6 +583,10 @@ func setupSkillsSystem(
 	if pgStores.Skills != nil {
 		if sas, ok := pgStores.Skills.(store.SkillAccessStore); ok {
 			skillSearchTool.SetSkillAccessStore(sas)
+			// use_skill needs the same gate — otherwise a tenant member
+			// can coerce the model into "activating" another member's
+			// private skill. See use_skill.go.
+			useSkillTool.SetSkillAccessStore(sas)
 		}
 		if pgSkills, ok := pgStores.Skills.(*pg.PGSkillStore); ok {
 			if embProvider := resolveEmbeddingProvider(pgStores.Providers, providerRegistry, pgStores.SystemConfigs); embProvider != nil {

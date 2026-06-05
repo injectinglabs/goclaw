@@ -1,9 +1,13 @@
 package cmd
 
 import (
+	"context"
+	"log/slog"
+
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
+	skillstorage "github.com/nextlevelbuilder/goclaw/internal/skills/storage"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
@@ -35,8 +39,21 @@ func wireHTTP(stores *store.Stores, defaultWorkspace, dataDir, bundledSkillsDir 
 		if manageStore, ok := stores.Skills.(store.SkillManageStore); ok {
 			dirs := manageStore.Dirs()
 			if len(dirs) > 0 {
-				skillsH = httpapi.NewSkillsHandler(manageStore, dirs[0], dataDir, bundledSkillsDir, msgBus, stores.SkillTenantCfgs, stores.Tenants)
+				skillsH = httpapi.NewSkillsHandler(manageStore, dirs[0], dataDir, bundledSkillsDir, msgBus, stores.SkillTenantCfgs, stores.Tenants, stores.SkillHubs)
 				skillsH.SetDB(stores.DB)
+				// S3 mirror is opt-in via GOCLAW_SKILLS_S3_BUCKET. When set,
+				// install/update will durably mirror the extracted skill
+				// tree so a sibling ASG node can serve it. Wiring failure
+				// is logged but non-fatal — the handler stays usable in
+				// local-only mode.
+				if cfg := skillstorage.LoadConfigFromEnv(); cfg.Enabled() {
+					if mirror, err := skillstorage.NewMirror(context.Background(), cfg); err != nil {
+						slog.Warn("skills.s3.mirror_init_failed", "bucket", cfg.Bucket, "error", err)
+					} else {
+						skillsH.SetS3Mirror(mirror)
+						slog.Info("skills.s3.mirror_enabled", "bucket", cfg.Bucket, "prefix", cfg.Prefix)
+					}
+				}
 			}
 		}
 	}

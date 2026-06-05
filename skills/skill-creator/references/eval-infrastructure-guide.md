@@ -112,9 +112,9 @@ Read `feedback.json`, generalize from patterns:
 - Data processing: +50-80% pass rate, -30-50% time
 - Analysis: +30-50% pass rate
 
-## GoClaw Eval Context
+## Eval Context
 
-GoClaw agents run via WebSocket RPC. Eval runs execute within the agent loop (think→act→observe).
+agents run via WebSocket RPC. Eval runs execute within the agent loop (think→act→observe).
 
 - Spawn parallel eval runs as subagent tasks (each in its own session)
 - Baseline run: same prompt, skill disabled (`enabled=false` via Admin UI or toggle API)

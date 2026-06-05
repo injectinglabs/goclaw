@@ -3,7 +3,7 @@
 ## Directory Structure
 
 ```
-~/.goclaw/skills-store/
+~/skills-store/
 └── skill-name/           ← directory name IS the slug (unique DB identifier)
     ├── SKILL.md          (required, <300 lines)
     │   ├── YAML frontmatter (name, description required)
@@ -41,14 +41,14 @@ allowed-tools: "Bash(python3:*) Bash(node:*)"  # optional, experimental
 ---
 ```
 
-**Key:** `name` must be lowercase, kebab-case, and **match the directory name exactly** — GoClaw uses the directory name as the slug (DB key). Changing directory name = new skill.
+**Key:** `name` must be lowercase, kebab-case, and **match the directory name exactly** — agent runtime uses the directory name as the slug (DB key). Changing directory name = new skill.
 
 **Metadata quality** determines auto-activation. See `references/metadata-quality-criteria.md`.
 
 ## Scripts (`scripts/`)
 
 - Deterministic code for repeated tasks
-- **Prefer:** Python or Node.js (available in GoClaw runtime)
+- **Prefer:** Python or Node.js (available in agent runtime runtime)
 - **Avoid:** Bash scripts for complex logic
 - Runtime packages: use `pip3 install <pkg>` or `npm install -g <pkg>` (no sudo needed, persists in `/app/data/.runtime/`)
 - Token-efficient: executed without loading into context

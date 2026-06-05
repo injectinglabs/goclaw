@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -159,21 +160,35 @@ func (s *PGSkillStore) CreateSkillManaged(ctx context.Context, p store.SkillCrea
 		return uuid.Nil, fmt.Errorf("get next version: %w", err)
 	}
 
+	// installedAt is populated only when source-tracking fields are set
+	// (i.e. this came from POST /v1/skills/install). NULL otherwise so we
+	// don't backfill local-upload rows with a fake install timestamp.
+	var installedAt any
+	if p.SourceURL != nil || p.SourceSHA != nil || p.InstalledBy != nil {
+		installedAt = time.Now().UTC()
+	}
+
 	id := store.GenNewID()
 	var returnedID uuid.UUID
 	err = tx.QueryRowContext(ctx,
-		`INSERT INTO skills (id, name, slug, description, owner_id, tenant_id, visibility, version, status, deps, frontmatter, file_path, file_size, file_hash, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
+		`INSERT INTO skills (id, name, slug, description, owner_id, tenant_id, visibility, version, status, deps, frontmatter, file_path, file_size, file_hash, source_url, source_sha, source_ref, installed_by, installed_at, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW(), NOW())
 		 ON CONFLICT (tenant_id, slug) DO UPDATE SET
 		   name = EXCLUDED.name, description = EXCLUDED.description,
 		   version = EXCLUDED.version, frontmatter = EXCLUDED.frontmatter,
 		   file_path = EXCLUDED.file_path, deps = EXCLUDED.deps,
 		   file_size = EXCLUDED.file_size, file_hash = EXCLUDED.file_hash,
+		   source_url = COALESCE(EXCLUDED.source_url, skills.source_url),
+		   source_sha = COALESCE(EXCLUDED.source_sha, skills.source_sha),
+		   source_ref = COALESCE(EXCLUDED.source_ref, skills.source_ref),
+		   installed_by = COALESCE(EXCLUDED.installed_by, skills.installed_by),
+		   installed_at = COALESCE(EXCLUDED.installed_at, skills.installed_at),
 		   visibility = CASE WHEN skills.status IN ('archived', 'deleted') THEN 'private' ELSE skills.visibility END,
 		   status = EXCLUDED.status, updated_at = NOW()
 		 RETURNING id`,
 		id, p.Name, p.Slug, p.Description, p.OwnerID, tenantID, p.Visibility, version,
 		status, depsJSON, fmJSON, p.FilePath, p.FileSize, p.FileHash,
+		p.SourceURL, p.SourceSHA, p.SourceRef, p.InstalledBy, installedAt,
 	).Scan(&returnedID)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("upsert skill: %w", err)

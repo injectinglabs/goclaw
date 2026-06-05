@@ -40,6 +40,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
+	skillstorage "github.com/nextlevelbuilder/goclaw/internal/skills/storage"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 	"github.com/nextlevelbuilder/goclaw/internal/vault"
@@ -515,6 +516,22 @@ func runGateway() {
 	if mediaStore != nil {
 		if s3b, ok := mediaStore.Backend().(*media.S3Backend); ok {
 			s3b.StartSweeper(ctx, mediaSweeperConfigFromEnv())
+		}
+	}
+
+	// Skills S3 backing: when the mirror is wired (GOCLAW_SKILLS_S3_BUCKET),
+	// run a one-shot startup sync so a fresh ASG node picks up every skill
+	// installed on a sibling, then start the disk-pressure sweeper that
+	// evicts archived versions when the EBS volume gets tight. Both are
+	// safe no-ops when the mirror is nil (lite / single-node mode).
+	if skillsH != nil {
+		if mirror := skillsH.S3Mirror(); mirror != nil {
+			if _, err := skillstorage.SyncFromS3(ctx, pgStores.DB, mirror, dataDir); err != nil {
+				slog.Warn("skills.s3.startup_sync_failed", "error", err)
+			}
+			if sw := skillstorage.NewSweeper(mirror, pgStores.DB, dataDir); sw != nil {
+				sw.Start(ctx, skillsSweeperConfigFromEnv())
+			}
 		}
 	}
 

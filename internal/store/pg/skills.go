@@ -29,7 +29,12 @@ type PGSkillStore struct {
 	// List cache: per-tenant cached result of ListSkills() with version + TTL validation.
 	// Key is tenant UUID; uuid.Nil = cross-tenant (system admin).
 	listCache map[uuid.UUID]*listCacheEntry
-	ttl       time.Duration
+	// listForUserCache: per-(tenant, user, isAdmin) cached result of
+	// ListSkillsForUser(). Sharing the same version counter as listCache
+	// means a Share/Unshare/install bumps both caches in lockstep — see
+	// BumpVersion() callers in skills_grants.go / skills_crud.go.
+	listForUserCache map[listForUserCacheKey]*listCacheEntry
+	ttl              time.Duration
 
 	// Embedding provider for vector-based skill search
 	embProvider store.EmbeddingProvider
@@ -42,13 +47,24 @@ type listCacheEntry struct {
 	time   time.Time
 }
 
+// listForUserCacheKey identifies a per-(tenant, user, isAdmin) cache slot.
+// Role collapses to a boolean — admins/owners see everything, everyone else
+// sees the same filtered set, so caching by role-string would just bloat the
+// map without changing behaviour.
+type listForUserCacheKey struct {
+	tenant  uuid.UUID
+	user    string
+	isAdmin bool
+}
+
 func NewPGSkillStore(db *sql.DB, baseDir string) *PGSkillStore {
 	return &PGSkillStore{
-		db:        db,
-		baseDir:   baseDir,
-		cache:     make(map[string]*store.SkillInfo),
-		listCache: make(map[uuid.UUID]*listCacheEntry),
-		ttl:       defaultSkillsCacheTTL,
+		db:               db,
+		baseDir:          baseDir,
+		cache:            make(map[string]*store.SkillInfo),
+		listCache:        make(map[uuid.UUID]*listCacheEntry),
+		listForUserCache: make(map[listForUserCacheKey]*listCacheEntry),
+		ttl:              defaultSkillsCacheTTL,
 	}
 }
 
@@ -78,7 +94,9 @@ func (s *PGSkillStore) ListSkills(ctx context.Context) []store.SkillInfo {
 	// Tenant filter: system skills visible globally, custom skills scoped to tenant.
 	var scanned []skillInfoRowWithFrontmatter
 	if err := pkgSqlxDB.SelectContext(ctx, &scanned,
-		`SELECT id, name, slug, description, visibility, tags, version, is_system, status, enabled, deps, frontmatter, file_path
+		`SELECT id, name, slug, description, visibility, tags, version, is_system, status, enabled, deps, frontmatter, file_path,
+		        source_url, source_sha, source_ref, installed_by, installed_at,
+		        update_available_sha, update_available_ref, last_update_check
 		 FROM skills WHERE (status IN ('active', 'archived') OR is_system = true) AND (is_system = true OR tenant_id = $1)
 		 ORDER BY name`, tid); err != nil {
 		return nil
@@ -91,6 +109,75 @@ func (s *PGSkillStore) ListSkills(ctx context.Context) []store.SkillInfo {
 
 	s.mu.Lock()
 	s.listCache[tid] = &listCacheEntry{skills: result, ver: currentVer, time: time.Now()}
+	s.mu.Unlock()
+
+	return result
+}
+
+// ListSkillsForUser implements SkillStore. Mirrors the ListAccessible
+// (skills_grants.go) visibility logic but without the per-agent dimension —
+// HTTP / WS list surfaces are workspace-level, not agent-scoped. Filter:
+//
+//   - system skills (is_system = true)                             // global
+//   - tenant.visibility = 'public'                                 // shared
+//   - tenant.owner_id = $userID                                    // own
+//   - EXISTS (skill_user_grants.user_id = $userID)                 // granted
+//   - role IN ('owner','admin')                                    // moderation
+//
+// All filters rely on existing indexes: idx_skills_tenant, idx_skills_owner,
+// idx_skills_visibility (partial WHERE status='active'),
+// skill_user_grants(skill_id, user_id) unique. No new indexes required.
+func (s *PGSkillStore) ListSkillsForUser(ctx context.Context, userID, role string) []store.SkillInfo {
+	currentVer := s.version.Load()
+	tid := store.TenantIDFromContext(ctx)
+	if tid == uuid.Nil {
+		tid = store.MasterTenantID
+	}
+	isAdmin := role == store.TenantRoleOwner || role == store.TenantRoleAdmin
+
+	key := listForUserCacheKey{tenant: tid, user: userID, isAdmin: isAdmin}
+	s.mu.RLock()
+	if entry := s.listForUserCache[key]; entry != nil && entry.ver == currentVer && time.Since(entry.time) < s.ttl {
+		result := entry.skills
+		s.mu.RUnlock()
+		return result
+	}
+	s.mu.RUnlock()
+
+	// Admins/owners get the unfiltered list — same query as ListSkills.
+	// Skipping the visibility predicate avoids a needless Bitmap-OR for the
+	// hot path of "owner opens Skills page", where they must see everything
+	// they can share/unshare anyway.
+	visibilityClause := ""
+	args := []any{tid}
+	if !isAdmin {
+		visibilityClause = ` AND (
+			is_system = true
+			OR visibility = 'public'
+			OR owner_id = $2
+			OR EXISTS (SELECT 1 FROM skill_user_grants g WHERE g.skill_id = skills.id AND g.user_id = $2)
+		)`
+		args = append(args, userID)
+	}
+
+	var scanned []skillInfoRowWithFrontmatter
+	if err := pkgSqlxDB.SelectContext(ctx, &scanned,
+		`SELECT id, name, slug, description, visibility, tags, version, is_system, status, enabled, deps, frontmatter, file_path,
+		        source_url, source_sha, source_ref, installed_by, installed_at,
+		        update_available_sha, update_available_ref, last_update_check
+		 FROM skills WHERE (status IN ('active', 'archived') OR is_system = true)
+		   AND (is_system = true OR tenant_id = $1)`+visibilityClause+`
+		 ORDER BY name`, args...); err != nil {
+		return nil
+	}
+
+	result := make([]store.SkillInfo, 0, len(scanned))
+	for i := range scanned {
+		result = append(result, scanned[i].toSkillInfo(s.baseDir))
+	}
+
+	s.mu.Lock()
+	s.listForUserCache[key] = &listCacheEntry{skills: result, ver: currentVer, time: time.Now()}
 	s.mu.Unlock()
 
 	return result

@@ -32,8 +32,9 @@ type SQLiteSkillStore struct {
 	mu      sync.RWMutex
 	version atomic.Int64
 
-	listCache map[uuid.UUID]*skillListCacheEntry
-	ttl       time.Duration
+	listCache        map[uuid.UUID]*skillListCacheEntry
+	listForUserCache map[skillListForUserKey]*skillListCacheEntry
+	ttl              time.Duration
 }
 
 type skillListCacheEntry struct {
@@ -42,12 +43,21 @@ type skillListCacheEntry struct {
 	time   time.Time
 }
 
+// skillListForUserKey mirrors the PG store's listForUserCacheKey. See the PG
+// comment for the rationale (role collapsed to a boolean).
+type skillListForUserKey struct {
+	tenant  uuid.UUID
+	user    string
+	isAdmin bool
+}
+
 func NewSQLiteSkillStore(db *sql.DB, baseDir string) *SQLiteSkillStore {
 	return &SQLiteSkillStore{
-		db:        db,
-		baseDir:   baseDir,
-		listCache: make(map[uuid.UUID]*skillListCacheEntry),
-		ttl:       defaultSkillsCacheTTL,
+		db:               db,
+		baseDir:          baseDir,
+		listCache:        make(map[uuid.UUID]*skillListCacheEntry),
+		listForUserCache: make(map[skillListForUserKey]*skillListCacheEntry),
+		ttl:              defaultSkillsCacheTTL,
 	}
 }
 
@@ -110,6 +120,83 @@ func (s *SQLiteSkillStore) ListSkills(ctx context.Context) []store.SkillInfo {
 
 	s.mu.Lock()
 	s.listCache[tid] = &skillListCacheEntry{skills: result, ver: currentVer, time: time.Now()}
+	s.mu.Unlock()
+
+	return result
+}
+
+// ListSkillsForUser implements SkillStore. SQLite port of the PG query —
+// uses '?' placeholders and 0/1 for is_system instead of true/false.
+func (s *SQLiteSkillStore) ListSkillsForUser(ctx context.Context, userID, role string) []store.SkillInfo {
+	currentVer := s.version.Load()
+	tid := store.TenantIDFromContext(ctx)
+	if tid == uuid.Nil {
+		tid = store.MasterTenantID
+	}
+	isAdmin := role == store.TenantRoleOwner || role == store.TenantRoleAdmin
+
+	key := skillListForUserKey{tenant: tid, user: userID, isAdmin: isAdmin}
+	s.mu.RLock()
+	if entry := s.listForUserCache[key]; entry != nil && entry.ver == currentVer && time.Since(entry.time) < s.ttl {
+		result := entry.skills
+		s.mu.RUnlock()
+		return result
+	}
+	s.mu.RUnlock()
+
+	visibilityClause := ""
+	args := []any{tid}
+	if !isAdmin {
+		visibilityClause = ` AND (
+			is_system = 1
+			OR visibility = 'public'
+			OR owner_id = ?
+			OR EXISTS (SELECT 1 FROM skill_user_grants g WHERE g.skill_id = skills.id AND g.user_id = ?)
+		)`
+		args = append(args, userID, userID)
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, slug, description, visibility, tags, version, is_system, status, enabled, deps, frontmatter, file_path
+		 FROM skills WHERE (status IN ('active', 'archived') OR is_system = 1)
+		   AND (is_system = 1 OR tenant_id = ?)`+visibilityClause+`
+		 ORDER BY name`, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var result []store.SkillInfo
+	for rows.Next() {
+		var id uuid.UUID
+		var name, slug, visibility, status string
+		var desc *string
+		var tagsJSON []byte
+		var version int
+		var isSystem, enabled bool
+		var depsRaw, fmRaw []byte
+		var filePath *string
+		if err := rows.Scan(&id, &name, &slug, &desc, &visibility, &tagsJSON, &version,
+			&isSystem, &status, &enabled, &depsRaw, &fmRaw, &filePath); err != nil {
+			continue
+		}
+		info := buildSkillInfo(id.String(), name, slug, desc, version, s.baseDir, filePath)
+		info.Visibility = visibility
+		scanJSONStringArray(tagsJSON, &info.Tags)
+		info.IsSystem = isSystem
+		info.Status = status
+		info.Enabled = enabled
+		info.MissingDeps = parseDepsColumn(depsRaw)
+		info.Author = parseFrontmatterAuthor(fmRaw)
+		result = append(result, info)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("ListSkillsForUser: rows iteration error", "error", err)
+		return nil
+	}
+
+	s.mu.Lock()
+	s.listForUserCache[key] = &skillListCacheEntry{skills: result, ver: currentVer, time: time.Now()}
 	s.mu.Unlock()
 
 	return result

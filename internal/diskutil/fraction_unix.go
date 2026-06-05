@@ -1,12 +1,12 @@
 //go:build !windows
 
-package media
+package diskutil
 
 import "syscall"
 
-// diskUsageFraction returns used/total for the filesystem hosting path
+// Fraction returns used/total for the filesystem hosting path
 // (1.0 = volume is full). Linux/Darwin via statfs(2).
-func diskUsageFraction(path string) (float64, error) {
+func Fraction(path string) (float64, error) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(path, &st); err != nil {
 		return 0, err

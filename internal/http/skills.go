@@ -17,6 +17,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/permissions"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
+	skillstorage "github.com/nextlevelbuilder/goclaw/internal/skills/storage"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
@@ -37,13 +38,24 @@ type SkillsHandler struct {
 	msgBus         *bus.MessageBus
 	tenantCfgStore store.SkillTenantConfigStore
 	tenantStore    store.TenantStore
-	db             *sql.DB // for export/import direct queries
-	uploadLocks    sync.Map // per-slug mutex; bounded by validated slug set, entries are tiny (*sync.Mutex)
+	hubStore       store.SkillHubStore   // optional — drives GET /v1/skills/hubs
+	s3Mirror       *skillstorage.Mirror  // optional — durable S3 copy of installed skills
+	db             *sql.DB               // for export/import direct queries
+	uploadLocks    sync.Map              // per-slug mutex; bounded by validated slug set, entries are tiny (*sync.Mutex)
 }
 
 // NewSkillsHandler creates a handler for skill management endpoints.
-func NewSkillsHandler(skills store.SkillManageStore, baseDir, dataDir, bundledDir string, msgBus *bus.MessageBus, tenantCfgStore store.SkillTenantConfigStore, tenantStore store.TenantStore) *SkillsHandler {
-	return &SkillsHandler{skills: skills, baseDir: baseDir, dataDir: dataDir, bundledDir: bundledDir, msgBus: msgBus, tenantCfgStore: tenantCfgStore, tenantStore: tenantStore}
+func NewSkillsHandler(skills store.SkillManageStore, baseDir, dataDir, bundledDir string, msgBus *bus.MessageBus, tenantCfgStore store.SkillTenantConfigStore, tenantStore store.TenantStore, hubStore store.SkillHubStore) *SkillsHandler {
+	return &SkillsHandler{
+		skills:         skills,
+		baseDir:        baseDir,
+		dataDir:        dataDir,
+		bundledDir:     bundledDir,
+		msgBus:         msgBus,
+		tenantCfgStore: tenantCfgStore,
+		tenantStore:    tenantStore,
+		hubStore:       hubStore,
+	}
 }
 
 // tenantSkillsDir returns the skills-store directory scoped to the requesting tenant.
@@ -57,6 +69,67 @@ func (h *SkillsHandler) tenantSkillsDir(r *http.Request) string {
 func (h *SkillsHandler) skillUploadLock(scopeKey string) *sync.Mutex {
 	actual, _ := h.uploadLocks.LoadOrStore(scopeKey, &sync.Mutex{})
 	return actual.(*sync.Mutex)
+}
+
+// SetS3Mirror wires durable S3 storage onto the handler. When set, every
+// successful install/update also mirrors the extracted skill tree to S3
+// so a sibling EC2 node in the ASG can serve the skill after a cold
+// cache. Best-effort: a mirror failure logs a warning but does not fail
+// the install — the skill still works on the originating node.
+func (h *SkillsHandler) SetS3Mirror(m *skillstorage.Mirror) { h.s3Mirror = m }
+
+// S3Mirror exposes the wired mirror for gateway-level consumers (startup
+// sync, disk-pressure sweeper). Returns nil when the mirror feature is
+// disabled (lite / single-node deployments without GOCLAW_SKILLS_S3_BUCKET).
+func (h *SkillsHandler) S3Mirror() *skillstorage.Mirror { return h.s3Mirror }
+
+// mirrorSkillToS3 is the single hook into the S3 backing path. Called
+// after a successful local extract; the DB row may or may not exist yet
+// (we run it post-DB to keep the consistent "DB row implies S3 prefix"
+// invariant for future startup-prefetch logic). tenantSlug must be
+// non-empty in multi-tenant deployments; we fall back to the tenant UUID
+// when only that is available so the key is still unique.
+func (h *SkillsHandler) mirrorSkillToS3(ctx context.Context, tenantSlug, skillSlug string, version int, localDir string) {
+	if h.s3Mirror == nil {
+		return
+	}
+	if tenantSlug == "" {
+		tenantSlug = "_unknown"
+	}
+	keyPrefix := h.s3Mirror.SkillKeyPrefix(tenantSlug, skillSlug, version)
+	uploaded, err := h.s3Mirror.UploadDir(ctx, localDir, keyPrefix)
+	if err != nil {
+		// Mirror failure is logged but not returned — the install still
+		// succeeded locally. A future sweeper can retry orphaned trees by
+		// scanning DB rows and probing the matching S3 prefix.
+		slog.Warn("skills.s3.mirror_failed",
+			"slug", skillSlug, "version", version, "tenant", tenantSlug,
+			"uploaded", uploaded, "error", err)
+		return
+	}
+	slog.Info("skills.s3.mirrored",
+		"slug", skillSlug, "version", version, "tenant", tenantSlug, "files", uploaded)
+}
+
+// isOwnerOrAdmin reports whether the caller can perform team-wide skill
+// writes (publish/escalate/toggle a public skill, delete someone else's
+// public skill) in the active tenant. System owners and personal tenants
+// bypass the check. When the handler has no tenant store wired (unit tests
+// without DB), the call defaults to allow — the caller still has to clear
+// the upstream auth+role-gate before reaching this helper.
+func (h *SkillsHandler) isOwnerOrAdmin(ctx context.Context, tenantID uuid.UUID, userID string) (bool, error) {
+	if store.IsOwnerRole(ctx) {
+		return true, nil
+	}
+	if h.tenantStore == nil {
+		return true, nil
+	}
+	if tenantID == uuid.Nil {
+		// Treat unscoped contexts as master-tenant: they only reach this code
+		// path via system owner / dev mode (see resolveAuth fallback).
+		return true, nil
+	}
+	return h.tenantStore.IsOwnerOrAdmin(ctx, tenantID, userID)
 }
 
 // emitCacheInvalidate broadcasts a skill-related cache invalidation event.
@@ -89,6 +162,8 @@ func (h *SkillsHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/skills/{id}/files", h.authMiddleware(h.handleListFiles))
 	// Skill writes (admin+)
 	mux.HandleFunc("POST /v1/skills/upload", h.adminMiddleware(h.handleUpload))
+	mux.HandleFunc("POST /v1/skills/install", h.adminMiddleware(h.handleInstall))
+	mux.HandleFunc("POST /v1/skills/preview", h.authMiddleware(h.handlePreview))
 	mux.HandleFunc("PUT /v1/skills/{id}", h.adminMiddleware(h.handleUpdate))
 	mux.HandleFunc("DELETE /v1/skills/{id}", h.adminMiddleware(h.handleDelete))
 	// Skill grants (admin+)
@@ -110,6 +185,12 @@ func (h *SkillsHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/skills/export/preview", h.adminMiddleware(h.handleSkillsExportPreview))
 	mux.HandleFunc("GET /v1/skills/export", h.adminMiddleware(h.handleSkillsExport))
 	mux.HandleFunc("POST /v1/skills/import", h.adminMiddleware(h.handleSkillsImport))
+	// Marketplace browser + update detection + audit log (Phase 2)
+	mux.HandleFunc("GET /v1/skills/hubs", h.authMiddleware(h.handleHubsList))
+	mux.HandleFunc("GET /v1/skills/hubs/fetch", h.authMiddleware(h.handleHubFetch))
+	mux.HandleFunc("POST /v1/skills/check-updates", h.authMiddleware(h.handleCheckUpdates))
+	mux.HandleFunc("POST /v1/skills/{id}/update", h.authMiddleware(h.handleSkillUpdate))
+	mux.HandleFunc("GET /v1/skills/install-events", h.adminMiddleware(h.handleInstallEvents))
 }
 
 func (h *SkillsHandler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -120,6 +201,32 @@ func (h *SkillsHandler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 // (rescan deps, install packages, toggle skills) that affect the entire server.
 func (h *SkillsHandler) adminMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return requireAuth(permissions.RoleAdmin, next)
+}
+
+// resolveTenantRole looks up the caller's role in the current tenant. Owner
+// scope (cross-tenant admin) short-circuits to TenantRoleOwner so they always
+// see everything. Missing membership row → empty string ("member" semantics).
+// Errors are swallowed and logged because the handler must keep working with
+// the safer least-privilege role — DB outage shouldn't elevate a member to
+// admin view.
+func (h *SkillsHandler) resolveTenantRole(ctx context.Context, userID string) string {
+	if store.IsOwnerRole(ctx) {
+		return store.TenantRoleOwner
+	}
+	if h.tenantStore == nil || userID == "" {
+		return ""
+	}
+	tid := store.TenantIDFromContext(ctx)
+	if tid == uuid.Nil || tid == store.MasterTenantID {
+		// Master tenant has no tenant_users rows; treat as member view.
+		return ""
+	}
+	role, err := h.tenantStore.GetUserRole(ctx, tid, userID)
+	if err != nil {
+		slog.Warn("skills.handleList: tenant role lookup failed", "tenant", tid, "user", userID, "error", err)
+		return ""
+	}
+	return role
 }
 
 // requireMasterTenant rejects requests from non-master tenants.
@@ -142,7 +249,9 @@ func (h *SkillsHandler) requireMasterTenant(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *SkillsHandler) handleList(w http.ResponseWriter, r *http.Request) {
-	skillList := h.skills.ListSkills(r.Context())
+	userID := store.UserIDFromContext(r.Context())
+	role := h.resolveTenantRole(r.Context(), userID)
+	skillList := h.skills.ListSkillsForUser(r.Context(), userID, role)
 
 	// Merge per-tenant overrides into response when tenant-scoped
 	tid := store.TenantIDFromContext(r.Context())
@@ -214,6 +323,29 @@ func (h *SkillsHandler) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	delete(updates, "is_system")
 	delete(updates, "enabled")
 
+	// Role gate: escalating a skill's visibility to "public" affects the whole
+	// team, so only owners/admins can do it. Lowering to private / internal is
+	// allowed for the skill owner (handled by the ownership check above).
+	if newVis, ok := updates["visibility"].(string); ok && newVis == "public" {
+		userID := store.UserIDFromContext(r.Context())
+		tenantID := store.TenantIDFromContext(r.Context())
+		ok, err := h.isOwnerOrAdmin(r.Context(), tenantID, userID)
+		if err != nil {
+			slog.Warn("skills.update: role lookup failed",
+				"skill_id", idStr, "user_id", userID, "tenant_id", tenantID, "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "role lookup")})
+			return
+		}
+		if !ok {
+			slog.Warn("security.skills.update_visibility_denied",
+				"skill_id", idStr, "user_id", userID, "tenant_id", tenantID)
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": "Only owners and admins can install skills for the team. Use visibility=private to install for yourself.",
+			})
+			return
+		}
+	}
+
 	if err := h.skills.UpdateSkill(r.Context(), id, updates); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -234,13 +366,46 @@ func (h *SkillsHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ownership check (admins bypass)
+	userID := store.UserIDFromContext(r.Context())
+	tenantID := store.TenantIDFromContext(r.Context())
+
+	// Combined ownership + role gate. Three permitted callers:
+	//   1. System-wide owner / API-key admin (bypass everything).
+	//   2. The skill row's own owner (can always delete their own skill).
+	//   3. A tenant owner/admin (can delete public skills owned by others).
+	// Everyone else gets 403.
 	auth := resolveAuth(r)
 	if !permissions.HasMinRole(auth.Role, permissions.RoleAdmin) {
-		userID := store.UserIDFromContext(r.Context())
-		if ownerID, found := h.skills.GetSkillOwnerID(r.Context(), id); found && ownerID != userID {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the skill owner can perform this action"})
-			return
+		ownerID, ownerFound := h.skills.GetSkillOwnerID(r.Context(), id)
+		isOwnerOfSkill := ownerFound && ownerID == userID
+		if !isOwnerOfSkill {
+			// Not the skill owner — only team owners/admins may delete a skill
+			// they don't own, and only when it's visibility=public (private
+			// skills owned by someone else are simply not theirs to touch).
+			sk, found := h.skills.GetSkillByID(r.Context(), id)
+			if !found {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": i18n.T(locale, i18n.MsgNotFound, "skill", idStr)})
+				return
+			}
+			if sk.Visibility != "public" {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the skill owner can perform this action"})
+				return
+			}
+			privileged, err := h.isOwnerOrAdmin(r.Context(), tenantID, userID)
+			if err != nil {
+				slog.Warn("skills.delete: role lookup failed",
+					"skill_id", idStr, "user_id", userID, "tenant_id", tenantID, "error", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "role lookup")})
+				return
+			}
+			if !privileged {
+				slog.Warn("security.skills.delete_role_denied",
+					"skill_id", idStr, "user_id", userID, "tenant_id", tenantID)
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "Only owners and admins can install skills for the team. Use visibility=private to install for yourself.",
+				})
+				return
+			}
 		}
 	}
 
@@ -525,16 +690,53 @@ func (h *SkillsHandler) handleRuntimes(w http.ResponseWriter, _ *http.Request) {
 // handleToggle enables or disables a skill.
 // Body: {"enabled": bool}
 // When enabling: re-checks deps and updates status to "active" or "archived" accordingly.
+//
+// Role gate: toggling a public skill flips it for the whole team, so it
+// requires owner/admin in the active tenant. Toggling a private skill is
+// limited to the skill row owner. System-wide owners bypass both checks.
 func (h *SkillsHandler) handleToggle(w http.ResponseWriter, r *http.Request) {
-	if !h.requireMasterTenant(w, r) {
-		return
-	}
 	locale := store.LocaleFromContext(r.Context())
 	idStr := r.PathValue("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidID, "skill")})
 		return
+	}
+
+	// Resolve the skill so we can branch on visibility.
+	sk, found := h.skills.GetSkillByID(r.Context(), id)
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": i18n.T(locale, i18n.MsgNotFound, "skill", idStr)})
+		return
+	}
+
+	if !store.IsOwnerRole(r.Context()) {
+		userID := store.UserIDFromContext(r.Context())
+		tenantID := store.TenantIDFromContext(r.Context())
+		switch sk.Visibility {
+		case "public", "internal":
+			privileged, err := h.isOwnerOrAdmin(r.Context(), tenantID, userID)
+			if err != nil {
+				slog.Warn("skills.toggle: role lookup failed",
+					"skill_id", idStr, "user_id", userID, "tenant_id", tenantID, "error", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": i18n.T(locale, i18n.MsgInternalError, "role lookup")})
+				return
+			}
+			if !privileged {
+				slog.Warn("security.skills.toggle_role_denied",
+					"skill_id", idStr, "user_id", userID, "tenant_id", tenantID,
+					"visibility", sk.Visibility)
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "Only owners and admins can install skills for the team. Use visibility=private to install for yourself.",
+				})
+				return
+			}
+		default: // "private" and anything else
+			if ownerID, ok := h.skills.GetSkillOwnerID(r.Context(), id); ok && ownerID != userID {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the skill owner can perform this action"})
+				return
+			}
+		}
 	}
 
 	var body struct {

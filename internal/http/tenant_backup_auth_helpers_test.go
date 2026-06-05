@@ -33,6 +33,9 @@ func (f fakeTenantStore) RemoveUser(context.Context, uuid.UUID, string) error   
 func (f fakeTenantStore) GetUserRole(context.Context, uuid.UUID, string) (string, error) {
 	return "", nil
 }
+func (f fakeTenantStore) IsOwnerOrAdmin(context.Context, uuid.UUID, string) (bool, error) {
+	return true, nil
+}
 func (f fakeTenantStore) ListUsers(context.Context, uuid.UUID) ([]store.TenantUserData, error) {
 	return nil, nil
 }
