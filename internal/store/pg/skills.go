@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -160,24 +161,65 @@ func (s *PGSkillStore) ListSkillsForUser(ctx context.Context, userID, role strin
 	//   - explicit grants (skill_user_grants)
 	// Other members' private rows are invisible to everyone, including
 	// the workspace owner.
-	visibilityClause := ` AND (
-		is_system = true
-		OR visibility = 'public'
-		OR owner_id = $2
-		OR EXISTS (SELECT 1 FROM skill_user_grants g WHERE g.skill_id = skills.id AND g.user_id = $2)
-	)`
-	args := []any{tid, userID}
-
+	//
+	// DISTINCT ON (slug) collapses duplicates that show up when both the
+	// caller AND another tenant member have installed the same slug:
+	// without it the UI would render "aeo" twice — once as the caller's
+	// own row, once as "Shared by …". The ORDER BY picks the row to
+	// keep, preferring:
+	//   1. system skills (is_system desc)
+	//   2. the caller's own row (owner_id = caller desc) — they can
+	//      Delete/Disable/Share their copy
+	//   3. shared rows (visibility='public') over granted rows
+	//   4. higher version, then lexicographic id for determinism
+	//
+	// Compute the effective `enabled` column inline:
+	//   * canonical s.enabled column (owner-controlled, system flag for
+	//     missing deps) AND
+	//   * caller has NO skill_user_disables row for ANY skill of this
+	//     slug in this tenant (cascade-by-slug semantic from handleToggle).
+	//
+	// The NOT EXISTS subquery joins skill_user_disables to a sibling
+	// skills row that matches the same (tenant_id, slug). That captures
+	// the cascade: a Disable click writes a record per slug-row, and a
+	// single such record makes the dedup'd row return enabled=false
+	// here. One round trip, no Go-side patch.
 	var scanned []skillInfoRowWithFrontmatter
 	if err := pkgSqlxDB.SelectContext(ctx, &scanned,
-		`SELECT id, name, slug, description, visibility, tags, version, is_system, status, enabled, deps, frontmatter, file_path,
-		        source_url, source_sha, source_ref, installed_by, installed_at,
-		        update_available_sha, update_available_ref, last_update_check
-		 FROM skills WHERE (status IN ('active', 'archived') OR is_system = true)
-		   AND (is_system = true OR tenant_id = $1)`+visibilityClause+`
-		 ORDER BY name`, args...); err != nil {
+		`SELECT DISTINCT ON (s.slug)
+		        s.id, s.name, s.slug, s.description, s.visibility, s.tags, s.version, s.is_system, s.status,
+		        (s.enabled AND NOT EXISTS (
+		           SELECT 1 FROM skill_user_disables d
+		             JOIN skills s2 ON s2.id = d.skill_id
+		            WHERE d.user_id = $2
+		              AND s2.tenant_id = s.tenant_id
+		              AND s2.slug = s.slug
+		        )) AS enabled,
+		        s.deps, s.frontmatter, s.file_path,
+		        s.source_url, s.source_sha, s.source_ref, s.installed_by, s.installed_at,
+		        s.update_available_sha, s.update_available_ref, s.last_update_check
+		 FROM skills s
+		 WHERE (s.status IN ('active', 'archived') OR s.is_system = true)
+		   AND (s.is_system = true OR s.tenant_id = $1)
+		   AND (
+		     s.is_system = true
+		     OR s.visibility = 'public'
+		     OR s.owner_id = $2
+		     OR EXISTS (SELECT 1 FROM skill_user_grants g WHERE g.skill_id = s.id AND g.user_id = $2)
+		   )
+		 ORDER BY s.slug,
+		          s.is_system DESC,
+		          (s.owner_id = $2) DESC,
+		          (s.visibility = 'public') DESC,
+		          s.version DESC,
+		          s.id ASC`, tid, userID); err != nil {
 		return nil
 	}
+	// DISTINCT ON sorts by (slug, …); a stable display order by name
+	// happens here in Go to avoid wrapping the SELECT in a subquery
+	// just for ORDER BY name. Few enough rows per tenant that this is
+	// negligible.
+	sort.Slice(scanned, func(i, j int) bool { return scanned[i].Name < scanned[j].Name })
 
 	result := make([]store.SkillInfo, 0, len(scanned))
 	for i := range scanned {

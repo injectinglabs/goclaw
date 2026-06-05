@@ -567,6 +567,22 @@ func (s *skillManageStoreStub) GrantToUser(context.Context, uuid.UUID, string, s
 	return nil
 }
 func (s *skillManageStoreStub) RevokeFromUser(context.Context, uuid.UUID, string) error { return nil }
+func (s *skillManageStoreStub) SetUserDisable(context.Context, uuid.UUID, string) error  { return nil }
+func (s *skillManageStoreStub) ClearUserDisable(context.Context, uuid.UUID, string) error {
+	return nil
+}
+func (s *skillManageStoreStub) IsDisabledForUser(context.Context, uuid.UUID, string) bool {
+	return false
+}
+func (s *skillManageStoreStub) SetUserDisableBySlug(context.Context, string) (int, error) {
+	return 0, nil
+}
+func (s *skillManageStoreStub) ClearUserDisableBySlug(context.Context, string) (int, error) {
+	return 0, nil
+}
+func (s *skillManageStoreStub) IsSlugDisabledForUser(context.Context, string, string) bool {
+	return false
+}
 func (s *skillManageStoreStub) ListWithGrantStatus(context.Context, uuid.UUID) ([]store.SkillWithGrantStatus, error) {
 	return nil, nil
 }
