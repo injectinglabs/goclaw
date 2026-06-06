@@ -92,6 +92,7 @@ func (c *Config) applyEnvOverrides() {
 			*dst = v
 		}
 	}
+	envStr("GOCLAW_PUBLIC_WEBHOOK_BASE", &c.Gateway.PublicWebhookBase)
 	envStr("GOCLAW_ANTHROPIC_API_KEY", &c.Providers.Anthropic.APIKey)
 	envStr("GOCLAW_ANTHROPIC_BASE_URL", &c.Providers.Anthropic.APIBase)
 	envStr("GOCLAW_OPENAI_API_KEY", &c.Providers.OpenAI.APIKey)

@@ -363,6 +363,11 @@ func (l *InstanceLoader) loadInstance(ctx context.Context, inst store.ChannelIns
 	if base, ok := ch.(interface{ SetCreatedBy(string) }); ok {
 		base.SetCreatedBy(inst.CreatedBy)
 	}
+	// Propagate the instance UUID so webhook-mode channels can build their
+	// per-instance webhook URL/secret and register for inbound routing.
+	if base, ok := ch.(interface{ SetInstanceID(uuid.UUID) }); ok {
+		base.SetInstanceID(inst.ID)
+	}
 	// Propagate tenant_id to pending history for compaction/sweep DB operations.
 	// Factory creates PendingHistory before SetTenantID is called, so tenantID is uuid.Nil at construction.
 	if ph, ok := ch.(interface{ SetPendingHistoryTenantID(uuid.UUID) }); ok {

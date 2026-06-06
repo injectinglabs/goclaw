@@ -179,6 +179,21 @@ func wireChannelEventSubscribers(
 	pairingMethods *methods.PairingMethods,
 	cfg *config.Config,
 ) {
+	// Distributed cache invalidation: in multi-replica deployments the in-process
+	// event bus only reaches the replica that handled a write, so peers keep a
+	// stale registry (a disconnect handled by replica A wouldn't stop a bot whose
+	// poller lives on replica B). Bridge invalidations across replicas via
+	// Postgres LISTEN/NOTIFY. Single-process (desktop/SQLite) needs no bridge.
+	if pgStores != nil && pgStores.DB != nil &&
+		!strings.Contains(fmt.Sprintf("%T", pgStores.DB.Driver()), "sqlite") &&
+		cfg.Database.PostgresDSN != "" {
+		originID := uuid.NewString()
+		if err := bus.StartPGCacheBridge(context.Background(), pgStores.DB, cfg.Database.PostgresDSN, originID, msgBus); err != nil {
+			slog.Warn("cache invalidation bridge unavailable; falling back to in-process only "+
+				"(disconnect/config changes will not propagate across replicas)", "err", err)
+		}
+	}
+
 	// Cache invalidation: reload channel instances on changes.
 	// If payload.Key is a channel_instance UUID, do a targeted RestartInstance —
 	// single-instance create/update doesn't need to churn every tenant's bots,
