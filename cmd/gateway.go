@@ -468,6 +468,12 @@ func runGateway() {
 		}
 	}
 
+	// Configure channel webhooks BEFORE channels start (StartAll below), so
+	// webhook-mode channels see the public base + signing key at Start and
+	// register a webhook instead of falling back to polling. The HTTP route is
+	// mounted later in StartGateway (gated on WebhookConfigured()).
+	telegram.ConfigureWebhook(cfg.Gateway.PublicWebhookBase, cfg.Gateway.Token)
+
 	// Load channel instances from DB.
 	var instanceLoader *channels.InstanceLoader
 	if pgStores.ChannelInstances != nil {
