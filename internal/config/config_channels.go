@@ -17,6 +17,7 @@ type ChannelsConfig struct {
 	Discord           DiscordConfig            `json:"discord"`
 	Slack             SlackConfig              `json:"slack"`
 	WhatsApp          WhatsAppConfig           `json:"whatsapp"`
+	WhatsAppCloud     WhatsAppCloudConfig      `json:"whatsapp_cloud"`
 	Zalo              ZaloConfig               `json:"zalo"`
 	ZaloPersonal      ZaloPersonalConfig       `json:"zalo_personal"`
 	Feishu            FeishuConfig             `json:"feishu"`
@@ -130,6 +131,16 @@ type SlackConfig struct {
 	DebounceDelay  int                 `json:"debounce_delay,omitempty"`  // ms delay before dispatching rapid messages (default 300, 0=disabled)
 	ThreadTTL      *int                `json:"thread_ttl,omitempty"`      // hours before thread participation expires (default 24, 0=disabled — always require @mention)
 	MediaMaxBytes  int64               `json:"media_max_bytes,omitempty"` // max file download size in bytes (default 20MB)
+}
+
+// WhatsAppCloudConfig holds app-level WhatsApp Business Cloud API settings.
+// One Meta app serves all numbers; per-number access_token + phone_number_id
+// live in each channel_instance's credentials. The public webhook base reuses
+// gateway.public_webhook_base; the route is /whatsapp/webhook.
+type WhatsAppCloudConfig struct {
+	AppSecret    string `json:"app_secret,omitempty"`    // X-Hub-Signature-256 validation (Meta app secret)
+	VerifyToken  string `json:"verify_token,omitempty"`  // GET subscription handshake token
+	GraphVersion string `json:"graph_version,omitempty"` // Graph API version, default v21.0
 }
 
 type WhatsAppConfig struct {

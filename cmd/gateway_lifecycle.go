@@ -11,6 +11,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/cache"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/telegram"
+	"github.com/nextlevelbuilder/goclaw/internal/channels/whatsappcloud"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/edition"
 	"github.com/nextlevelbuilder/goclaw/internal/heartbeat"
@@ -216,6 +217,12 @@ func (d *gatewayDeps) runLifecycle(
 	if telegram.WebhookConfigured() {
 		mux.Handle(telegram.WebhookPathPrefix, telegram.WebhookDispatcher())
 		slog.Info("webhook route mounted on gateway", "path", telegram.WebhookPathPrefix, "channel", "telegram")
+	}
+	// WhatsApp Cloud API: single app-level route (GET verify + POST events),
+	// routed to instances by phone_number_id. Gated on app secret + verify token.
+	if whatsappcloud.WebhookConfigured() {
+		mux.Handle(whatsappcloud.WebhookPath, whatsappcloud.WebhookDispatcher())
+		slog.Info("webhook route mounted on gateway", "path", whatsappcloud.WebhookPath, "channel", "whatsapp_cloud")
 	}
 
 	tsCleanup := initTailscale(ctx, d.cfg, mux)

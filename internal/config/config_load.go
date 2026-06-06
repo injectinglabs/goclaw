@@ -93,6 +93,9 @@ func (c *Config) applyEnvOverrides() {
 		}
 	}
 	envStr("GOCLAW_PUBLIC_WEBHOOK_BASE", &c.Gateway.PublicWebhookBase)
+	envStr("GOCLAW_WHATSAPP_CLOUD_APP_SECRET", &c.Channels.WhatsAppCloud.AppSecret)
+	envStr("GOCLAW_WHATSAPP_CLOUD_VERIFY_TOKEN", &c.Channels.WhatsAppCloud.VerifyToken)
+	envStr("GOCLAW_WHATSAPP_CLOUD_GRAPH_VERSION", &c.Channels.WhatsAppCloud.GraphVersion)
 	envStr("GOCLAW_ANTHROPIC_API_KEY", &c.Providers.Anthropic.APIKey)
 	envStr("GOCLAW_ANTHROPIC_BASE_URL", &c.Providers.Anthropic.APIBase)
 	envStr("GOCLAW_OPENAI_API_KEY", &c.Providers.OpenAI.APIKey)
