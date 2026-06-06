@@ -211,9 +211,8 @@ func (d *gatewayDeps) runLifecycle(
 
 	// Telegram webhook mode: one stable route dispatches to the right bot by
 	// instance id at request time, so bots connected after startup are reachable
-	// without re-mounting. ConfigureWebhook sets the public base + signing key
-	// (used to derive each instance's secret token); empty base => polling only.
-	telegram.ConfigureWebhook(d.cfg.Gateway.PublicWebhookBase, d.cfg.Gateway.Token)
+	// without re-mounting. ConfigureWebhook ran before channel startup (gateway.go);
+	// here we just mount the route when a public base is configured.
 	if telegram.WebhookConfigured() {
 		mux.Handle(telegram.WebhookPathPrefix, telegram.WebhookDispatcher())
 		slog.Info("webhook route mounted on gateway", "path", telegram.WebhookPathPrefix, "channel", "telegram")
