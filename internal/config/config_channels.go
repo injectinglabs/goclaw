@@ -43,6 +43,7 @@ type TelegramConfig struct {
 	LinkPreview    *bool               `json:"link_preview,omitempty"`    // enable URL previews in messages (default true)
 	BlockReply     *bool               `json:"block_reply,omitempty"`     // override gateway block_reply (nil = inherit)
 	ForceIPv4      bool                `json:"force_ipv4,omitempty"`      // force IPv4 for all Telegram API requests (use when IPv6 routing is broken)
+	Mode           string              `json:"mode,omitempty"`            // ingestion mode: "polling" (default) or "webhook". Webhook scales across replicas; requires gateway.public_webhook_base.
 
 	// Optional STT (Speech-to-Text) pipeline for voice/audio inbound messages.
 	// When stt_proxy_url is set, audio/voice messages are transcribed before being forwarded to the agent.
@@ -361,6 +362,7 @@ type GatewayConfig struct {
 	TaskRecoveryIntervalSec int          `json:"task_recovery_interval_sec,omitempty"` // team task recovery ticker interval in seconds (default 300 = 5min)
 	BackgroundProvider      string       `json:"background_provider,omitempty"`        // LLM provider for background workers (vault enrichment, consolidation)
 	BackgroundModel         string       `json:"background_model,omitempty"`           // LLM model for background workers
+	PublicWebhookBase       string       `json:"public_webhook_base,omitempty"`        // public HTTPS base URL (e.g. https://aos-stg.injecting.ai) for channel webhooks; enables Telegram webhook mode
 }
 
 // ToolsConfig controls tool availability, policy, and web search.
