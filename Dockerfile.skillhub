@@ -1,0 +1,15 @@
+# Skills Hub catalog API (cmd/skillhub) — thin, stateless, public read-only.
+# Separate tiny image from the gateway; deployed independently behind the ALB.
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /skillhub ./cmd/skillhub
+
+# distroless static includes CA certs (needed for HTTPS registry fetches).
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /skillhub /skillhub
+EXPOSE 8088
+USER nonroot:nonroot
+ENTRYPOINT ["/skillhub"]
