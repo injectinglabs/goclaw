@@ -20,6 +20,11 @@ type MessageBus struct {
 	// Event subscribers (subscriber ID → handler)
 	subscribers map[string]EventHandler
 	subMu       sync.RWMutex
+
+	// distributor, if set, mirrors cache-invalidation events to peer replicas
+	// (e.g. via Postgres LISTEN/NOTIFY). Guarded by subMu. nil in single-process
+	// deployments (desktop/SQLite), where the in-process fan-out is sufficient.
+	distributor func(Event)
 }
 
 func New() *MessageBus {
@@ -114,10 +119,40 @@ func (mb *MessageBus) Unsubscribe(id string) {
 	delete(mb.subscribers, id)
 }
 
-// Broadcast sends an event to all subscribers (non-blocking per subscriber).
-// Panicking handlers are caught and logged to prevent one bad subscriber
-// from crashing the entire event bus.
+// SetDistributor installs (or clears, with nil) the peer-replica distributor.
+// Called once at startup by the Postgres cache bridge. Safe to leave unset.
+func (mb *MessageBus) SetDistributor(fn func(Event)) {
+	mb.subMu.Lock()
+	defer mb.subMu.Unlock()
+	mb.distributor = fn
+}
+
+// Broadcast delivers an event to all in-process subscribers and, for
+// cache-invalidation events, also mirrors it to peer replicas via the
+// distributor (if one is installed). Distribution is gated on the payload
+// being a CacheInvalidatePayload so high-frequency UI events (agent/chat
+// tokens) are never sent over the wire.
 func (mb *MessageBus) Broadcast(event Event) {
+	dist := mb.broadcastLocal(event)
+	if dist == nil {
+		return
+	}
+	if _, ok := event.Payload.(CacheInvalidatePayload); ok {
+		dist(event)
+	}
+}
+
+// BroadcastLocal delivers an event only to in-process subscribers, without
+// re-distributing it to peers. The Postgres cache bridge uses this when
+// replaying a peer's invalidation, so it cannot echo back onto the wire.
+func (mb *MessageBus) BroadcastLocal(event Event) {
+	mb.broadcastLocal(event)
+}
+
+// broadcastLocal fans an event out to in-process subscribers and returns the
+// currently-installed distributor (read under the same lock). Panicking
+// handlers are caught and logged so one bad subscriber can't crash the bus.
+func (mb *MessageBus) broadcastLocal(event Event) func(Event) {
 	mb.subMu.RLock()
 	defer mb.subMu.RUnlock()
 	for id, handler := range mb.subscribers {
@@ -134,6 +169,7 @@ func (mb *MessageBus) Broadcast(event Event) {
 			handler(event)
 		}()
 	}
+	return mb.distributor
 }
 
 // Close shuts down the message bus.

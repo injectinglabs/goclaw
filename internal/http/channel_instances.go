@@ -266,11 +266,11 @@ func (h *ChannelInstancesHandler) handleDelete(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Delete: targeted reload would have nothing to load (row is gone), so
-	// fall through to full Reload by passing empty Key. The loader's Reload
-	// will reconcile by stopping every channel and re-loading enabled rows
-	// from DB; the deleted row simply won't reappear.
-	h.emitCacheInvalidate("")
+	// Delete: targeted stop by instance id. RestartInstance finds the channel
+	// via its id→name map (the row is already gone) and stops just this one —
+	// no full Reload, so other tenants' bots aren't briefly torn down and a
+	// single hung Stop can't stretch the disconnect across every channel.
+	h.emitCacheInvalidate(id.String())
 	emitAudit(h.msgBus, r, "channel_instance.deleted", "channel_instance", id.String())
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

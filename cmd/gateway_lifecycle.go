@@ -10,6 +10,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/cache"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
+	"github.com/nextlevelbuilder/goclaw/internal/channels/telegram"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/edition"
 	"github.com/nextlevelbuilder/goclaw/internal/heartbeat"
@@ -206,6 +207,15 @@ func (d *gatewayDeps) runLifecycle(
 	for _, route := range d.channelMgr.WebhookHandlers() {
 		mux.Handle(route.Path, route.Handler)
 		slog.Info("webhook route mounted on gateway", "path", route.Path)
+	}
+
+	// Telegram webhook mode: one stable route dispatches to the right bot by
+	// instance id at request time, so bots connected after startup are reachable
+	// without re-mounting. ConfigureWebhook ran before channel startup (gateway.go);
+	// here we just mount the route when a public base is configured.
+	if telegram.WebhookConfigured() {
+		mux.Handle(telegram.WebhookPathPrefix, telegram.WebhookDispatcher())
+		slog.Info("webhook route mounted on gateway", "path", telegram.WebhookPathPrefix, "channel", "telegram")
 	}
 
 	tsCleanup := initTailscale(ctx, d.cfg, mux)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -177,6 +178,23 @@ func (m *Manager) GetEnabledChannels() []string {
 func (m *Manager) RegisterChannel(name string, channel Channel) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// If a different channel is already registered under this name (e.g. two
+	// enabled instances for the same bot, or a reload that didn't stop the old
+	// one first), stop the previous one. Otherwise it keeps running as an
+	// orphaned, untracked poller — the root cause of "disconnect didn't stop the
+	// bot" + the Telegram 409 war. Stop runs off the lock (it may block on
+	// network/goroutine drain) and is bounded so it can't wedge the manager.
+	if old, ok := m.channels[name]; ok && old != channel {
+		slog.Warn("channel re-registered under existing name; stopping the previous instance",
+			"name", name)
+		go func(c Channel) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := c.Stop(ctx); err != nil {
+				slog.Warn("failed to stop replaced channel", "name", name, "error", err)
+			}
+		}(old)
+	}
 	// Propagate contact collector to channels that embed BaseChannel.
 	if m.contactCollector != nil {
 		if bc, ok := channel.(interface{ SetContactCollector(*store.ContactCollector) }); ok {
