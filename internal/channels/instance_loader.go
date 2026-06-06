@@ -52,7 +52,8 @@ type InstanceLoader struct {
 	msgBus            *bus.MessageBus
 	pairingSvc        store.PairingStore
 	mu                sync.Mutex
-	loaded            map[string]struct{} // channel names managed by this loader
+	loaded            map[string]struct{}      // channel names managed by this loader
+	byID              map[uuid.UUID]string     // instance id → channel name, for targeted stop after the row is deleted
 }
 
 // NewInstanceLoader creates a new InstanceLoader.
@@ -71,6 +72,7 @@ func NewInstanceLoader(
 		msgBus:     msgBus,
 		pairingSvc: pairingSvc,
 		loaded:     make(map[string]struct{}),
+		byID:       make(map[uuid.UUID]string),
 	}
 }
 
@@ -141,6 +143,7 @@ func (l *InstanceLoader) Reload(ctx context.Context) {
 		l.manager.UnregisterChannel(name)
 	}
 	l.loaded = make(map[string]struct{})
+	l.byID = make(map[uuid.UUID]string)
 
 	// Brief pause to let external APIs (e.g., Telegram getUpdates) release polling locks.
 	time.Sleep(500 * time.Millisecond)
@@ -178,6 +181,7 @@ func (l *InstanceLoader) Stop(ctx context.Context) {
 		l.manager.UnregisterChannel(name)
 	}
 	l.loaded = make(map[string]struct{})
+	l.byID = make(map[uuid.UUID]string)
 }
 
 // RestartInstance stops, reloads, and starts a single channel by ID. Used for
@@ -185,8 +189,9 @@ func (l *InstanceLoader) Stop(ctx context.Context) {
 // single-instance change doesn't churn every tenant's bots through the full
 // Reload path — and sidesteps any single hung Stop blocking unrelated channels.
 //
-// If the instance no longer exists or is disabled, the channel (if any) is
-// stopped and unregistered without restart.
+// If the instance was deleted, the channel (if any) is stopped and unregistered
+// without restart — and without churning every other channel through a full
+// Reload. If it's disabled, same (stopped, left down).
 func (l *InstanceLoader) RestartInstance(ctx context.Context, id uuid.UUID) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -194,7 +199,20 @@ func (l *InstanceLoader) RestartInstance(ctx context.Context, id uuid.UUID) {
 	// Cross-tenant lookup — server-internal call from the cache invalidation bus.
 	inst, err := l.store.Get(store.WithCrossTenant(ctx), id)
 	if err != nil {
-		slog.Warn("targeted reload: instance not found, skipping",
+		// Row is gone (disconnect/delete). Stop and unregister just this channel
+		// — no full Reload, so other tenants' bots are untouched. The id→name
+		// map lets us find the channel even though the DB row no longer exists.
+		if name, ok := l.byID[id]; ok {
+			if ch, ok := l.manager.GetChannel(name); ok {
+				l.stopChannelWithTimeout(ctx, name, ch)
+			}
+			l.manager.UnregisterChannel(name)
+			delete(l.loaded, name)
+			delete(l.byID, id)
+			slog.Info("targeted disconnect: instance deleted, channel stopped", "id", id, "name", name)
+			return
+		}
+		slog.Warn("targeted reload: instance not found and not loaded, skipping",
 			"id", id, "error", err)
 		return
 	}
@@ -206,6 +224,7 @@ func (l *InstanceLoader) RestartInstance(ctx context.Context, id uuid.UUID) {
 		}
 		l.manager.UnregisterChannel(inst.Name)
 		delete(l.loaded, inst.Name)
+		delete(l.byID, id)
 	}
 
 	if !inst.Enabled {
@@ -299,6 +318,7 @@ func (l *InstanceLoader) LoadedNames() map[string]struct{} {
 // If false, the caller is responsible for starting (used by LoadAll, where StartAll handles it).
 func (l *InstanceLoader) loadInstance(ctx context.Context, inst store.ChannelInstanceData, autoStart bool) error {
 	l.loaded[inst.Name] = struct{}{}
+	l.byID[inst.ID] = inst.Name
 
 	factory, ok := l.factories[inst.ChannelType]
 	if !ok {

@@ -241,8 +241,9 @@ func (m *ChannelInstancesMethods) handleDelete(ctx context.Context, client *gate
 		return
 	}
 
-	// Delete: row is gone, fall through to full Reload (empty Key).
-	m.emitCacheInvalidate("")
+	// Delete: targeted stop by id (RestartInstance finds the channel via its
+	// id→name map and stops just this one — no full Reload of other channels).
+	m.emitCacheInvalidate(id.String())
 	emitAudit(m.eventBus, client, "channel_instance.deleted", "channel_instance", id.String())
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{"status": "deleted"}))
 }
