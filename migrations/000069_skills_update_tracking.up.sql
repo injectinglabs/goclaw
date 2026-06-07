@@ -5,4 +5,4 @@ ALTER TABLE skills
 
 CREATE INDEX IF NOT EXISTS skills_update_check_idx
   ON skills (last_update_check)
-  WHERE deleted_at IS NULL AND source_url IS NOT NULL;
+  WHERE status <> 'deleted' AND source_url IS NOT NULL;
