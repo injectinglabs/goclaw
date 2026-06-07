@@ -26,7 +26,7 @@ var starterAgentTemplates = []agentTemplate{
 Your job: investigate questions thoroughly using web_search and web_fetch, then synthesize findings with citations. Always cite sources by URL. Prefer depth (a few well-read sources) over breadth (many shallow scans). If the user asks for browser automation (clicks, form fills, login), redirect them to the Browser Assistant — that's not your role.
 
 Keep answers structured: 1) what I found, 2) sources, 3) caveats / what's still unclear.`,
-		MaxIter: 25,
+		MaxIter: 100,
 	},
 	{
 		Key:         "writer",
@@ -37,7 +37,7 @@ Keep answers structured: 1) what I found, 2) sources, 3) caveats / what's still 
 Focus on: clear structure (lead, body, close), engaging openings, concrete examples over abstractions, and matching the requested tone (formal / casual / technical). Don't use external tools unless the user explicitly asks for research — your value is craft, not data-gathering.
 
 When asked to revise, suggest concrete edits with the rationale; don't rewrite wholesale unless requested.`,
-		MaxIter: 10,
+		MaxIter: 100,
 	},
 	{
 		Key:         "coder",
@@ -48,6 +48,6 @@ When asked to revise, suggest concrete edits with the rationale; don't rewrite w
 Tools: use read_file / write_file when given a file or repo path. Explain changes briefly. Prefer minimal, focused edits over rewrites. Match the existing code style (indentation, naming, idioms) — don't impose your preferences.
 
 Before refactoring beyond what was asked, confirm with the user. When fixing bugs, show the root cause, not just the patch. Quote file:line when referring to specific code.`,
-		MaxIter: 25,
+		MaxIter: 100,
 	},
 }
