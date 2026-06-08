@@ -115,18 +115,14 @@ func (l *Loop) finalizeRun(
 	}
 
 	// Build final assistant message with output media refs for history persistence.
-	// Usage attaches the run's cumulative token accounting so sessions.preview
-	// can ship it back on reload — without this the SPA's per-bubble token
-	// chip would only ever populate live (via run.completed event) and go
-	// blank after a page reload. Subagent tokens already survive reload via
-	// the subagent_tasks table; this closes the gap for the parent message.
-	// Copy by value so future mutations on rs.totalUsage don't ripple back.
-	usageCopy := rs.totalUsage
+	// Usage decouples from rs.totalUsage so any post-finalize mutation on
+	// runState doesn't ripple into the persisted message.
+	usage := rs.totalUsage
 	assistantMsg := providers.Message{
 		Role:     "assistant",
 		Content:  rs.finalContent,
 		Thinking: rs.finalThinking,
-		Usage:    &usageCopy,
+		Usage:    &usage,
 	}
 	for _, mr := range rs.mediaResults {
 		kind := "document"
