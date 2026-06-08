@@ -115,10 +115,14 @@ func (l *Loop) finalizeRun(
 	}
 
 	// Build final assistant message with output media refs for history persistence.
+	// Usage decouples from rs.totalUsage so any post-finalize mutation on
+	// runState doesn't ripple into the persisted message.
+	usage := rs.totalUsage
 	assistantMsg := providers.Message{
 		Role:     "assistant",
 		Content:  rs.finalContent,
 		Thinking: rs.finalThinking,
+		Usage:    &usage,
 	}
 	for _, mr := range rs.mediaResults {
 		kind := "document"
