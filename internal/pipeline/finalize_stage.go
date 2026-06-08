@@ -77,10 +77,18 @@ func (s *FinalizeStage) Execute(ctx context.Context, state *RunState) error {
 	s.processMedia(state)
 
 	// 3b. Build final assistant message with MediaRefs for session persistence.
+	// Usage decouples from state.Think.TotalUsage so any post-finalize
+	// mutation doesn't ripple into the persisted message. Without this the
+	// SPA's per-bubble token chip would only ever populate live (via
+	// run.completed event) and go blank after a page reload — subagent
+	// tokens already survive reload via the subagent_tasks table, this
+	// closes the gap for the parent message.
+	usage := state.Think.TotalUsage
 	assistantMsg := providers.Message{
 		Role:     "assistant",
 		Content:  state.Observe.FinalContent,
 		Thinking: state.Observe.FinalThinking,
+		Usage:    &usage,
 	}
 	for _, mr := range state.Tool.MediaResults {
 		kind := "document"
