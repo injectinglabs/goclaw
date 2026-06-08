@@ -155,6 +155,16 @@ type Message struct {
 	// Pointer type so that older messages (stored before this field existed) deserialize as nil,
 	// allowing the frontend to fall back to synthetic timestamps.
 	CreatedAt *time.Time `json:"created_at,omitempty"`
+
+	// Usage carries the LLM token accounting for an assistant message —
+	// the cumulative run totals (prompt + completion + cache breakdown)
+	// from the agent loop's final iteration. Persisted to session
+	// history JSON so the SPA's per-bubble token chip can be restored
+	// after a page reload; the live path already gets these numbers
+	// via the run.completed event payload, but without this field they
+	// disappear on hydrate. Pointer + omitempty: older sessions and
+	// non-assistant messages deserialize as nil.
+	Usage *Usage `json:"usage,omitempty"`
 }
 
 // ToolCall represents a tool invocation requested by the LLM.
