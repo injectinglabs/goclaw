@@ -44,6 +44,16 @@ const (
 	// hood; same RunEvent stream surfaces after queue.
 	MethodWorkflowEnqueue = "workflow.enqueue"
 
+	// MethodWorkflowPeekSheet reads a range of values straight from
+	// the user's Google Sheet via composio-mcp's GOOGLESHEETS_VALUES_GET.
+	// The SPA bubble uses this to display the actual cell contents
+	// (what's IN the sheet right now) instead of the orchestrator's
+	// per-cell status DB cache. Composio authenticates via the user's
+	// own OAuth — X-Proxy-User from the WS session identity — so
+	// Google's ACL is the source of truth for access, not goclaw's
+	// tenant filter.
+	MethodWorkflowPeekSheet = "workflow.peekSheet"
+
 	// Agents management
 	MethodAgentsList     = "agents.list"
 	MethodAgentsCreate   = "agents.create"

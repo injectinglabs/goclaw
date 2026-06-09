@@ -309,18 +309,25 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 		d.server.SetWorkflowEnqueueHandler(enqueueH)
 
 		// SPA-facing WS methods:
-		//   workflow.runState — reconnect rehydration of the split-view
-		//                       canvas grid (read-only).
-		//   workflow.enqueue  — Enrich wizard kicks off a new run on
-		//                       behalf of the WS-authenticated user.
-		// Both share the same tenant scoping as chat.* — caller's WS
-		// session is authoritative, client-supplied tenant_id ignored.
-		methods.NewWorkflowMethods(workflowStore, enqueueH).Register(d.server.Router())
+		//   workflow.runState  — reconnect rehydration of the canvas
+		//                        grid status (read-only).
+		//   workflow.enqueue   — Enrich wizard kicks off a new run on
+		//                        behalf of the WS-authenticated user.
+		//   workflow.peekSheet — reads actual Google Sheet values via
+		//                        the user's own composio OAuth; used
+		//                        by the chat-bubble grid so values
+		//                        come from the source of truth (the
+		//                        sheet) rather than goclaw's DB cache.
+		// All three share the same tenant scoping as chat.* — caller's
+		// WS session is authoritative, client-supplied tenant_id ignored.
+		reader := runtime.NewMCPSheetReader(composioURL)
+		methods.NewWorkflowMethods(workflowStore, enqueueH, reader).Register(d.server.Router())
 
 		slog.Info("workflows orchestrator wired",
 			"writer", "composio-mcp",
+			"reader", "composio-mcp",
 			"resolver", "providerresolve.ResolveBackgroundProvider",
-			"ws_methods", "workflow.runState, workflow.enqueue",
+			"ws_methods", "workflow.runState, workflow.enqueue, workflow.peekSheet",
 		)
 	} else {
 		slog.Info("workflows orchestrator disabled (no PG store)")
