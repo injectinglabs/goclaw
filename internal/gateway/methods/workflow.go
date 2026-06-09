@@ -29,6 +29,7 @@ import (
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/internal/workflow/runtime"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
@@ -43,6 +44,7 @@ import (
 type WorkflowMethods struct {
 	store   store.SheetWorkflowStore
 	enqueue *httpapi.WorkflowEnqueueHandler
+	reader  *runtime.MCPSheetReader
 }
 
 // NewWorkflowMethods constructs a WorkflowMethods backed by the
@@ -53,8 +55,12 @@ type WorkflowMethods struct {
 // core logic for the workflow.enqueue WS RPC so both code paths share
 // validation, workflow create-on-the-fly, and orchestrator wiring.
 // Pass nil to disable the WS enqueue RPC (read-only methods stay live).
-func NewWorkflowMethods(s store.SheetWorkflowStore, enqueue *httpapi.WorkflowEnqueueHandler) *WorkflowMethods {
-	return &WorkflowMethods{store: s, enqueue: enqueue}
+//
+// reader is a composio-mcp client used by `workflow.peekSheet` to read
+// the user's Google Sheet contents directly (source of truth). Pass nil
+// to disable that RPC; read-only methods stay live.
+func NewWorkflowMethods(s store.SheetWorkflowStore, enqueue *httpapi.WorkflowEnqueueHandler, reader *runtime.MCPSheetReader) *WorkflowMethods {
+	return &WorkflowMethods{store: s, enqueue: enqueue, reader: reader}
 }
 
 // Register adds workflow methods to the WS RPC router.
@@ -62,6 +68,9 @@ func (m *WorkflowMethods) Register(router *gateway.MethodRouter) {
 	router.Register(protocol.MethodWorkflowRunState, m.handleRunState)
 	if m.enqueue != nil {
 		router.Register(protocol.MethodWorkflowEnqueue, m.handleEnqueue)
+	}
+	if m.reader != nil {
+		router.Register(protocol.MethodWorkflowPeekSheet, m.handlePeekSheet)
 	}
 }
 
@@ -291,4 +300,75 @@ func isInternalEnqueueError(msg string) bool {
 		return true
 	}
 	return false
+}
+
+// handlePeekSheet reads a range from the caller's Google Sheet and
+// returns the values as a 2-D string grid. SPA bubble uses this to
+// render the actual contents of the user's sheet — what they would
+// see if they opened it in Google Sheets directly.
+//
+// Request:  { "spreadsheet_id": "...", "sheet_tab": "...", "range": "A1:E10" }
+//   - sheet_tab is optional; defaults to "Sheet1"
+//   - range is in A1 notation; values inside the tab (e.g. "A1:E10")
+//
+// Response: { "values": [["company","country",...], ["OpenAI",...], ...] }
+//
+// Auth: uses caller's WS userID as X-Proxy-User to composio. Google's
+// own OAuth then dictates access — we don't add a goclaw-side tenant
+// check because the user's Google identity already scopes this.
+func (m *WorkflowMethods) handlePeekSheet(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
+	if m.reader == nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "sheet reader not configured"))
+		return
+	}
+
+	var params struct {
+		SpreadsheetID string `json:"spreadsheet_id"`
+		SheetTab      string `json:"sheet_tab"`
+		Range         string `json:"range"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid json: "+err.Error()))
+		return
+	}
+	if params.SpreadsheetID == "" {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "spreadsheet_id")))
+		return
+	}
+	tab := params.SheetTab
+	if tab == "" {
+		tab = "Sheet1"
+	}
+	a1 := params.Range
+	if a1 == "" {
+		// Default range covers a reasonable bulk-enrich sheet without
+		// loading 1000 rows. Caller can widen via the param.
+		a1 = "A1:Z100"
+	}
+	// Quote the tab name in case it has spaces (e.g. "Top AI Companies").
+	fullRange := "'" + tab + "'!" + a1
+
+	userID := client.UserID()
+	if userID == "" {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "no user identity on session"))
+		return
+	}
+
+	values, err := m.reader.ReadRange(ctx, userID, params.SpreadsheetID, fullRange)
+	if err != nil {
+		slog.Error("workflow.peekSheet failed", "spreadsheet_id", params.SpreadsheetID, "range", fullRange, "err", err)
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "sheet read failed: "+err.Error()))
+		return
+	}
+
+	if values == nil {
+		values = [][]string{}
+	}
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
+		"spreadsheet_id": params.SpreadsheetID,
+		"sheet_tab":      tab,
+		"range":          a1,
+		"values":         values,
+	}))
 }

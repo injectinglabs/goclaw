@@ -89,7 +89,7 @@ func TestWorkflowRunState_HappyPath_ReturnsRunAndCells(t *testing.T) {
 	s := memory.NewSheetWorkflowStore()
 	runID, tenantID := seedRun(t, s, "running", 2, 3) // 2×3 = 6 cells
 
-	m := NewWorkflowMethods(s, nil)
+	m := NewWorkflowMethods(s, nil, nil)
 	client, sendCh := gateway.NewTestClientWithSend(permissions.RoleViewer, tenantID, "user-1")
 
 	m.handleRunState(context.Background(), client, runStateReqFrame(t, runID.String()))
@@ -145,7 +145,7 @@ func TestWorkflowRunState_CrossTenant_ReturnsNotFound(t *testing.T) {
 	s := memory.NewSheetWorkflowStore()
 	runID, _ := seedRun(t, s, "running", 1, 1)
 
-	m := NewWorkflowMethods(s, nil)
+	m := NewWorkflowMethods(s, nil, nil)
 	foreignTenant := uuid.New() // NOT the run's tenant
 	client, sendCh := gateway.NewTestClientWithSend(permissions.RoleViewer, foreignTenant, "stranger")
 
@@ -164,7 +164,7 @@ func TestWorkflowRunState_CrossTenant_ReturnsNotFound(t *testing.T) {
 
 func TestWorkflowRunState_MissingRunID_ReturnsInvalidRequest(t *testing.T) {
 	s := memory.NewSheetWorkflowStore()
-	m := NewWorkflowMethods(s, nil)
+	m := NewWorkflowMethods(s, nil, nil)
 	client, sendCh := gateway.NewTestClientWithSend(permissions.RoleViewer, uuid.New(), "user-1")
 
 	raw, _ := json.Marshal(map[string]string{})
@@ -184,7 +184,7 @@ func TestWorkflowRunState_MissingRunID_ReturnsInvalidRequest(t *testing.T) {
 
 func TestWorkflowRunState_InvalidUUID_ReturnsInvalidRequest(t *testing.T) {
 	s := memory.NewSheetWorkflowStore()
-	m := NewWorkflowMethods(s, nil)
+	m := NewWorkflowMethods(s, nil, nil)
 	client, sendCh := gateway.NewTestClientWithSend(permissions.RoleViewer, uuid.New(), "user-1")
 
 	m.handleRunState(context.Background(), client, runStateReqFrame(t, "not-a-uuid"))
@@ -199,7 +199,7 @@ func TestWorkflowRunState_InvalidUUID_ReturnsInvalidRequest(t *testing.T) {
 
 func TestWorkflowRunState_UnknownRun_ReturnsNotFound(t *testing.T) {
 	s := memory.NewSheetWorkflowStore()
-	m := NewWorkflowMethods(s, nil)
+	m := NewWorkflowMethods(s, nil, nil)
 	client, sendCh := gateway.NewTestClientWithSend(permissions.RoleViewer, uuid.New(), "user-1")
 
 	m.handleRunState(context.Background(), client, runStateReqFrame(t, uuid.New().String()))
