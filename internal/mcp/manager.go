@@ -367,7 +367,15 @@ func (m *Manager) LoadForAgent(ctx context.Context, agentID uuid.UUID, userID st
 	m.unregisterAllTools()
 	m.userCredServers = nil
 
+	slog.Info("mcp.loadforagent.start", "agent", agentID, "user", userID, "accessible_count", len(accessible))
 	for _, info := range accessible {
+		slog.Info("mcp.loadforagent.consider",
+			"server", info.Server.Name,
+			"enabled", info.Server.Enabled,
+			"is_global", info.Server.IsGlobal,
+			"settings_len", len(info.Server.Settings),
+			"requires_user_creds", requireUserCreds(info.Server.Settings),
+		)
 		// When loading at startup (userID=""), store servers requiring per-user
 		// credentials for later per-request resolution instead of skipping them.
 		if userID == "" && requireUserCreds(info.Server.Settings) && info.Server.Enabled {
@@ -378,6 +386,7 @@ func (m *Manager) LoadForAgent(ctx context.Context, agentID uuid.UUID, userID st
 
 		rs := m.resolveServerCredentials(ctx, info, userID)
 		if rs == nil {
+			slog.Info("mcp.loadforagent.resolve_nil", "server", info.Server.Name)
 			continue
 		}
 		if err := m.connectAndFilter(ctx, rs); err != nil {
