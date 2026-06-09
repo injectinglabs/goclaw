@@ -121,7 +121,7 @@ func TestOrchestrator_HappyPath_SingleWave(t *testing.T) {
 		return CellResult{Value: t.Column.Name + ":ok", TokensIn: 100, TokensOut: 20, LatencyMs: 50}, nil
 	}}
 	bus := &recordingBus{}
-	o := New(st, exec, bus)
+	o := New(st, exec, bus, nil)
 	o.maxConcurrent = 4
 
 	rows := mkRows(3, "Acme")
@@ -177,7 +177,7 @@ func TestOrchestrator_DAG_WavesInOrder(t *testing.T) {
 		return CellResult{Value: "x"}, nil
 	}}
 	bus := &recordingBus{}
-	o := New(st, exec, bus)
+	o := New(st, exec, bus, nil)
 	o.maxConcurrent = 8
 
 	rows := mkRows(2, "C")
@@ -237,7 +237,7 @@ func TestOrchestrator_RetryTransientErrors(t *testing.T) {
 		return CellResult{Value: "ok"}, nil
 	}}
 	bus := &recordingBus{}
-	o := New(st, exec, bus)
+	o := New(st, exec, bus, nil)
 	o.baseBackoff = 5 * time.Millisecond // fast test
 
 	_, err := o.StartRun(context.Background(), StartRunInput{
@@ -271,7 +271,7 @@ func TestOrchestrator_GivesUpAfterMaxAttempts(t *testing.T) {
 		return CellResult{}, errors.New("permanent")
 	}}
 	bus := &recordingBus{}
-	o := New(st, exec, bus)
+	o := New(st, exec, bus, nil)
 	o.baseBackoff = 1 * time.Millisecond
 
 	_, err := o.StartRun(context.Background(), StartRunInput{
@@ -319,7 +319,7 @@ func TestOrchestrator_RowContextPropagatesBetweenWaves(t *testing.T) {
 		return CellResult{Value: t.Column.ID + "-row" + intStr(t.RowIdx)}, nil
 	}}
 	bus := &recordingBus{}
-	o := New(st, exec, bus)
+	o := New(st, exec, bus, nil)
 
 	_, err := o.StartRun(context.Background(), StartRunInput{
 		WorkflowID: w.ID, TenantID: w.TenantID, UserID: "u-1",
@@ -356,7 +356,7 @@ func TestOrchestrator_RejectsCycle(t *testing.T) {
 		return CellResult{Value: "x"}, nil
 	}}
 	bus := &recordingBus{}
-	o := New(st, exec, bus)
+	o := New(st, exec, bus, nil)
 
 	_, err := o.StartRun(context.Background(), StartRunInput{
 		WorkflowID: w.ID, TenantID: w.TenantID, UserID: "u-1",
@@ -393,7 +393,7 @@ func TestOrchestrator_ConcurrencyCapIsRespected(t *testing.T) {
 		return CellResult{Value: "x"}, nil
 	}}
 	bus := &recordingBus{}
-	o := New(st, exec, bus)
+	o := New(st, exec, bus, nil)
 	o.maxConcurrent = 3
 
 	_, err := o.StartRun(context.Background(), StartRunInput{
