@@ -14,6 +14,7 @@ import (
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
 	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
 	"github.com/nextlevelbuilder/goclaw/internal/media"
+	"github.com/nextlevelbuilder/goclaw/internal/providerresolve"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/store/pg"
@@ -258,19 +259,21 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 	if d.pgStores != nil && d.pgStores.DB != nil {
 		workflowStore := pg.NewPGSheetWorkflowStore(d.pgStores.DB)
 
-		providerName := d.cfg.Workflows.ProviderName
-		if providerName == "" {
-			// Provider name must match what's actually registered in the
-			// goclaw providers registry. On injecting.ai stage+prod the
-			// chat provider is registered as "llm-service" (the OpenAI-
-			// compatible route through web-agent-api). Using "openai"
-			// produces "provider not found: openai" on every cell.
-			providerName = "llm-service"
-		}
+		// Resolve provider + model via the same path background workers
+		// use (dreaming / episodic / vault enrich consolidation). This
+		// honours system_configs background.provider / background.model
+		// overrides, falls back to agent.default_*, and ultimately to
+		// the ai_models alias chain — no hardcoded model name, no
+		// hardcoded provider name.
 		registry := d.providerRegistry
+		sysCfgs := d.pgStores.SystemConfigs
 		llmExec := runtime.NewLLMCellExecutorTenant(
-			func(ctx context.Context, tenantID uuid.UUID) (providers.Provider, error) {
-				return registry.GetForTenant(tenantID, providerName)
+			func(ctx context.Context, tenantID uuid.UUID) (providers.Provider, string, error) {
+				p, m := providerresolve.ResolveBackgroundProvider(ctx, tenantID, registry, sysCfgs)
+				if p == nil {
+					return nil, "", fmt.Errorf("no background provider for tenant %s", tenantID)
+				}
+				return p, m, nil
 			},
 			d.pgStores.Tenants,
 		)
