@@ -265,7 +265,14 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 			return registry.GetForTenant(tenantID, providerName)
 		})
 
-		writer := runtime.NewMCPSheetWriter(d.cfg.Workflows.SheetsMCPURL, d.cfg.Gateway.Token, "")
+		// Token is the sheets-mcp X-Service-Token (env SHEETS_MCP_SERVICE_TOKEN),
+	// distinct from the goclaw gateway bearer. Empty → writer call will
+	// 403 against the sidecar's mcpauth middleware; log a warning so an
+	// operator can spot a misconfigured deploy from logs alone.
+	if d.cfg.Workflows.ServiceToken == "" {
+		slog.Warn("workflows: SHEETS_MCP_SERVICE_TOKEN unset — writer will fail mcpauth at sheets-mcp")
+	}
+	writer := runtime.NewMCPSheetWriter(d.cfg.Workflows.SheetsMCPURL, d.cfg.Workflows.ServiceToken, "")
 		evtBus := runtime.NewBusEventBus(d.msgBus)
 		orch := runtime.New(workflowStore, llmExec, evtBus, writer)
 		orch.SetMaxConcurrent(d.cfg.Workflows.MaxConcurrent)

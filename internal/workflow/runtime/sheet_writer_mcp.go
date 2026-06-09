@@ -15,10 +15,12 @@ import (
 // is plain HTTP JSON-RPC at /mcp on the sidecar — we don't need the
 // mcp-go client library, a tiny shim is enough.
 //
-// Headers passed verbatim from the orchestrator caller so per-cell
-// billing attributes correctly to the workflow owner's org:
-//
-//	X-Actor-User-ID, X-Actor-Org-ID, Authorization (service token).
+// Auth: sheets-mcp's mcpauth middleware (shared/mcpauth/middleware.go)
+// expects the shared secret in the X-Service-Token header — NOT in
+// Authorization. The token value is what sheets-mcp loads from its own
+// MCP_SERVICE_TOKEN env var (mirrored in goclaw as SHEETS_MCP_SERVICE_TOKEN).
+// X-Actor-* headers carry the workflow owner's identity for per-cell
+// billing attribution.
 //
 // Retries are NOT done here — the orchestrator already retries failed
 // cells per CellExecutor, and writer failure fails the run (the user's
@@ -32,9 +34,10 @@ type MCPSheetWriter struct {
 
 // NewMCPSheetWriter constructs a writer for the given sheets-mcp URL
 // (e.g. "http://sheets-mcp.injecting.ai" or local docker
-// "http://sheets-mcp:9300"). `serviceToken` is the gateway bearer
-// shared between goclaw and the sheets-mcp sidecar. `orgID` is the
-// tenant's external org id (slug or UUID) used in X-Actor-Org-ID.
+// "http://sheets-mcp:8102"). `serviceToken` is the X-Service-Token
+// shared between goclaw and the sheets-mcp sidecar (sourced from
+// SHEETS_MCP_SERVICE_TOKEN env). `orgID` is the tenant's external org
+// id (slug or UUID) used in X-Actor-Org-ID.
 func NewMCPSheetWriter(mcpURL, serviceToken, orgID string) *MCPSheetWriter {
 	return &MCPSheetWriter{
 		mcpURL:       strings.TrimRight(mcpURL, "/"),
@@ -95,7 +98,7 @@ func (w *MCPSheetWriter) BatchWrite(ctx context.Context, userID string, writes [
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	if w.serviceToken != "" {
-		req.Header.Set("Authorization", "Bearer "+w.serviceToken)
+		req.Header.Set("X-Service-Token", w.serviceToken)
 	}
 	req.Header.Set("X-Actor-User-ID", userID)
 	if w.orgID != "" {
