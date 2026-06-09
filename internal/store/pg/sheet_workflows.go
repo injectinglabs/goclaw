@@ -447,6 +447,37 @@ func (s *PGSheetWorkflowStore) ListUnfinishedCells(ctx context.Context, runID uu
 	return out, rows.Err()
 }
 
+// ListAllCells returns every cell for a run regardless of status, in
+// (row_idx, col_idx) order. Used by workflow.runState to rehydrate the
+// SPA's split-view canvas after a WS reconnect — `done` and `error`
+// cells must be included so the grid renders the actual progress, not
+// just the unfinished tail.
+func (s *PGSheetWorkflowStore) ListAllCells(ctx context.Context, runID uuid.UUID) ([]store.SheetWorkflowCell, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT run_id, row_idx, col_idx, status, error_message, attempt,
+		       tokens_in, tokens_out, latency_ms, updated_at
+		  FROM sheet_workflow_cells
+		 WHERE run_id = $1
+		 ORDER BY row_idx, col_idx
+	`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.SheetWorkflowCell
+	for rows.Next() {
+		c := store.SheetWorkflowCell{}
+		if err := rows.Scan(
+			&c.RunID, &c.RowIdx, &c.ColIdx, &c.Status, &c.ErrorMessage, &c.Attempt,
+			&c.TokensIn, &c.TokensOut, &c.LatencyMs, &c.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // ─── Recovery ────────────────────────────────────────────────────────
 
 // ListRecoverableRuns returns runs in queued/running state whose row was

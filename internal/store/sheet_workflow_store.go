@@ -170,6 +170,13 @@ type SheetWorkflowStore interface {
 	BulkInitCells(ctx context.Context, runID uuid.UUID, rowCount, colCount int) error
 	UpdateCellStatus(ctx context.Context, runID uuid.UUID, rowIdx, colIdx int, status string, errMsg *string, attempt int, tokensIn, tokensOut int, latencyMs *int) error
 	ListUnfinishedCells(ctx context.Context, runID uuid.UUID) ([]SheetWorkflowCell, error)
+	// ListAllCells returns every cell row for a run regardless of
+	// status. Used by the workflow.runState RPC to rehydrate the SPA's
+	// grid on WS (re)connect — `workflow.event` is at-least-once but
+	// not durable, so any cell transitions emitted before the client
+	// connected are otherwise lost. Returned in (row_idx, col_idx)
+	// order so the SPA can fold the snapshot deterministically.
+	ListAllCells(ctx context.Context, runID uuid.UUID) ([]SheetWorkflowCell, error)
 
 	// Recovery — pick up runs whose goclaw instance crashed mid-flight.
 	// Returns runs whose status is queued/running with no recent heartbeat.

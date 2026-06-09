@@ -26,6 +26,16 @@ const (
 	// activeSessions + sessions.preview hybrid for in-flight recovery.
 	MethodRunsSubscribe = "runs.subscribe"
 
+	// MethodWorkflowRunState returns the full per-cell snapshot for a
+	// sheet-workflow run. Used by the SPA's Paradigm-style split-view
+	// canvas on WS (re)connect to rehydrate the grid without waiting on
+	// `workflow.event` traffic (events are at-least-once but not
+	// durable — anything emitted before this client (re)connected is
+	// gone). Server-side auth: caller's tenant must match the run's
+	// tenant; otherwise not_found. Schema docs:
+	// goclaw/docs/SHEET_WORKFLOWS_EVENTS.md.
+	MethodWorkflowRunState = "workflow.runState"
+
 	// Agents management
 	MethodAgentsList     = "agents.list"
 	MethodAgentsCreate   = "agents.create"

@@ -317,6 +317,30 @@ func (s *SheetWorkflowStore) ListUnfinishedCells(_ context.Context, runID uuid.U
 	return out, nil
 }
 
+// ListAllCells returns every cell for a run regardless of status, in
+// (row_idx, col_idx) order — same contract as the PG impl. The deterministic
+// order matters for workflow.runState callers folding the snapshot into a
+// reducer that asserts (row,col) uniqueness.
+func (s *SheetWorkflowStore) ListAllCells(_ context.Context, runID uuid.UUID) ([]store.SheetWorkflowCell, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	bucket, ok := s.cells[runID]
+	if !ok {
+		return nil, nil
+	}
+	out := make([]store.SheetWorkflowCell, 0, len(bucket))
+	for _, c := range bucket {
+		out = append(out, *c)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].RowIdx != out[j].RowIdx {
+			return out[i].RowIdx < out[j].RowIdx
+		}
+		return out[i].ColIdx < out[j].ColIdx
+	})
+	return out, nil
+}
+
 func (s *SheetWorkflowStore) ListRecoverableRuns(_ context.Context, olderThan time.Duration) ([]store.SheetWorkflowRun, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
