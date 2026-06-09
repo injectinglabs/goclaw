@@ -8,7 +8,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/actorheaders"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
 // ProviderResolver returns the Provider that should serve a cell for a
@@ -37,6 +39,12 @@ type LLMCellExecutor struct {
 	// aware closure without re-allocating LLMCellExecutor per cell.
 	provider        providers.Provider
 	resolveProvider ProviderResolver
+	// tenantStore lets the executor attach X-Actor-User-ID +
+	// X-Actor-Org-ID headers to outbound provider.Chat calls so the
+	// web-agent-api service-token receiver accepts them. nil → headers
+	// skipped (only safe in tests / single-tenant local where the
+	// receiver is unauth'd or in api_key mode).
+	tenantStore store.TenantStore
 	// Optional model override; falls back to provider.DefaultModel().
 	Model string
 }
@@ -50,8 +58,11 @@ func NewLLMCellExecutor(p providers.Provider) *LLMCellExecutor {
 // NewLLMCellExecutorTenant resolves the Provider per cell using the
 // callback. The orchestrator passes CellTask.TenantID into the closure
 // so workflows use the same tenant-specific provider chat sessions do.
-func NewLLMCellExecutorTenant(resolve ProviderResolver) *LLMCellExecutor {
-	return &LLMCellExecutor{resolveProvider: resolve}
+// `ts` is used to attach X-Actor-* headers on outbound chat calls so
+// web-agent-api's service-token receiver accepts them; pass nil to skip
+// attribution (tests / api_key-mode local dev only).
+func NewLLMCellExecutorTenant(resolve ProviderResolver, ts store.TenantStore) *LLMCellExecutor {
+	return &LLMCellExecutor{resolveProvider: resolve, tenantStore: ts}
 }
 
 const cellSystemPrompt = `You are a precise data-enrichment assistant.
@@ -89,7 +100,16 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 		req.Model = e.Model
 	}
 
-	resp, err := prov.Chat(ctx, req)
+	// Attach X-Actor-User-ID + X-Actor-Org-ID so web-agent-api's
+	// service-token receiver accepts the call. Without this it returns
+	// HTTP 400 "Service-token auth requires X-Actor-User-ID and
+	// X-Actor-Org-ID headers" and every cell fails.
+	chatCtx := ctx
+	if e.tenantStore != nil && t.TenantID != uuid.Nil && t.UserID != "" {
+		chatCtx = actorheaders.Attach(ctx, e.tenantStore, t.TenantID, t.UserID)
+	}
+
+	resp, err := prov.Chat(chatCtx, req)
 	if err != nil {
 		return CellResult{}, fmt.Errorf("provider chat: %w", err)
 	}

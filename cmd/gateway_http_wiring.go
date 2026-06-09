@@ -268,9 +268,12 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 			providerName = "llm-service"
 		}
 		registry := d.providerRegistry
-		llmExec := runtime.NewLLMCellExecutorTenant(func(ctx context.Context, tenantID uuid.UUID) (providers.Provider, error) {
-			return registry.GetForTenant(tenantID, providerName)
-		})
+		llmExec := runtime.NewLLMCellExecutorTenant(
+			func(ctx context.Context, tenantID uuid.UUID) (providers.Provider, error) {
+				return registry.GetForTenant(tenantID, providerName)
+			},
+			d.pgStores.Tenants,
+		)
 
 		// composio-mcp lives on the docker internal network at a fixed
 		// host (no env override — it's a same-stack sidecar). Auth is
