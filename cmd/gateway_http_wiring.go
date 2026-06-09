@@ -260,7 +260,12 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 
 		providerName := d.cfg.Workflows.ProviderName
 		if providerName == "" {
-			providerName = "openai" // default to the web-agent-api OpenAI-compatible route
+			// Provider name must match what's actually registered in the
+			// goclaw providers registry. On injecting.ai stage+prod the
+			// chat provider is registered as "llm-service" (the OpenAI-
+			// compatible route through web-agent-api). Using "openai"
+			// produces "provider not found: openai" on every cell.
+			providerName = "llm-service"
 		}
 		registry := d.providerRegistry
 		llmExec := runtime.NewLLMCellExecutorTenant(func(ctx context.Context, tenantID uuid.UUID) (providers.Provider, error) {
