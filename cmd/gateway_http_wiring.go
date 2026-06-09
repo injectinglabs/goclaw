@@ -308,17 +308,19 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 		enqueueH := httpapi.NewWorkflowEnqueueHandler(workflowStore, orch).WithTenantResolver(resolveTenant)
 		d.server.SetWorkflowEnqueueHandler(enqueueH)
 
-		// SPA read-side: workflow.runState WS RPC for reconnect rehydration
-		// of the Paradigm-style split-view canvas. Contract is locked in
-		// docs/SHEET_WORKFLOWS_EVENTS.md. Same tenant scoping as chat.* —
-		// uses the caller's WS session identity, never trusts client-
-		// supplied tenant_id.
-		methods.NewWorkflowMethods(workflowStore).Register(d.server.Router())
+		// SPA-facing WS methods:
+		//   workflow.runState — reconnect rehydration of the split-view
+		//                       canvas grid (read-only).
+		//   workflow.enqueue  — Enrich wizard kicks off a new run on
+		//                       behalf of the WS-authenticated user.
+		// Both share the same tenant scoping as chat.* — caller's WS
+		// session is authoritative, client-supplied tenant_id ignored.
+		methods.NewWorkflowMethods(workflowStore, enqueueH).Register(d.server.Router())
 
 		slog.Info("workflows orchestrator wired",
 			"writer", "composio-mcp",
 			"resolver", "providerresolve.ResolveBackgroundProvider",
-			"ws_methods", "workflow.runState",
+			"ws_methods", "workflow.runState, workflow.enqueue",
 		)
 	} else {
 		slog.Info("workflows orchestrator disabled (no PG store)")

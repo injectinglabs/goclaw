@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -113,6 +114,61 @@ type EnqueueRequest struct {
 type EnqueueResponse struct {
 	RunID  uuid.UUID `json:"run_id"`
 	Status string    `json:"status"`
+}
+
+// EnqueueAsUser is the core enqueue logic re-usable by trusted server-
+// side callers that have already authenticated their tenant + user
+// identity through some other path (e.g. the WS workflow.enqueue RPC,
+// which reads tenant + user from the gateway client session).
+//
+// HTTP callers go through handleEnqueue which still does its own bearer
+// auth + body decode; this method is the bottom half. Returns the run
+// id on success or an error suitable for surfacing to the client.
+func (h *WorkflowEnqueueHandler) EnqueueAsUser(ctx context.Context, tenantID uuid.UUID, userID string, req *EnqueueRequest) (uuid.UUID, error) {
+	if h.orchestrator == nil || h.workflowStore == nil {
+		return uuid.Nil, errors.New("workflow runtime not configured")
+	}
+	if tenantID == uuid.Nil {
+		return uuid.Nil, errors.New("tenant_id required")
+	}
+	if userID == "" {
+		return uuid.Nil, errors.New("user_id required")
+	}
+	// Caller's identity is authoritative — never trust body fields.
+	req.TenantID = tenantID
+	req.UserID = userID
+
+	if err := validateEnqueue(req); err != nil {
+		return uuid.Nil, err
+	}
+
+	wfID, err := resolveOrCreateWorkflow(ctx, h.workflowStore, req)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("workflow store: %w", err)
+	}
+
+	rowsByIdx := make(map[int]map[string]string, len(req.Rows))
+	for k, v := range req.Rows {
+		idx, perr := parseRowIdx(k)
+		if perr != nil {
+			return uuid.Nil, fmt.Errorf("invalid row index %q", k)
+		}
+		rowsByIdx[idx] = v
+	}
+
+	runID, err := h.orchestrator.StartRun(ctx, runtime.StartRunInput{
+		WorkflowID:     wfID,
+		TenantID:       req.TenantID,
+		UserID:         req.UserID,
+		TriggeredBy:    req.TriggeredBy,
+		TriggerPayload: []byte(req.TriggerPayload),
+		Rows:           rowsByIdx,
+		MaxConcurrent:  req.MaxConcurrent,
+	})
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("start run: %w", err)
+	}
+	return runID, nil
 }
 
 func (h *WorkflowEnqueueHandler) handleEnqueue(w http.ResponseWriter, r *http.Request) {
