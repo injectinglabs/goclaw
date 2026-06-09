@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -27,102 +28,107 @@ func TestColLetter(t *testing.T) {
 	}
 }
 
-func TestMCPSheetWriter_BatchWrite_SendsCorrectPayload(t *testing.T) {
-	var received map[string]any
-	var receivedAuth string
-	var receivedServiceToken string
-	var receivedActorUser string
-	var receivedActorOrg string
+// TestMCPSheetWriter_PerCell_ComposioRouting asserts the writer issues
+// one GOOGLESHEETS_VALUES_UPDATE composio-mcp call per CellWrite with
+// X-Proxy-User identity and the right A1 ranges. Composio's allowlist
+// doesn't include a batch update, so per-cell fan-out is intentional —
+// orchestrator concurrency already absorbs the overhead.
+func TestMCPSheetWriter_PerCell_ComposioRouting(t *testing.T) {
+	type recv struct {
+		path        string
+		proxyUser   string
+		authPresent bool
+		svcPresent  bool
+		body        map[string]any
+	}
+	var calls []recv
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/mcp" {
-			t.Errorf("path: want /mcp, got %s", r.URL.Path)
-		}
-		receivedAuth = r.Header.Get("Authorization")
-		receivedServiceToken = r.Header.Get("X-Service-Token")
-		receivedActorUser = r.Header.Get("X-Actor-User-ID")
-		receivedActorOrg = r.Header.Get("X-Actor-Org-ID")
 		body, _ := io.ReadAll(r.Body)
-		if err := json.Unmarshal(body, &received); err != nil {
-			t.Fatal(err)
-		}
+		var bodyMap map[string]any
+		_ = json.Unmarshal(body, &bodyMap)
+		calls = append(calls, recv{
+			path:        r.URL.Path,
+			proxyUser:   r.Header.Get("X-Proxy-User"),
+			authPresent: r.Header.Get("Authorization") != "",
+			svcPresent:  r.Header.Get("X-Service-Token") != "",
+			body:        bodyMap,
+		})
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"text":"{}"}],"isError":false}}`))
 	}))
 	defer srv.Close()
 
-	wr := NewMCPSheetWriter(srv.URL, "svc-token", "org-slug")
+	wr := NewMCPSheetWriter(srv.URL, "ignored-legacy-token", "org-slug")
 	err := wr.BatchWrite(context.Background(), "user-1", []CellWrite{
 		{SpreadsheetID: "ss-1", SheetTab: "Sheet1", RowIdx: 0, ColIdx: 0, Value: "Acme"},
 		{SpreadsheetID: "ss-1", SheetTab: "Sheet1", RowIdx: 0, ColIdx: 1, Value: "Jane"},
-		{SpreadsheetID: "ss-1", SheetTab: "Sheet1", RowIdx: 1, ColIdx: 26, Value: "v"}, // tests AA column
+		{SpreadsheetID: "ss-1", SheetTab: "Sheet1", RowIdx: 1, ColIdx: 26, Value: "v"}, // AA column
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if receivedServiceToken != "svc-token" {
-		t.Errorf("X-Service-Token: want 'svc-token', got %q", receivedServiceToken)
+	if len(calls) != 3 {
+		t.Fatalf("want 3 composio calls, got %d", len(calls))
 	}
-	if receivedAuth != "" {
-		t.Errorf("Authorization header must NOT be set (sheets-mcp uses X-Service-Token), got %q", receivedAuth)
-	}
-	if receivedActorUser != "user-1" {
-		t.Errorf("X-Actor-User-ID: want user-1, got %q", receivedActorUser)
-	}
-	if receivedActorOrg != "org-slug" {
-		t.Errorf("X-Actor-Org-ID: want org-slug, got %q", receivedActorOrg)
+	for i, c := range calls {
+		if c.path != "/mcp" {
+			t.Errorf("call %d path: want /mcp, got %s", i, c.path)
+		}
+		if c.proxyUser != "user-1" {
+			t.Errorf("call %d X-Proxy-User: want user-1, got %q", i, c.proxyUser)
+		}
+		if c.authPresent {
+			t.Errorf("call %d must NOT send Authorization (composio is unauth on internal net)", i)
+		}
+		if c.svcPresent {
+			t.Errorf("call %d must NOT send X-Service-Token (that was the retired sheets-mcp path)", i)
+		}
+		params, _ := c.body["params"].(map[string]any)
+		if name, _ := params["name"].(string); name != "GOOGLESHEETS_VALUES_UPDATE" {
+			t.Errorf("call %d tool name: want GOOGLESHEETS_VALUES_UPDATE, got %s", i, name)
+		}
+		args, _ := params["arguments"].(map[string]any)
+		if args["spreadsheet_id"] != "ss-1" {
+			t.Errorf("call %d spreadsheet_id: got %v", i, args["spreadsheet_id"])
+		}
 	}
 
-	method, _ := received["method"].(string)
-	if method != "tools/call" {
-		t.Errorf("method: want tools/call, got %s", method)
+	// Range mapping: row 0 → row 2 (header offset), col 26 → AA.
+	args0, _ := calls[0].body["params"].(map[string]any)["arguments"].(map[string]any)
+	if args0["range"] != "Sheet1!A2" {
+		t.Errorf("cell 0 range: want Sheet1!A2, got %v", args0["range"])
 	}
-	params, _ := received["params"].(map[string]any)
-	if name, _ := params["name"].(string); name != "sheets_batch_update" {
-		t.Errorf("tool name: want sheets_batch_update, got %s", name)
-	}
-	args, _ := params["arguments"].(map[string]any)
-	if args["spreadsheet_id"] != "ss-1" {
-		t.Errorf("spreadsheet_id: want ss-1, got %v", args["spreadsheet_id"])
-	}
-	updates, _ := args["updates"].([]any)
-	if len(updates) != 3 {
-		t.Fatalf("updates count: want 3, got %d", len(updates))
-	}
-	first, _ := updates[0].(map[string]any)
-	if first["range"] != "Sheet1!A2" { // row 0 → A2 (header offset)
-		t.Errorf("first range: want Sheet1!A2, got %v", first["range"])
-	}
-	third, _ := updates[2].(map[string]any)
-	if third["range"] != "Sheet1!AA3" { // col 26 → AA, row 1 → row 3
-		t.Errorf("third range: want Sheet1!AA3, got %v", third["range"])
+	args2, _ := calls[2].body["params"].(map[string]any)["arguments"].(map[string]any)
+	if args2["range"] != "Sheet1!AA3" {
+		t.Errorf("cell 2 range: want Sheet1!AA3, got %v", args2["range"])
 	}
 }
 
 func TestMCPSheetWriter_NoOpOnEmpty(t *testing.T) {
-	called := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
+	var called atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called.Add(1)
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()
-	wr := NewMCPSheetWriter(srv.URL, "tok", "org")
+	wr := NewMCPSheetWriter(srv.URL, "", "org")
 	if err := wr.BatchWrite(context.Background(), "u", nil); err != nil {
 		t.Fatal(err)
 	}
-	if called {
-		t.Errorf("HTTP should not be called on empty batch")
+	if called.Load() != 0 {
+		t.Errorf("HTTP must not be called on empty batch")
 	}
 }
 
 func TestMCPSheetWriter_HTTPErrorPropagates(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte(`upstream dead`))
 	}))
 	defer srv.Close()
-	wr := NewMCPSheetWriter(srv.URL, "tok", "org")
+	wr := NewMCPSheetWriter(srv.URL, "", "org")
 	err := wr.BatchWrite(context.Background(), "u", []CellWrite{
 		{SpreadsheetID: "ss", RowIdx: 0, ColIdx: 0, Value: "x"},
 	})
@@ -132,14 +138,15 @@ func TestMCPSheetWriter_HTTPErrorPropagates(t *testing.T) {
 }
 
 func TestMCPSheetWriter_ToolErrorEnvelope(t *testing.T) {
-	// MCP tool returned 200 but with isError + error text in content
-	// (e.g. Google Sheets auth expired).
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Composio returns 200 + result.isError=true for soft failures
+	// (e.g. composio user has no Google connection). Treat as error
+	// so the orchestrator can retry / mark the cell failed.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"text":"auth_failed: token revoked"}]}}`))
 	}))
 	defer srv.Close()
-	wr := NewMCPSheetWriter(srv.URL, "tok", "org")
+	wr := NewMCPSheetWriter(srv.URL, "", "org")
 	err := wr.BatchWrite(context.Background(), "u", []CellWrite{
 		{SpreadsheetID: "ss", RowIdx: 0, ColIdx: 0, Value: "x"},
 	})
@@ -157,15 +164,13 @@ func TestMCPSheetWriter_DefaultSheetTab(t *testing.T) {
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`))
 	}))
 	defer srv.Close()
-	wr := NewMCPSheetWriter(srv.URL, "tok", "org")
+	wr := NewMCPSheetWriter(srv.URL, "", "org")
 	_ = wr.BatchWrite(context.Background(), "u", []CellWrite{
 		{SpreadsheetID: "ss", SheetTab: "", RowIdx: 0, ColIdx: 0, Value: "x"},
 	})
 	params, _ := received["params"].(map[string]any)
 	args, _ := params["arguments"].(map[string]any)
-	updates, _ := args["updates"].([]any)
-	first, _ := updates[0].(map[string]any)
-	if first["range"] != "Sheet1!A2" {
-		t.Errorf("default tab: want Sheet1!A2 range, got %v", first["range"])
+	if args["range"] != "Sheet1!A2" {
+		t.Errorf("default tab: want Sheet1!A2 range, got %v", args["range"])
 	}
 }

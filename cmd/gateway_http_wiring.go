@@ -250,10 +250,11 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 	// sheets-mcp sidecar per wave flush), BusEventBus (forwards run /
 	// cell events onto the same WS bus the SPA already subscribes to).
 	//
-	// Workflows are disabled by default — only spin up when both the DB
-	// and a sheets-mcp URL are configured. Skill-driven path stays
-	// available regardless via existing sheets_* primitives.
-	if d.pgStores != nil && d.pgStores.DB != nil && d.cfg.Workflows.SheetsMCPURL != "" {
+	// Workflows are disabled by default — only spin up when the DB is
+	// configured. The writer drives composio-mcp's
+	// GOOGLESHEETS_VALUES_UPDATE per cell (best practice: piggyback on
+	// the user's Composio Google OAuth, no duplicate connect prompt).
+	if d.pgStores != nil && d.pgStores.DB != nil {
 		workflowStore := pg.NewPGSheetWorkflowStore(d.pgStores.DB)
 
 		providerName := d.cfg.Workflows.ProviderName
@@ -265,24 +266,21 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 			return registry.GetForTenant(tenantID, providerName)
 		})
 
-		// Token is the sheets-mcp X-Service-Token (env SHEETS_MCP_SERVICE_TOKEN),
-	// distinct from the goclaw gateway bearer. Empty → writer call will
-	// 403 against the sidecar's mcpauth middleware; log a warning so an
-	// operator can spot a misconfigured deploy from logs alone.
-	if d.cfg.Workflows.ServiceToken == "" {
-		slog.Warn("workflows: SHEETS_MCP_SERVICE_TOKEN unset — writer will fail mcpauth at sheets-mcp")
-	}
-	writer := runtime.NewMCPSheetWriter(d.cfg.Workflows.SheetsMCPURL, d.cfg.Workflows.ServiceToken, "")
+		// composio-mcp lives on the docker internal network at a fixed
+		// host (no env override — it's a same-stack sidecar). Auth is
+		// per-call via X-Proxy-User; no shared service token.
+		composioURL := "http://composio-mcp:9300"
+		writer := runtime.NewMCPSheetWriter(composioURL, "" /*legacy token unused*/, "")
 		evtBus := runtime.NewBusEventBus(d.msgBus)
 		orch := runtime.New(workflowStore, llmExec, evtBus, writer)
 		orch.SetMaxConcurrent(d.cfg.Workflows.MaxConcurrent)
 		d.server.SetWorkflowEnqueueHandler(httpapi.NewWorkflowEnqueueHandler(workflowStore, orch))
 		slog.Info("workflows orchestrator wired",
-			"sheets_mcp_url", d.cfg.Workflows.SheetsMCPURL,
+			"writer", "composio-mcp",
 			"provider", providerName,
 		)
 	} else {
-		slog.Info("workflows orchestrator disabled (set GOCLAW_WORKFLOWS_SHEETS_MCP_URL to enable)")
+		slog.Info("workflows orchestrator disabled (no PG store)")
 	}
 
 	// ElevenLabs voice list + refresh endpoints (GET /v1/voices, POST /v1/voices/refresh).
