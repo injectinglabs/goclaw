@@ -13,11 +13,13 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
-// ProviderResolver returns the Provider that should serve a cell for a
-// given tenant. Production wiring uses providers.Registry.GetForTenant
-// so workflows run on the same per-tenant provider chat sessions use;
-// tests pass a fixed-provider closure.
-type ProviderResolver func(ctx context.Context, tenantID uuid.UUID) (providers.Provider, error)
+// ProviderResolver returns the (Provider, model) pair that should serve
+// a cell for a given tenant. Production wiring uses
+// providerresolve.ResolveBackgroundProvider so workflows go through the
+// SAME provider+model selection background workers do — same
+// system_configs / agent.default_model / ai_models alias resolution,
+// no duplicate logic. Tests pass a fixed-pair closure.
+type ProviderResolver func(ctx context.Context, tenantID uuid.UUID) (providers.Provider, string, error)
 
 // LLMCellExecutor is the production CellExecutor — uses a Provider
 // (typically the gateway's "web-agent-api" route, set up with X-Actor-*
@@ -77,13 +79,16 @@ literal string "" (empty). Do not hallucinate. Verify via web sources
 when uncertain.`
 
 func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResult, error) {
-	prov := e.provider
+	var prov providers.Provider
+	var resolvedModel string
 	if e.resolveProvider != nil {
 		var err error
-		prov, err = e.resolveProvider(ctx, t.TenantID)
+		prov, resolvedModel, err = e.resolveProvider(ctx, t.TenantID)
 		if err != nil {
 			return CellResult{}, fmt.Errorf("resolve provider for tenant %s: %w", t.TenantID, err)
 		}
+	} else {
+		prov = e.provider
 	}
 	if prov == nil {
 		return CellResult{}, errors.New("no provider configured")
@@ -96,13 +101,19 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 			{Role: "user", Content: user},
 		},
 	}
-	// Model selection: explicit Model override wins; otherwise fall back
-	// to the provider's own default (set by Registry.GetForTenant per
-	// the ai_models alias rules). llm-service rejects requests with no
-	// model — "model is required" — so this must always end up set.
+	// Model precedence:
+	//  1. Explicit Model override on the executor (test / per-deploy
+	//     pinning).
+	//  2. Model from the resolver (system_configs background.model →
+	//     agent.default_model → ai_models alias chain).
+	//  3. provider.DefaultModel() as the last-ditch fallback so the
+	//     request is never sent with an empty Model — llm-service
+	//     rejects "model is required".
 	switch {
 	case e.Model != "":
 		req.Model = e.Model
+	case resolvedModel != "":
+		req.Model = resolvedModel
 	default:
 		req.Model = prov.DefaultModel()
 	}
