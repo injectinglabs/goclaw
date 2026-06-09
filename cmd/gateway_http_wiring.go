@@ -309,7 +309,7 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 		d.server.SetWorkflowEnqueueHandler(enqueueH)
 		slog.Info("workflows orchestrator wired",
 			"writer", "composio-mcp",
-			"provider", providerName,
+			"resolver", "providerresolve.ResolveBackgroundProvider",
 		)
 	} else {
 		slog.Info("workflows orchestrator disabled (no PG store)")
