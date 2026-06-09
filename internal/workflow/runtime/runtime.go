@@ -600,13 +600,53 @@ func rowCountFromInput(in StartRunInput) int {
 	return max
 }
 
+// columnIndex resolves the 0-based sheet column index a cell should be
+// written into for the column with the given id.
+//
+// Preferred path: parse the column's TargetCol letter ("B", "AA") into
+// its 0-based index. This is what the agent's schema declares ("write
+// `country` to column B") and what users expect.
+//
+// Back-compat fallback (TargetCol empty): position in the columns list,
+// which is what every pre-target_col workflow run uses. The orchestrator
+// will still write SOMEWHERE — it just won't honour a sparse layout
+// (e.g. seed-filled column A skipped from the schema). Workflows that
+// rely on target_col MUST set it.
 func columnIndex(cols []store.SheetWorkflowColumn, id string) int {
 	for i, c := range cols {
-		if c.ID == id {
-			return i
+		if c.ID != id {
+			continue
 		}
+		if c.TargetCol != "" {
+			if n := letterToColIdx(c.TargetCol); n >= 0 {
+				return n
+			}
+		}
+		return i
 	}
 	return -1
+}
+
+// letterToColIdx maps an A1 column letter ("A", "B", ..., "Z", "AA",
+// ..., "ZZ", "AAA") to its 0-based index. Inverse of colLetter in
+// sheet_writer_mcp.go. Returns -1 on invalid input.
+func letterToColIdx(s string) int {
+	if s == "" {
+		return -1
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z':
+			n = n*26 + int(c-'A'+1)
+		case c >= 'a' && c <= 'z':
+			n = n*26 + int(c-'a'+1)
+		default:
+			return -1
+		}
+	}
+	return n - 1
 }
 
 func copyStringMap(in map[string]string) map[string]string {
