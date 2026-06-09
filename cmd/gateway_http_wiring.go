@@ -5,15 +5,19 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/nextlevelbuilder/goclaw/internal/audio"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway/methods"
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
 	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
 	"github.com/nextlevelbuilder/goclaw/internal/media"
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/store/pg"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
+	"github.com/nextlevelbuilder/goclaw/internal/workflow/runtime"
 )
 
 // httpHandlers bundles the results of wireHTTP() for passing to wireHTTPHandlersOnServer.
@@ -237,6 +241,41 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 		// SignMediaPath on every history fetch, so chat-embedded links
 		// stay live for as long as the bucket lifecycle keeps the object.
 		d.server.SetMediaImportHandler(httpapi.NewMediaImportHandler(mediaStore))
+	}
+
+	// Sheet Workflows — orchestrator runtime + internal enqueue endpoint.
+	// Wires together: PG store (workflow + run + cell state), tenant-aware
+	// LLMCellExecutor (provider resolved per tenant via the same registry
+	// chat sessions use), MCPSheetWriter (POSTs sheets_batch_update to the
+	// sheets-mcp sidecar per wave flush), BusEventBus (forwards run /
+	// cell events onto the same WS bus the SPA already subscribes to).
+	//
+	// Workflows are disabled by default — only spin up when both the DB
+	// and a sheets-mcp URL are configured. Skill-driven path stays
+	// available regardless via existing sheets_* primitives.
+	if d.pgStores != nil && d.pgStores.DB != nil && d.cfg.Workflows.SheetsMCPURL != "" {
+		workflowStore := pg.NewPGSheetWorkflowStore(d.pgStores.DB)
+
+		providerName := d.cfg.Workflows.ProviderName
+		if providerName == "" {
+			providerName = "openai" // default to the web-agent-api OpenAI-compatible route
+		}
+		registry := d.providerRegistry
+		llmExec := runtime.NewLLMCellExecutorTenant(func(ctx context.Context, tenantID uuid.UUID) (providers.Provider, error) {
+			return registry.GetForTenant(tenantID, providerName)
+		})
+
+		writer := runtime.NewMCPSheetWriter(d.cfg.Workflows.SheetsMCPURL, d.cfg.Gateway.Token, "")
+		evtBus := runtime.NewBusEventBus(d.msgBus)
+		orch := runtime.New(workflowStore, llmExec, evtBus, writer)
+		orch.SetMaxConcurrent(d.cfg.Workflows.MaxConcurrent)
+		d.server.SetWorkflowEnqueueHandler(httpapi.NewWorkflowEnqueueHandler(workflowStore, orch))
+		slog.Info("workflows orchestrator wired",
+			"sheets_mcp_url", d.cfg.Workflows.SheetsMCPURL,
+			"provider", providerName,
+		)
+	} else {
+		slog.Info("workflows orchestrator disabled (set GOCLAW_WORKFLOWS_SHEETS_MCP_URL to enable)")
 	}
 
 	// ElevenLabs voice list + refresh endpoints (GET /v1/voices, POST /v1/voices/refresh).
