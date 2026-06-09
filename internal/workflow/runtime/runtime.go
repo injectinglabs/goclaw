@@ -133,6 +133,32 @@ type CellResult struct {
 	LatencyMs int
 }
 
+// CellWrite is one (row, col, value) entry the orchestrator collects per
+// wave and flushes through SheetWriter in one batched API call.
+type CellWrite struct {
+	WorkflowID    uuid.UUID
+	SpreadsheetID string
+	SheetTab      string
+	TargetRange   string
+	RowIdx        int
+	ColIdx        int
+	Value         string
+}
+
+// SheetWriter pushes a batch of cell writes back to the user's Google
+// Sheet. Concrete impl in PR3b wraps sheets-mcp `sheets_batch_update`.
+// In tests a recording writer asserts the orchestrator collected and
+// flushed the right batches at the right times.
+//
+// Implementations should respect Google's 60/min/user write quota by
+// merging contiguous cells into single ranges where possible. The
+// orchestrator already buffers per-wave so callers see at most one
+// batch per wave; if a wave has >50 cells, the writer may split into
+// multiple calls but must atomic-flush before returning.
+type SheetWriter interface {
+	BatchWrite(ctx context.Context, userID string, writes []CellWrite) error
+}
+
 // ─── Orchestrator ────────────────────────────────────────────────────
 
 // Orchestrator owns active runs, schedules cell tasks, throttles
@@ -143,6 +169,7 @@ type Orchestrator struct {
 	store    store.SheetWorkflowStore
 	executor CellExecutor
 	bus      EventBus
+	writer   SheetWriter // optional — when nil, results are tracked in DB only
 
 	maxConcurrent int
 	maxAttempts   int
@@ -158,11 +185,12 @@ type Orchestrator struct {
 	active   map[uuid.UUID]context.CancelFunc
 }
 
-func New(s store.SheetWorkflowStore, ex CellExecutor, bus EventBus) *Orchestrator {
+func New(s store.SheetWorkflowStore, ex CellExecutor, bus EventBus, writer SheetWriter) *Orchestrator {
 	return &Orchestrator{
 		store:         s,
 		executor:      ex,
 		bus:           bus,
+		writer:        writer,
 		maxConcurrent: defaultMaxConcurrentCells,
 		maxAttempts:   defaultMaxAttempts,
 		baseBackoff:   defaultBaseBackoff,
@@ -290,6 +318,26 @@ func (o *Orchestrator) executeRun(ctx context.Context, w *store.SheetWorkflow, r
 		default:
 		}
 
+		// Per-wave write buffer: orchestrator collects every successful
+		// cell value here and flushes the whole batch via SheetWriter at
+		// wave end. Keeps Sheet API calls to one per wave instead of one
+		// per cell — critical for staying under Google's write quota.
+		var writeBufMu sync.Mutex
+		var writeBuf []CellWrite
+		appendWrite := func(t CellTask, value string) {
+			writeBufMu.Lock()
+			defer writeBufMu.Unlock()
+			writeBuf = append(writeBuf, CellWrite{
+				WorkflowID:    w.ID,
+				SpreadsheetID: w.SpreadsheetID,
+				SheetTab:      w.SheetTab,
+				TargetRange:   w.TargetRange,
+				RowIdx:        t.RowIdx,
+				ColIdx:        t.ColIdx,
+				Value:         value,
+			})
+		}
+
 		var wg sync.WaitGroup
 		tasks := make(chan CellTask, 64)
 
@@ -300,7 +348,7 @@ func (o *Orchestrator) executeRun(ctx context.Context, w *store.SheetWorkflow, r
 			go func() {
 				defer wg.Done()
 				for t := range tasks {
-					o.runCellWithRetry(ctx, t, w, in.UserID, progress, &rowCtxMu, rowCtx)
+					o.runCellWithRetry(ctx, t, w, in.UserID, progress, &rowCtxMu, rowCtx, appendWrite)
 				}
 			}()
 		}
@@ -333,9 +381,22 @@ func (o *Orchestrator) executeRun(ctx context.Context, w *store.SheetWorkflow, r
 		close(tasks)
 		wg.Wait()
 
+		// Batch-flush this wave's cell writes back to the user's
+		// Google Sheet. If writer is nil (tests / DB-only mode), skip.
+		// Errors here mark the run as `error` because the user-visible
+		// sheet has fallen out of sync with the orchestrator's DB
+		// state — that's a worse failure than per-cell errors.
+		if o.writer != nil && len(writeBuf) > 0 {
+			if err := o.writer.BatchWrite(ctx, in.UserID, writeBuf); err != nil {
+				o.failRun(ctx, run, w, in.UserID, fmt.Errorf("sheet write (wave %d): %w", waveIdx+1, err))
+				return
+			}
+		}
+
 		slog.Info("workflow wave done",
 			"run_id", run.ID, "wave", waveIdx+1, "of", len(waves),
 			"completed", progress.completed.Load(), "errors", progress.errored.Load(),
+			"written", len(writeBuf),
 		)
 
 		// Flush progress to DB + WS bus between waves.
@@ -366,6 +427,7 @@ func (o *Orchestrator) executeRun(ctx context.Context, w *store.SheetWorkflow, r
 func (o *Orchestrator) runCellWithRetry(
 	ctx context.Context, t CellTask, w *store.SheetWorkflow, userID string,
 	prog *progressTracker, rowCtxMu *sync.Mutex, rowCtx map[int]map[string]string,
+	appendWrite func(CellTask, string),
 ) {
 	sem := o.acquireTenantSlot(w.TenantID)
 	defer o.releaseTenantSlot(sem)
@@ -403,6 +465,10 @@ func (o *Orchestrator) runCellWithRetry(
 			}
 			rowCtx[t.RowIdx][t.Column.ID] = res.Value
 			rowCtxMu.Unlock()
+			// Queue write to Google Sheet — flushed in one batch per wave.
+			if appendWrite != nil {
+				appendWrite(t, res.Value)
+			}
 			o.emit(ctx, RunEvent{
 				Type:       "cell.update",
 				RunID:      t.RunID,
