@@ -114,6 +114,8 @@ func (c *Config) applyEnvOverrides() {
 	envStr("GOCLAW_OLLAMA_CLOUD_API_KEY", &c.Providers.OllamaCloud.APIKey)
 	envStr("GOCLAW_OLLAMA_CLOUD_API_BASE", &c.Providers.OllamaCloud.APIBase)
 	envStr("GOCLAW_GATEWAY_TOKEN", &c.Gateway.Token)
+	envStr("GOCLAW_WORKFLOWS_SHEETS_MCP_URL", &c.Workflows.SheetsMCPURL)
+	envStr("GOCLAW_WORKFLOWS_PROVIDER_NAME", &c.Workflows.ProviderName)
 	envStr("GOCLAW_TELEGRAM_TOKEN", &c.Channels.Telegram.Token)
 	envStr("GOCLAW_DISCORD_TOKEN", &c.Channels.Discord.Token)
 	envStr("GOCLAW_ZALO_TOKEN", &c.Channels.Zalo.Token)

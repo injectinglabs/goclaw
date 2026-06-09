@@ -6,8 +6,16 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
+
+// ProviderResolver returns the Provider that should serve a cell for a
+// given tenant. Production wiring uses providers.Registry.GetForTenant
+// so workflows run on the same per-tenant provider chat sessions use;
+// tests pass a fixed-provider closure.
+type ProviderResolver func(ctx context.Context, tenantID uuid.UUID) (providers.Provider, error)
 
 // LLMCellExecutor is the production CellExecutor — uses a Provider
 // (typically the gateway's "web-agent-api" route, set up with X-Actor-*
@@ -24,13 +32,26 @@ import (
 // markdown, no quotation marks. We strip leading/trailing whitespace +
 // surrounding quotes defensively before returning.
 type LLMCellExecutor struct {
-	provider providers.Provider
+	// One of provider OR resolveProvider must be non-nil. resolveProvider
+	// takes precedence when set so the wiring path can pass a tenant-
+	// aware closure without re-allocating LLMCellExecutor per cell.
+	provider        providers.Provider
+	resolveProvider ProviderResolver
 	// Optional model override; falls back to provider.DefaultModel().
 	Model string
 }
 
+// NewLLMCellExecutor wires a fixed Provider — used by tests + single-
+// tenant local dev. Production should use NewLLMCellExecutorTenant.
 func NewLLMCellExecutor(p providers.Provider) *LLMCellExecutor {
 	return &LLMCellExecutor{provider: p}
+}
+
+// NewLLMCellExecutorTenant resolves the Provider per cell using the
+// callback. The orchestrator passes CellTask.TenantID into the closure
+// so workflows use the same tenant-specific provider chat sessions do.
+func NewLLMCellExecutorTenant(resolve ProviderResolver) *LLMCellExecutor {
+	return &LLMCellExecutor{resolveProvider: resolve}
 }
 
 const cellSystemPrompt = `You are a precise data-enrichment assistant.
@@ -45,7 +66,15 @@ literal string "" (empty). Do not hallucinate. Verify via web sources
 when uncertain.`
 
 func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResult, error) {
-	if e.provider == nil {
+	prov := e.provider
+	if e.resolveProvider != nil {
+		var err error
+		prov, err = e.resolveProvider(ctx, t.TenantID)
+		if err != nil {
+			return CellResult{}, fmt.Errorf("resolve provider for tenant %s: %w", t.TenantID, err)
+		}
+	}
+	if prov == nil {
 		return CellResult{}, errors.New("no provider configured")
 	}
 	user := buildCellUserPrompt(t)
@@ -60,7 +89,7 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 		req.Model = e.Model
 	}
 
-	resp, err := e.provider.Chat(ctx, req)
+	resp, err := prov.Chat(ctx, req)
 	if err != nil {
 		return CellResult{}, fmt.Errorf("provider chat: %w", err)
 	}

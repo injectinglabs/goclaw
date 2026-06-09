@@ -199,6 +199,16 @@ func New(s store.SheetWorkflowStore, ex CellExecutor, bus EventBus, writer Sheet
 	}
 }
 
+// SetMaxConcurrent overrides the default per-tenant in-flight cells cap.
+// Safe to call after New() but before the first StartRun — typically
+// called by the gateway boot path from config (Workflows.MaxConcurrent).
+// Values ≤0 are ignored so callers can pass through optional config.
+func (o *Orchestrator) SetMaxConcurrent(n int) {
+	if n > 0 {
+		o.maxConcurrent = n
+	}
+}
+
 // StartRun kicks off a run for the given workflow. Returns the run_id
 // immediately; the actual fanout runs asynchronously. Callers (chat
 // agent, webhook, cron) get progress via the EventBus.
