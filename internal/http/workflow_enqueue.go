@@ -25,7 +25,7 @@ import (
 //
 //	{
 //	  "workflow_id": "<uuid, optional>",  // when omitted, create ephemeral workflow from inline fields
-//	  "tenant_id":   "<uuid>",
+//	  "tenant_id":   "<uuid, optional>",  // when omitted, derived from user_id via tenant_users
 //	  "user_id":     "<cognito sub>",
 //	  "spreadsheet_id": "...", "sheet_tab": "Sheet1", "target_range": "A2:Z",
 //	  "columns": [{id, name, prompt, type, depends_on:[...]}, ...],
@@ -44,10 +44,28 @@ import (
 type WorkflowEnqueueHandler struct {
 	workflowStore store.SheetWorkflowStore
 	orchestrator  *runtime.Orchestrator
+	// resolveTenant maps a user_id to its tenant_id. Used when the
+	// caller omits tenant_id from the request body — MCP tools like
+	// sheets_enrich_run usually only know the user, and the tenant
+	// can be looked up from tenant_users(user_id → tenant_id).
+	// nil → tenant_id must be supplied in the request body.
+	resolveTenant func(ctx context.Context, userID string) (uuid.UUID, error)
 }
 
+// NewWorkflowEnqueueHandler constructs the handler. resolveTenant is
+// optional; when nil, callers must supply tenant_id in the request
+// body. In production wiring this is a closure over the goclaw users
+// store; passing nil is fine for tests.
 func NewWorkflowEnqueueHandler(s store.SheetWorkflowStore, o *runtime.Orchestrator) *WorkflowEnqueueHandler {
 	return &WorkflowEnqueueHandler{workflowStore: s, orchestrator: o}
+}
+
+// WithTenantResolver returns h with the tenant resolver attached.
+// Wiring uses this so the inline-construction call site doesn't grow
+// extra positional args.
+func (h *WorkflowEnqueueHandler) WithTenantResolver(fn func(ctx context.Context, userID string) (uuid.UUID, error)) *WorkflowEnqueueHandler {
+	h.resolveTenant = fn
+	return h
 }
 
 func (h *WorkflowEnqueueHandler) RegisterRoutes(mux *http.ServeMux) {
@@ -119,6 +137,23 @@ func (h *WorkflowEnqueueHandler) handleEnqueue(w http.ResponseWriter, r *http.Re
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
+	// Derive tenant_id from user_id when the caller omitted it.
+	// sheets_enrich_run (the most common caller) is an MCP tool that
+	// knows the cognito sub but doesn't have direct access to the
+	// tenant — goclaw can look it up via tenant_users.
+	if req.TenantID == uuid.Nil {
+		if h.resolveTenant == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tenant_id missing and no resolver configured"})
+			return
+		}
+		tid, err := h.resolveTenant(ctx, req.UserID)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "resolve tenant from user: " + err.Error()})
+			return
+		}
+		req.TenantID = tid
+	}
+
 	// Resolve / create workflow.
 	wfID, err := resolveOrCreateWorkflow(ctx, h.workflowStore, &req)
 	if err != nil {
@@ -156,9 +191,9 @@ func (h *WorkflowEnqueueHandler) handleEnqueue(w http.ResponseWriter, r *http.Re
 }
 
 func validateEnqueue(req *EnqueueRequest) error {
-	if req.TenantID == uuid.Nil {
-		return errors.New("tenant_id is required")
-	}
+	// tenant_id is optional — derived from user_id later if absent.
+	// user_id is the source of truth for tenant resolution, so its
+	// presence is enforced unconditionally.
 	if strings.TrimSpace(req.UserID) == "" {
 		return errors.New("user_id is required")
 	}
