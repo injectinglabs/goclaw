@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -274,7 +275,27 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 		evtBus := runtime.NewBusEventBus(d.msgBus)
 		orch := runtime.New(workflowStore, llmExec, evtBus, writer)
 		orch.SetMaxConcurrent(d.cfg.Workflows.MaxConcurrent)
-		d.server.SetWorkflowEnqueueHandler(httpapi.NewWorkflowEnqueueHandler(workflowStore, orch))
+
+		// MCP tools (sheets_enrich_run) know only the user_id; this
+		// resolver looks up the tenant via tenant_users so the agent
+		// doesn't need to plumb tenant_id through the tool call.
+		// Picks the first (oldest) tenant for the user — multi-tenant
+		// users (rare) can pass tenant_id explicitly to override.
+		db := d.pgStores.DB
+		resolveTenant := func(ctx context.Context, userID string) (uuid.UUID, error) {
+			var tid uuid.UUID
+			err := db.QueryRowContext(ctx,
+				`SELECT tenant_id FROM tenant_users
+				 WHERE user_id = $1
+				 ORDER BY created_at ASC
+				 LIMIT 1`, userID).Scan(&tid)
+			if err != nil {
+				return uuid.Nil, fmt.Errorf("tenant_users lookup user_id=%s: %w", userID, err)
+			}
+			return tid, nil
+		}
+		enqueueH := httpapi.NewWorkflowEnqueueHandler(workflowStore, orch).WithTenantResolver(resolveTenant)
+		d.server.SetWorkflowEnqueueHandler(enqueueH)
 		slog.Info("workflows orchestrator wired",
 			"writer", "composio-mcp",
 			"provider", providerName,
