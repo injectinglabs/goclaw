@@ -30,6 +30,7 @@ func TestColLetter(t *testing.T) {
 func TestMCPSheetWriter_BatchWrite_SendsCorrectPayload(t *testing.T) {
 	var received map[string]any
 	var receivedAuth string
+	var receivedServiceToken string
 	var receivedActorUser string
 	var receivedActorOrg string
 
@@ -38,6 +39,7 @@ func TestMCPSheetWriter_BatchWrite_SendsCorrectPayload(t *testing.T) {
 			t.Errorf("path: want /mcp, got %s", r.URL.Path)
 		}
 		receivedAuth = r.Header.Get("Authorization")
+		receivedServiceToken = r.Header.Get("X-Service-Token")
 		receivedActorUser = r.Header.Get("X-Actor-User-ID")
 		receivedActorOrg = r.Header.Get("X-Actor-Org-ID")
 		body, _ := io.ReadAll(r.Body)
@@ -59,8 +61,11 @@ func TestMCPSheetWriter_BatchWrite_SendsCorrectPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if receivedAuth != "Bearer svc-token" {
-		t.Errorf("auth: want 'Bearer svc-token', got %q", receivedAuth)
+	if receivedServiceToken != "svc-token" {
+		t.Errorf("X-Service-Token: want 'svc-token', got %q", receivedServiceToken)
+	}
+	if receivedAuth != "" {
+		t.Errorf("Authorization header must NOT be set (sheets-mcp uses X-Service-Token), got %q", receivedAuth)
 	}
 	if receivedActorUser != "user-1" {
 		t.Errorf("X-Actor-User-ID: want user-1, got %q", receivedActorUser)

@@ -79,6 +79,12 @@ type WorkflowsConfig struct {
 	// MaxConcurrent caps per-tenant concurrent in-flight cells. 0 →
 	// orchestrator default (20).
 	MaxConcurrent int `json:"max_concurrent,omitempty"`
+	// ServiceToken is the X-Service-Token shared with sheets-mcp's
+	// mcpauth middleware (shared/mcpauth/middleware.go). Sourced from
+	// the SHEETS_MCP_SERVICE_TOKEN env var. Distinct from the gateway
+	// bearer — sheets-mcp keys off this value, not goclaw's gateway.
+	// Empty token disables the orchestrator's MCPSheetWriter path.
+	ServiceToken string `json:"-"`
 }
 
 // HooksConfig tunes the script-hook runtime caps. All zero-valued fields fall
