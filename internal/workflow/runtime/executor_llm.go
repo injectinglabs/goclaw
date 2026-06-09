@@ -96,8 +96,15 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 			{Role: "user", Content: user},
 		},
 	}
-	if e.Model != "" {
+	// Model selection: explicit Model override wins; otherwise fall back
+	// to the provider's own default (set by Registry.GetForTenant per
+	// the ai_models alias rules). llm-service rejects requests with no
+	// model — "model is required" — so this must always end up set.
+	switch {
+	case e.Model != "":
 		req.Model = e.Model
+	default:
+		req.Model = prov.DefaultModel()
 	}
 
 	// Attach X-Actor-User-ID + X-Actor-Org-ID so web-agent-api's
