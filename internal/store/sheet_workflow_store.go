@@ -55,6 +55,13 @@ type SheetWorkflowColumn struct {
 	DependsOn  []string `json:"depends_on,omitempty"`
 	// For select / multi_select: enum of allowed values.
 	Options    []string `json:"options,omitempty"`
+	// TargetCol is the A1 column letter the orchestrator writes this
+	// cell into (e.g. "B", "C", "AA"). Required when the agent leaves
+	// the first column(s) pre-filled — without it the orchestrator
+	// falls back to position-in-the-columns-list and ends up writing
+	// to A..N, overwriting the seed values the agent just appended.
+	// Optional for back-compat: empty → position-based mapping.
+	TargetCol  string   `json:"target_col,omitempty"`
 }
 
 // SheetWorkflowTrigger is a polymorphic record — the `Type` field
