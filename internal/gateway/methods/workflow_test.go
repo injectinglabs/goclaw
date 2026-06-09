@@ -90,7 +90,7 @@ func TestWorkflowRunState_HappyPath_ReturnsRunAndCells(t *testing.T) {
 	runID, tenantID := seedRun(t, s, "running", 2, 3) // 2×3 = 6 cells
 
 	m := NewWorkflowMethods(s)
-	client, sendCh := gateway.NewTestClientWithSend(permissions.RoleUser, tenantID, "user-1")
+	client, sendCh := gateway.NewTestClientWithSend(permissions.RoleViewer, tenantID, "user-1")
 
 	m.handleRunState(context.Background(), client, runStateReqFrame(t, runID.String()))
 
@@ -147,7 +147,7 @@ func TestWorkflowRunState_CrossTenant_ReturnsNotFound(t *testing.T) {
 
 	m := NewWorkflowMethods(s)
 	foreignTenant := uuid.New() // NOT the run's tenant
-	client, sendCh := gateway.NewTestClientWithSend(permissions.RoleUser, foreignTenant, "stranger")
+	client, sendCh := gateway.NewTestClientWithSend(permissions.RoleViewer, foreignTenant, "stranger")
 
 	m.handleRunState(context.Background(), client, runStateReqFrame(t, runID.String()))
 
@@ -165,7 +165,7 @@ func TestWorkflowRunState_CrossTenant_ReturnsNotFound(t *testing.T) {
 func TestWorkflowRunState_MissingRunID_ReturnsInvalidRequest(t *testing.T) {
 	s := memory.NewSheetWorkflowStore()
 	m := NewWorkflowMethods(s)
-	client, sendCh := gateway.NewTestClientWithSend(permissions.RoleUser, uuid.New(), "user-1")
+	client, sendCh := gateway.NewTestClientWithSend(permissions.RoleViewer, uuid.New(), "user-1")
 
 	raw, _ := json.Marshal(map[string]string{})
 	req := &protocol.RequestFrame{
@@ -185,7 +185,7 @@ func TestWorkflowRunState_MissingRunID_ReturnsInvalidRequest(t *testing.T) {
 func TestWorkflowRunState_InvalidUUID_ReturnsInvalidRequest(t *testing.T) {
 	s := memory.NewSheetWorkflowStore()
 	m := NewWorkflowMethods(s)
-	client, sendCh := gateway.NewTestClientWithSend(permissions.RoleUser, uuid.New(), "user-1")
+	client, sendCh := gateway.NewTestClientWithSend(permissions.RoleViewer, uuid.New(), "user-1")
 
 	m.handleRunState(context.Background(), client, runStateReqFrame(t, "not-a-uuid"))
 
@@ -200,7 +200,7 @@ func TestWorkflowRunState_InvalidUUID_ReturnsInvalidRequest(t *testing.T) {
 func TestWorkflowRunState_UnknownRun_ReturnsNotFound(t *testing.T) {
 	s := memory.NewSheetWorkflowStore()
 	m := NewWorkflowMethods(s)
-	client, sendCh := gateway.NewTestClientWithSend(permissions.RoleUser, uuid.New(), "user-1")
+	client, sendCh := gateway.NewTestClientWithSend(permissions.RoleViewer, uuid.New(), "user-1")
 
 	m.handleRunState(context.Background(), client, runStateReqFrame(t, uuid.New().String()))
 
