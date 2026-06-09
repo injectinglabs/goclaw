@@ -36,6 +36,14 @@ const (
 	// goclaw/docs/SHEET_WORKFLOWS_EVENTS.md.
 	MethodWorkflowRunState = "workflow.runState"
 
+	// MethodWorkflowEnqueue kicks off a new sheet-workflow run on
+	// behalf of the calling user (SPA "Enrich" wizard entry point).
+	// Mirrors the HTTP /v1/internal/workflows/enqueue contract but
+	// reads tenant + user from the WS session — never trusts
+	// client-supplied identity. Same orchestrator and store under the
+	// hood; same RunEvent stream surfaces after queue.
+	MethodWorkflowEnqueue = "workflow.enqueue"
+
 	// Agents management
 	MethodAgentsList     = "agents.list"
 	MethodAgentsCreate   = "agents.create"

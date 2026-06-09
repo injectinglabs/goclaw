@@ -26,6 +26,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
+	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
@@ -40,19 +41,28 @@ import (
 // CRUD (list workflows / templates / scheduled jobs) will land here in
 // Phase B and continue the same pattern.
 type WorkflowMethods struct {
-	store store.SheetWorkflowStore
+	store   store.SheetWorkflowStore
+	enqueue *httpapi.WorkflowEnqueueHandler
 }
 
 // NewWorkflowMethods constructs a WorkflowMethods backed by the
 // provided sheet-workflow store. Callers wire this only when the
 // orchestrator is enabled (workflowStore != nil in gateway_http_wiring).
-func NewWorkflowMethods(s store.SheetWorkflowStore) *WorkflowMethods {
-	return &WorkflowMethods{store: s}
+//
+// enqueue is the HTTP enqueue handler — we reuse its EnqueueAsUser
+// core logic for the workflow.enqueue WS RPC so both code paths share
+// validation, workflow create-on-the-fly, and orchestrator wiring.
+// Pass nil to disable the WS enqueue RPC (read-only methods stay live).
+func NewWorkflowMethods(s store.SheetWorkflowStore, enqueue *httpapi.WorkflowEnqueueHandler) *WorkflowMethods {
+	return &WorkflowMethods{store: s, enqueue: enqueue}
 }
 
 // Register adds workflow methods to the WS RPC router.
 func (m *WorkflowMethods) Register(router *gateway.MethodRouter) {
 	router.Register(protocol.MethodWorkflowRunState, m.handleRunState)
+	if m.enqueue != nil {
+		router.Register(protocol.MethodWorkflowEnqueue, m.handleEnqueue)
+	}
 }
 
 // runStateCell is the per-cell payload mirrored 1:1 with the TS
@@ -184,4 +194,101 @@ func (m *WorkflowMethods) handleRunState(ctx context.Context, client *gateway.Cl
 		"run":   resp,
 		"cells": out,
 	}))
+}
+
+// handleEnqueue kicks off a new sheet-workflow run on behalf of the
+// caller. SPA-facing entry point for the Enrich wizard. Mirrors the
+// HTTP /v1/internal/workflows/enqueue contract but reads tenant + user
+// from the WS session (never trusts client-supplied identity).
+//
+// Request body (params):
+//
+//	{
+//	  // when set, uses an existing saved workflow's schema:
+//	  "workflow_id": "<uuid>",
+//
+//	  // OR inline ad-hoc enrichment:
+//	  "name":           "Q3 prospects — CEO + LinkedIn",
+//	  "spreadsheet_id": "<google sheet id>",
+//	  "sheet_tab":      "Sheet1",
+//	  "target_range":   "A2:Z",
+//	  "columns": [
+//	    { "id": "ceo", "name": "CEO", "prompt": "...", "type": "text",
+//	      "target_col": "B", "depends_on": [] },
+//	    ...
+//	  ],
+//
+//	  // common — keyed by row index, each map is the per-row context
+//	  // (column id → value).
+//	  "rows": { "0": {"company": "OpenAI"}, "1": {"company": "Anthropic"} },
+//
+//	  "triggered_by":   "manual",            // default
+//	  "max_concurrent": 8                    // optional
+//	}
+//
+// Response: { "run_id": "<uuid>", "status": "queued" }
+//
+// Errors: INVALID_REQUEST (bad body) | INTERNAL (orchestrator failure).
+func (m *WorkflowMethods) handleEnqueue(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
+
+	if m.enqueue == nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "workflow runtime not configured"))
+		return
+	}
+
+	var body httpapi.EnqueueRequest
+	if err := json.Unmarshal(req.Params, &body); err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid json: "+err.Error()))
+		return
+	}
+
+	tenantID := client.TenantID()
+	userID := client.UserID()
+	if tenantID == uuid.Nil || userID == "" {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "session")))
+		return
+	}
+
+	// Defaults — SPA users should never have to set these.
+	if body.TriggeredBy == "" {
+		body.TriggeredBy = "manual"
+	}
+
+	runID, err := m.enqueue.EnqueueAsUser(ctx, tenantID, userID, &body)
+	if err != nil {
+		// Validation errors are user-actionable → INVALID_REQUEST. Real
+		// internal failures (orchestrator panics, DB unreachable) are
+		// INTERNAL. Crude heuristic: anything wrapped with "start run:"
+		// or "workflow store:" is on us; the rest is validation.
+		msg := err.Error()
+		code := protocol.ErrInvalidRequest
+		if isInternalEnqueueError(msg) {
+			code = protocol.ErrInternal
+			slog.Error("workflow.enqueue failed", "tenant", tenantID, "user", userID, "err", err)
+		}
+		client.SendResponse(protocol.NewErrorResponse(req.ID, code, msg))
+		return
+	}
+
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
+		"run_id": runID,
+		"status": "queued",
+	}))
+}
+
+// isInternalEnqueueError classifies enqueue errors as user-actionable
+// (validation) vs server-side (orchestrator / DB). Used to pick
+// INVALID_REQUEST vs INTERNAL for the WS error code surface.
+func isInternalEnqueueError(msg string) bool {
+	// Errors prefixed with "start run:" come from orchestrator.StartRun;
+	// "workflow store:" from store ops. Both are server-side. Validation
+	// errors come back bare (e.g. "rows must not be empty").
+	if len(msg) >= 10 && msg[:10] == "start run:" {
+		return true
+	}
+	if len(msg) >= 15 && msg[:15] == "workflow store:" {
+		return true
+	}
+	return false
 }
