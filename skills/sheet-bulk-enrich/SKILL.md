@@ -30,6 +30,13 @@ The Sheet Workflows pipeline runs entirely on the user's existing Composio Googl
 
 Never call sheets-mcp's old per-cell tools (status / read / update / batch_update) — those are retired. Use composio for ad-hoc cell ops, sheets_enrich_run for bulk.
 
+## Critical do-NOTs (read these first, save you 60+ seconds per run)
+
+- **Do NOT hunt for `user_id`.** It comes from `session_status` (the `user_id` field of the result). One tool call. Do NOT search the filesystem, do NOT inspect `/app/workspace/tenants/...` paths, do NOT try to derive it from PWD.
+- **Do NOT call `GOOGLESHEETS_VALUES_UPDATE` after `sheets_enrich_run`.** The orchestrator writes cells to the sheet itself, through composio, with retry + waves. Manually writing values means YOU are racing against the orchestrator and overwriting cells it's about to fill. If you don't see immediate values, the orchestrator is still running (waves take 5–20 s for typical 20-cell sheets) — do NOT panic-write.
+- **Do NOT poll `GOOGLESHEETS_VALUES_GET` to check progress.** The tool returns `run_id` immediately; the orchestrator publishes `workflow.event` on the WS bus when each wave flushes. Sit back and tell the user the run started. The final sheet reflects the run when it completes.
+- **`target_col` IS respected.** If the schema says column B for `country`, the orchestrator writes B. If the test reveals otherwise, it's a real bug — report instead of working around with manual updates.
+
 ## Prerequisites
 
 Before starting, verify in this order:
