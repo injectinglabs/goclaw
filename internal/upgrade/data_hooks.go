@@ -20,6 +20,17 @@ type dataHook struct {
 
 var registry []dataHook
 
+// dataHooksAdvisoryLockID is the PG session-level advisory lock key that
+// serializes RunPendingHooks across concurrent gateway processes (prod ASG runs
+// >=2 instances against one shared RDS). It mirrors what golang-migrate already
+// does for SQL migrations, so enabling GOCLAW_AUTO_UPGRADE is safe on boot.
+//
+// Key choice: golang-migrate derives its lock id as crc32(dbName)*salt, always
+// within the uint32 range (< 2^32). evolutionCronLockID (0x65766F6C) is also
+// < 2^32. Any int64 above 2^32 is therefore guaranteed disjoint from both, so a
+// collision/deadlock with either is impossible. 0x64617461686F6F6B == "datahook".
+const dataHooksAdvisoryLockID int64 = 0x64617461686F6F6B
+
 // RegisterDataHook registers a Go data migration hook for a specific schema version.
 // Name must be unique across all hooks. Hooks for the same version run in
 // registration order.
@@ -58,6 +69,32 @@ func RunPendingHooks(ctx context.Context, db *sql.DB) (int, error) {
 		return 0, fmt.Errorf("ensure data_migrations table: %w", err)
 	}
 
+	// Serialize across concurrent gateway processes with a PG advisory lock.
+	// The lock and its unlock must run on the SAME session, so pin a dedicated
+	// *sql.Conn rather than using the pool (pool calls may land on different
+	// connections). Blocking pg_advisory_lock (not pg_try_*) is intentional: a
+	// second booting instance must WAIT for the first to finish applying hooks,
+	// not skip them and proceed against a half-migrated DB.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("data hooks: pin connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", dataHooksAdvisoryLockID); err != nil {
+		return 0, fmt.Errorf("data hooks: acquire advisory lock: %w", err)
+	}
+	defer func() {
+		// Use context.Background(): if ctx is already cancelled we still want to
+		// release the lock so other instances are not blocked forever.
+		if _, uErr := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", dataHooksAdvisoryLockID); uErr != nil {
+			slog.Warn("data hooks: release advisory lock failed", "error", uErr)
+		}
+	}()
+
+	// Load applied set INSIDE the lock (double-checked). A process that read the
+	// set before acquiring the lock could re-run a hook the lock holder just
+	// applied; reading here guarantees we see the holder's committed inserts.
 	applied, err := loadApplied(ctx, db)
 	if err != nil {
 		return 0, err
@@ -79,9 +116,11 @@ func RunPendingHooks(ctx context.Context, db *sql.DB) (int, error) {
 			return count, fmt.Errorf("data hook %q failed: %w", hook.Name, err)
 		}
 
-		// Record completion.
+		// Record completion. ON CONFLICT DO NOTHING is belt-and-suspenders to the
+		// advisory lock: the name PRIMARY KEY would otherwise fail a concurrent
+		// re-insert, but with the lock held this conflict should never trigger.
 		_, err := db.ExecContext(ctx,
-			"INSERT INTO data_migrations (name, version, applied_at) VALUES ($1, $2, NOW())",
+			"INSERT INTO data_migrations (name, version, applied_at) VALUES ($1, $2, NOW()) ON CONFLICT (name) DO NOTHING",
 			hook.Name, hook.SchemaVersion,
 		)
 		if err != nil {
