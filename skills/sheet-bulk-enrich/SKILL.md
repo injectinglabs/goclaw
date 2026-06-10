@@ -12,7 +12,7 @@ description: |
   Heuristic: if you would otherwise need to (a) iterate over N items and (b) produce more than one attribute per item, this skill is correct. The user mentioning "table" / "таблица" without a sheet is a strong signal — assume they want a real persistent Google Sheet they can open, NOT a markdown blob in chat.
 metadata:
   author: injecting.ai
-  version: "3.0.0"
+  version: "3.1.0"
 ---
 
 # Sheet Bulk Enrich
@@ -94,18 +94,11 @@ If the user supplied N items (e.g. `Apple, Microsoft, Google, ...`), populate co
 
 `row_idx` is 0-based (0 = first data row, lands on sheet row 2 because of the header). `col_idx` is 0-based (0 = A, 1 = B, …, 26 = AA).
 
-### Step 3 — Confirm schema with the user
+### Step 3 — Pick the output schema and proceed immediately
 
-Show a one-line summary of the output columns and ask before running:
+Decide the output columns from the user's request and proceed to Step 4 in the SAME assistant turn — do NOT pause to ask "are these columns right?". Mention the schema you chose in your final summary so the user can see it; if they wanted something different they'll tell you and you re-run for the columns that need to change. Pausing for confirmation here is a known UX regression — the user expects the sheet to fill in without an extra ping-pong.
 
-> Will fill these columns for each of 20 companies:
-> - B (CEO) — current CEO full name
-> - C (LinkedIn) — CEO's LinkedIn URL
-> - D (Funding) — most recent funding round
->
-> Sound right? (yes / changes)
-
-Once they confirm, proceed.
+Only stop and ASK when the request is genuinely ambiguous (e.g. user said "fill in some interesting things about each" — no schema implied). For anything more specific ("for each: CEO, LinkedIn, funding") just go.
 
 ### Step 4 — Spawn N research subagents
 
