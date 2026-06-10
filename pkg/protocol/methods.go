@@ -26,42 +26,6 @@ const (
 	// activeSessions + sessions.preview hybrid for in-flight recovery.
 	MethodRunsSubscribe = "runs.subscribe"
 
-	// MethodWorkflowRunState returns the full per-cell snapshot for a
-	// sheet-workflow run. Used by the SPA's Paradigm-style split-view
-	// canvas on WS (re)connect to rehydrate the grid without waiting on
-	// `workflow.event` traffic (events are at-least-once but not
-	// durable — anything emitted before this client (re)connected is
-	// gone). Server-side auth: caller's tenant must match the run's
-	// tenant; otherwise not_found. Schema docs:
-	// goclaw/docs/SHEET_WORKFLOWS_EVENTS.md.
-	MethodWorkflowRunState = "workflow.runState"
-
-	// MethodWorkflowEnqueue kicks off a new sheet-workflow run on
-	// behalf of the calling user (SPA "Enrich" wizard entry point).
-	// Mirrors the HTTP /v1/internal/workflows/enqueue contract but
-	// reads tenant + user from the WS session — never trusts
-	// client-supplied identity. Same orchestrator and store under the
-	// hood; same RunEvent stream surfaces after queue.
-	MethodWorkflowEnqueue = "workflow.enqueue"
-
-	// MethodWorkflowPeekSheet reads a range of values straight from
-	// the user's Google Sheet via composio-mcp's GOOGLESHEETS_VALUES_GET.
-	// The SPA bubble uses this to display the actual cell contents
-	// (what's IN the sheet right now) instead of the orchestrator's
-	// per-cell status DB cache. Composio authenticates via the user's
-	// own OAuth — X-Proxy-User from the WS session identity — so
-	// Google's ACL is the source of truth for access, not goclaw's
-	// tenant filter.
-	MethodWorkflowPeekSheet = "workflow.peekSheet"
-
-	// MethodWorkflowRunsSubscribe is the resumable-stream replay
-	// endpoint for sheet-workflow runs — same pattern as runs.subscribe
-	// for chat. Client sends (run_id, since_seq); server returns every
-	// buffered workflow.event whose Seq > since_seq, so a WS reconnect
-	// after a brief drop replays the gap without losing per-cell value
-	// updates that arrived while the socket was down.
-	MethodWorkflowRunsSubscribe = "workflow.runsSubscribe"
-
 	// Agents management
 	MethodAgentsList     = "agents.list"
 	MethodAgentsCreate   = "agents.create"

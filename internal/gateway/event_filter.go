@@ -62,23 +62,6 @@ func clientCanReceiveEvent(c *Client, event bus.Event) bool {
 		return false
 	}
 
-	// Sheet-workflow run events (cell.update / run.progress / run.completed):
-	// scope to the run's owning user so other team-org members don't see
-	// another user's bulk-enrichment progress live. Same pattern as
-	// cron.delivered — RunEvent.UserID is the cognito sub of whoever
-	// kicked off the run. The chip in their chat bubble subscribes; nobody
-	// else's session sees it.
-	//
-	// Like cron, checked BEFORE the admin-bypass so admins in the same
-	// team don't see another user's per-cell progress.
-	if event.Name == "workflow.event" {
-		if uid := extractMapField(event.Payload, "user_id"); uid != "" {
-			return uid == c.userID
-		}
-		// Fail-closed — never broadcast to the whole tenant.
-		return false
-	}
-
 	// Admin sees everything (when not tenant-scoped, handled above).
 	if permissions.HasMinRole(c.role, permissions.RoleAdmin) {
 		return true
