@@ -54,6 +54,14 @@ const (
 	// tenant filter.
 	MethodWorkflowPeekSheet = "workflow.peekSheet"
 
+	// MethodWorkflowRunsSubscribe is the resumable-stream replay
+	// endpoint for sheet-workflow runs — same pattern as runs.subscribe
+	// for chat. Client sends (run_id, since_seq); server returns every
+	// buffered workflow.event whose Seq > since_seq, so a WS reconnect
+	// after a brief drop replays the gap without losing per-cell value
+	// updates that arrived while the socket was down.
+	MethodWorkflowRunsSubscribe = "workflow.runsSubscribe"
+
 	// Agents management
 	MethodAgentsList     = "agents.list"
 	MethodAgentsCreate   = "agents.create"

@@ -45,6 +45,11 @@ type WorkflowMethods struct {
 	store   store.SheetWorkflowStore
 	enqueue *httpapi.WorkflowEnqueueHandler
 	reader  *runtime.MCPSheetReader
+	// bus exposes the per-run resume ring stamped at publish time.
+	// Used by workflow.runsSubscribe to replay events the SPA missed
+	// while disconnected. Nil → resume disabled (RPC returns empty
+	// events array, same as if the run had no buffered events).
+	bus *runtime.BusEventBus
 }
 
 // NewWorkflowMethods constructs a WorkflowMethods backed by the
@@ -59,8 +64,11 @@ type WorkflowMethods struct {
 // reader is a composio-mcp client used by `workflow.peekSheet` to read
 // the user's Google Sheet contents directly (source of truth). Pass nil
 // to disable that RPC; read-only methods stay live.
-func NewWorkflowMethods(s store.SheetWorkflowStore, enqueue *httpapi.WorkflowEnqueueHandler, reader *runtime.MCPSheetReader) *WorkflowMethods {
-	return &WorkflowMethods{store: s, enqueue: enqueue, reader: reader}
+//
+// bus is the orchestrator's BusEventBus; workflow.runsSubscribe reads
+// from it. Pass nil to disable that RPC.
+func NewWorkflowMethods(s store.SheetWorkflowStore, enqueue *httpapi.WorkflowEnqueueHandler, reader *runtime.MCPSheetReader, bus *runtime.BusEventBus) *WorkflowMethods {
+	return &WorkflowMethods{store: s, enqueue: enqueue, reader: reader, bus: bus}
 }
 
 // Register adds workflow methods to the WS RPC router.
@@ -72,6 +80,56 @@ func (m *WorkflowMethods) Register(router *gateway.MethodRouter) {
 	if m.reader != nil {
 		router.Register(protocol.MethodWorkflowPeekSheet, m.handlePeekSheet)
 	}
+	if m.bus != nil {
+		router.Register(protocol.MethodWorkflowRunsSubscribe, m.handleRunsSubscribe)
+	}
+}
+
+// handleRunsSubscribe is the resumable-stream replay endpoint for
+// sheet-workflow runs. The client supplies (run_id, since_seq); we
+// return every buffered event whose Seq > since_seq, in emit order.
+// Live events arriving after the response continue through the normal
+// workflow.event broadcast, so the client receives the gap-fill AND
+// the live tail seamlessly. Mirrors chat's runs.subscribe contract.
+//
+// Tenant scoping: BusEventBus only buffers events whose RunEvent
+// already carries the right TenantID, but we do not return events to
+// callers whose session tenant doesn't match — the per-event filter
+// in gateway/event_filter.go does the same check on live broadcast,
+// applying the same rule here closes the resume path symmetrically.
+func (m *WorkflowMethods) handleRunsSubscribe(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
+	var params struct {
+		RunID    string `json:"run_id"`
+		SinceSeq int64  `json:"since_seq"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.RunID == "" {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "run_id")))
+		return
+	}
+	runID, err := uuid.Parse(params.RunID)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "run_id must be a UUID"))
+		return
+	}
+	events := m.bus.EventsSince(runID, params.SinceSeq)
+	// Filter to caller's tenant + user — symmetric with live broadcast.
+	tid := client.TenantID()
+	uid := client.UserID()
+	out := make([]runtime.RunEvent, 0, len(events))
+	for _, e := range events {
+		if e.TenantID != tid {
+			continue
+		}
+		if e.UserID != "" && e.UserID != uid {
+			continue
+		}
+		out = append(out, e)
+	}
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
+		"run_id": params.RunID,
+		"events": out,
+	}))
 }
 
 // runStateCell is the per-cell payload mirrored 1:1 with the TS
