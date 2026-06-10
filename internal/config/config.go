@@ -56,35 +56,7 @@ type Config struct {
 	Tailscale TailscaleConfig `json:"tailscale"`
 	Bindings  []AgentBinding  `json:"bindings,omitempty"`
 	Hooks     HooksConfig     `json:"hooks,omitempty"`
-	Workflows WorkflowsConfig `json:"workflows,omitempty"`
 	mu        sync.RWMutex
-}
-
-// WorkflowsConfig wires the Sheet Workflows subsystem at boot. All
-// fields are optional — leaving SheetsMCPURL empty disables the
-// composite sheets_enrich_run path (the agent can still use the
-// skill-driven `sheet-bulk-enrich` playbook through existing sheets_*
-// primitives).
-type WorkflowsConfig struct {
-	// SheetsMCPURL is the base URL of the sheets-mcp sidecar
-	// (e.g. http://sheets-mcp:9300). The orchestrator's MCPSheetWriter
-	// POSTs sheets_batch_update calls to this URL/mcp.
-	SheetsMCPURL string `json:"sheets_mcp_url,omitempty"`
-	// ProviderName is the providers.Registry name the cell executor
-	// uses for LLM calls. Resolved per-tenant via
-	// Registry.GetForTenant so workflows share chat sessions' provider.
-	// Default: "openai" (i.e. the OpenAI-compatible chat-completions
-	// route, which on injecting.ai goes through web-agent-api).
-	ProviderName string `json:"provider_name,omitempty"`
-	// MaxConcurrent caps per-tenant concurrent in-flight cells. 0 →
-	// orchestrator default (20).
-	MaxConcurrent int `json:"max_concurrent,omitempty"`
-	// ServiceToken is the X-Service-Token shared with sheets-mcp's
-	// mcpauth middleware (shared/mcpauth/middleware.go). Sourced from
-	// the SHEETS_MCP_SERVICE_TOKEN env var. Distinct from the gateway
-	// bearer — sheets-mcp keys off this value, not goclaw's gateway.
-	// Empty token disables the orchestrator's MCPSheetWriter path.
-	ServiceToken string `json:"-"`
 }
 
 // HooksConfig tunes the script-hook runtime caps. All zero-valued fields fall
