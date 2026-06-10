@@ -85,25 +85,45 @@ func (h *WorkflowEnqueueHandler) WithTenantStore(ts store.TenantStore) *Workflow
 
 // resolveTenantFromHeader takes the raw X-Actor-Org-ID value (as
 // injected by goclaw's mcp-bridge on outbound MCP calls and passed
-// through by sidecars) and returns the concrete tenant UUID. Accepts
-// both UUID and slug shapes; returns uuid.Nil if neither matches a
-// known tenant.
+// through by sidecars) and returns the concrete goclaw tenant UUID.
+//
+// Header semantics: X-Actor-Org-ID is the web-backend's
+// organizations.id (the canonical multi-service identity), stamped on
+// tenants.settings.external_org_id by auth-proxy. The MCP bridge
+// prefers external_org_id and falls back to the goclaw slug for
+// tenants the auth-proxy hasn't touched yet — so this resolver must
+// accept BOTH UUID-shaped and slug-shaped values.
+//
+// Resolution chain — each step VERIFIES the row exists before
+// returning, otherwise a parsed-but-nonexistent UUID would slip
+// through and produce an FK violation downstream when the
+// orchestrator INSERTs sheet_workflows.tenant_id:
+//
+//  1. UUID-shape: try GetTenantByExternalOrgID first (canonical path).
+//  2. UUID-shape: fall through to GetTenant by local id (lets trusted
+//     server-side callers pass goclaw's own UUID, e.g. cron).
+//  3. Slug-shape (or any non-UUID string): GetTenantBySlug.
+//
+// Returns uuid.Nil when nothing matches — caller falls back to the
+// user_id resolver (or returns 400).
 func (h *WorkflowEnqueueHandler) resolveTenantFromHeader(ctx context.Context, value string) uuid.UUID {
 	v := strings.TrimSpace(value)
-	if v == "" {
+	if v == "" || h.tenantStore == nil {
 		return uuid.Nil
 	}
 	if id, err := uuid.Parse(v); err == nil {
-		return id
-	}
-	if h.tenantStore == nil {
+		if t, err := h.tenantStore.GetTenantByExternalOrgID(ctx, v); err == nil && t != nil {
+			return t.ID
+		}
+		if t, err := h.tenantStore.GetTenant(ctx, id); err == nil && t != nil {
+			return t.ID
+		}
 		return uuid.Nil
 	}
-	t, err := h.tenantStore.GetTenantBySlug(ctx, v)
-	if err != nil || t == nil {
-		return uuid.Nil
+	if t, err := h.tenantStore.GetTenantBySlug(ctx, v); err == nil && t != nil {
+		return t.ID
 	}
-	return t.ID
+	return uuid.Nil
 }
 
 func (h *WorkflowEnqueueHandler) RegisterRoutes(mux *http.ServeMux) {
@@ -230,16 +250,33 @@ func (h *WorkflowEnqueueHandler) handleEnqueue(w http.ResponseWriter, r *http.Re
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	// Tenant resolution — three sources, in priority order:
+	// Tenant resolution — three sources, in priority order, each
+	// step VERIFIES the candidate id exists in tenants before
+	// accepting it. The previous version accepted a parsed UUID
+	// blindly, so any caller that happened to forward the
+	// X-Actor-Org-ID (which is external_org_id, NOT goclaw's local
+	// tenants.id) in the body field would cause an FK violation when
+	// the orchestrator INSERTs into sheet_workflows.
+	//
 	//   1. body `tenant_id` (UUID) — trusted internal caller knew it
+	//      AND it points to an existing tenant.
 	//   2. X-Actor-Org-ID header — goclaw's mcp-bridge injects this on
 	//      every outbound MCP call with the CURRENT tenant the user is
 	//      acting under. sheets-mcp passes it through. May be UUID
-	//      (external_org_id) or slug (tenant.slug) — we accept both.
+	//      (external_org_id, canonical) or slug (fallback) —
+	//      resolveTenantFromHeader handles both shapes.
 	//   3. resolveTenant by user_id — last-resort fallback for callers
 	//      that have only the cognito sub. Picks user's oldest tenant
 	//      which is WRONG for multi-tenant users; (1) and (2) must
 	//      catch the real call path before we hit this.
+	if req.TenantID != uuid.Nil && h.tenantStore != nil {
+		if t, err := h.tenantStore.GetTenant(ctx, req.TenantID); err != nil || t == nil {
+			// Body id is bogus (e.g. external_org_id sent by accident,
+			// or stale UUID from a deleted tenant). Discard so we fall
+			// through to the header/user resolvers.
+			req.TenantID = uuid.Nil
+		}
+	}
 	if req.TenantID == uuid.Nil {
 		if hdr := r.Header.Get("X-Actor-Org-ID"); hdr != "" {
 			req.TenantID = h.resolveTenantFromHeader(ctx, hdr)
