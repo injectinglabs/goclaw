@@ -28,12 +28,12 @@ func TestColLetter(t *testing.T) {
 	}
 }
 
-// TestMCPSheetWriter_PerCell_ComposioRouting asserts the writer issues
-// one GOOGLESHEETS_VALUES_UPDATE composio-mcp call per CellWrite with
-// X-Proxy-User identity and the right A1 ranges. Composio's allowlist
-// doesn't include a batch update, so per-cell fan-out is intentional —
-// orchestrator concurrency already absorbs the overhead.
-func TestMCPSheetWriter_PerCell_ComposioRouting(t *testing.T) {
+// TestMCPSheetWriter_BatchUpdate_ComposioRouting asserts the writer
+// issues exactly ONE GOOGLESHEETS_BATCH_UPDATE composio-mcp call for a
+// wave with multiple cells, with X-Proxy-User identity and the wave's
+// cells packed into the data array. Batching is what keeps a large
+// wave under Google's "60 write req/min per user" quota.
+func TestMCPSheetWriter_BatchUpdate_ComposioRouting(t *testing.T) {
 	type recv struct {
 		path        string
 		proxyUser   string
@@ -69,40 +69,42 @@ func TestMCPSheetWriter_PerCell_ComposioRouting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(calls) != 3 {
-		t.Fatalf("want 3 composio calls, got %d", len(calls))
+	if len(calls) != 1 {
+		t.Fatalf("want 1 composio batchUpdate call, got %d", len(calls))
 	}
-	for i, c := range calls {
-		if c.path != "/mcp" {
-			t.Errorf("call %d path: want /mcp, got %s", i, c.path)
-		}
-		if c.proxyUser != "user-1" {
-			t.Errorf("call %d X-Proxy-User: want user-1, got %q", i, c.proxyUser)
-		}
-		if c.authPresent {
-			t.Errorf("call %d must NOT send Authorization (composio is unauth on internal net)", i)
-		}
-		if c.svcPresent {
-			t.Errorf("call %d must NOT send X-Service-Token (that was the retired sheets-mcp path)", i)
-		}
-		params, _ := c.body["params"].(map[string]any)
-		if name, _ := params["name"].(string); name != "GOOGLESHEETS_VALUES_UPDATE" {
-			t.Errorf("call %d tool name: want GOOGLESHEETS_VALUES_UPDATE, got %s", i, name)
-		}
-		args, _ := params["arguments"].(map[string]any)
-		if args["spreadsheet_id"] != "ss-1" {
-			t.Errorf("call %d spreadsheet_id: got %v", i, args["spreadsheet_id"])
-		}
+	c := calls[0]
+	if c.path != "/mcp" {
+		t.Errorf("path: want /mcp, got %s", c.path)
 	}
-
+	if c.proxyUser != "user-1" {
+		t.Errorf("X-Proxy-User: want user-1, got %q", c.proxyUser)
+	}
+	if c.authPresent {
+		t.Errorf("must NOT send Authorization (composio is unauth on internal net)")
+	}
+	if c.svcPresent {
+		t.Errorf("must NOT send X-Service-Token (that was the retired sheets-mcp path)")
+	}
+	params, _ := c.body["params"].(map[string]any)
+	if name, _ := params["name"].(string); name != "GOOGLESHEETS_BATCH_UPDATE" {
+		t.Errorf("tool name: want GOOGLESHEETS_BATCH_UPDATE, got %s", name)
+	}
+	args, _ := params["arguments"].(map[string]any)
+	if args["spreadsheet_id"] != "ss-1" {
+		t.Errorf("spreadsheet_id: got %v", args["spreadsheet_id"])
+	}
+	data, ok := args["data"].([]any)
+	if !ok || len(data) != 3 {
+		t.Fatalf("data: want 3 entries, got %v", args["data"])
+	}
 	// Range mapping: row 0 → row 2 (header offset), col 26 → AA.
-	args0, _ := calls[0].body["params"].(map[string]any)["arguments"].(map[string]any)
-	if args0["range"] != "Sheet1!A2" {
-		t.Errorf("cell 0 range: want Sheet1!A2, got %v", args0["range"])
+	e0, _ := data[0].(map[string]any)
+	if e0["range"] != "Sheet1!A2" {
+		t.Errorf("data[0] range: want Sheet1!A2, got %v", e0["range"])
 	}
-	args2, _ := calls[2].body["params"].(map[string]any)["arguments"].(map[string]any)
-	if args2["range"] != "Sheet1!AA3" {
-		t.Errorf("cell 2 range: want Sheet1!AA3, got %v", args2["range"])
+	e2, _ := data[2].(map[string]any)
+	if e2["range"] != "Sheet1!AA3" {
+		t.Errorf("data[2] range: want Sheet1!AA3, got %v", e2["range"])
 	}
 }
 

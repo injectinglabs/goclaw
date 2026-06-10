@@ -11,7 +11,8 @@ import (
 )
 
 // MCPSheetWriter writes cell values back to the user's Google Sheet by
-// driving composio-mcp's `GOOGLESHEETS_VALUES_UPDATE` action. Composio
+// driving composio-mcp's `GOOGLESHEETS_BATCH_UPDATE` action (which
+// maps to Google's `spreadsheets.values.batchUpdate` API). Composio
 // holds the user's already-established Google OAuth — the orchestrator
 // piggybacks on it instead of running a parallel OAuth flow, which gave
 // users a confusing second "Connect Google" prompt.
@@ -22,11 +23,12 @@ import (
 // kept two token stores in sync. Routing the writer through composio-
 // mcp consolidates to one auth surface.
 //
-// Per-cell trade-off: Composio's allowlist exposes only single-range
-// `VALUES_UPDATE` (no native batch). The orchestrator already has DAG
-// concurrency + retry, so we fan out one composio call per CellWrite —
-// at Sheet Workflows scale (≤500 cells per run) this is cheaper than
-// adding a batchUpdate action to the composio surface.
+// Batching: a single batchUpdate call writes the entire wave (any
+// number of cells across any number of ranges) as ONE Google Sheets
+// API request. Previous design fanned out one VALUES_UPDATE per cell —
+// for waves with 60+ cells that hit Google's "Write requests per
+// minute per user" quota (default 60/min) and failed half the run.
+// One call per wave keeps a 500-cell run well under quota.
 //
 // Auth: composio-mcp listens on a private docker network and reads the
 // acting user from `X-Proxy-User`. No service token (it's internal).
@@ -59,41 +61,39 @@ func NewMCPSheetWriter(composioURL, _unusedLegacyToken, orgID string) *MCPSheetW
 	}
 }
 
-// BatchWrite implements SheetWriter. Fans out one composio
-// GOOGLESHEETS_VALUES_UPDATE call per CellWrite. Returns the FIRST
-// error to fail-fast on auth/quota; subsequent already-issued calls
-// continue to completion (their results are discarded — orchestrator
-// will retry the failed cell on the next wave).
+// BatchWrite implements SheetWriter. Packs the whole wave's writes
+// into ONE composio GOOGLESHEETS_BATCH_UPDATE call (one Google Sheets
+// API request) regardless of how many cells or how many distinct
+// ranges they touch. Returns an error only on transport / auth / quota
+// failure of that single call — per-cell retries are the
+// orchestrator's job at the next wave boundary.
 func (w *MCPSheetWriter) BatchWrite(ctx context.Context, userID string, writes []CellWrite) error {
 	if len(writes) == 0 {
 		return nil
 	}
+
+	// All writes in a single BatchWrite target the same spreadsheet.
+	// Each CellWrite becomes one entry in the batch `data` array
+	// targeting a single-cell A1 range; Google's batchUpdate handles
+	// arbitrary mixed ranges in one round-trip.
+	spreadsheetID := writes[0].SpreadsheetID
+	data := make([]map[string]any, 0, len(writes))
 	for _, c := range writes {
-		if err := w.writeCell(ctx, userID, c); err != nil {
-			return err
+		tab := c.SheetTab
+		if tab == "" {
+			tab = "Sheet1"
 		}
+		a1 := fmt.Sprintf("%s!%s%d", tab, colLetter(c.ColIdx), c.RowIdx+2)
+		data = append(data, map[string]any{
+			"range":  a1,
+			"values": [][]any{{c.Value}},
+		})
 	}
-	return nil
-}
 
-// writeCell issues a single GOOGLESHEETS_VALUES_UPDATE call through
-// composio-mcp. The A1 range follows the header-offset convention used
-// throughout Sheet Workflows: row 1 is the header, rowIdx 0 → row 2.
-func (w *MCPSheetWriter) writeCell(ctx context.Context, userID string, c CellWrite) error {
-	tab := c.SheetTab
-	if tab == "" {
-		tab = "Sheet1"
-	}
-	a1 := fmt.Sprintf("%s!%s%d", tab, colLetter(c.ColIdx), c.RowIdx+2)
-
-	// Composio's GOOGLESHEETS_VALUES_UPDATE argument schema.
-	// `values` must be 2-D (rows × cells). Single cell → [[value]].
 	args := map[string]any{
-		"spreadsheet_id":      c.SpreadsheetID,
-		"range":               a1,
-		"values":              [][]any{{c.Value}},
-		"value_input_option":  "USER_ENTERED",
-		"include_values_in_response": false,
+		"spreadsheet_id":     spreadsheetID,
+		"value_input_option": "USER_ENTERED",
+		"data":               data,
 	}
 
 	payload := map[string]any{
@@ -101,7 +101,7 @@ func (w *MCPSheetWriter) writeCell(ctx context.Context, userID string, c CellWri
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]any{
-			"name":      "GOOGLESHEETS_VALUES_UPDATE",
+			"name":      "GOOGLESHEETS_BATCH_UPDATE",
 			"arguments": args,
 		},
 	}
@@ -126,13 +126,13 @@ func (w *MCPSheetWriter) writeCell(ctx context.Context, userID string, c CellWri
 	if resp.StatusCode >= 400 {
 		buf := new(bytes.Buffer)
 		_, _ = buf.ReadFrom(resp.Body)
-		return fmt.Errorf("composio GOOGLESHEETS_VALUES_UPDATE %s: %s", resp.Status, truncate(buf.String(), 300))
+		return fmt.Errorf("composio GOOGLESHEETS_BATCH_UPDATE %s: %s", resp.Status, truncate(buf.String(), 300))
 	}
 
 	// Composio-mcp wraps action results in MCP's content envelope. A
-	// soft failure (e.g. auth_expired) lands as result.isError=true
-	// with a human-readable text payload; surface that as an error so
-	// the orchestrator can retry / mark the cell failed.
+	// soft failure (e.g. auth_expired, quota) lands as result.isError=
+	// true with a human-readable text payload; surface that as an
+	// error so the orchestrator can retry / mark the run failed.
 	var rpc struct {
 		Result struct {
 			IsError bool `json:"isError"`
