@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -188,6 +189,90 @@ func TestMCPSheetWriter_ToolErrorEnvelope(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "auth_failed") {
 		t.Errorf("expected tool-error to propagate, got %v", err)
+	}
+}
+
+// TestMCPSheetWriter_RetryOnRateLimit verifies that a transient
+// RESOURCE_EXHAUSTED envelope is retried with backoff and the wave
+// eventually succeeds. Without this, a brief 60/min spike (e.g. a
+// burst run kicked off right after another) would fail the whole
+// wave instead of draining through.
+func TestMCPSheetWriter_RetryOnRateLimit(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if n < 3 {
+			// First two calls — Google quota exhaustion soft error.
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"text":"RESOURCE_EXHAUSTED: Quota exceeded for quota metric 'Write requests per minute per user'"}]}}`))
+			return
+		}
+		// Third call — success.
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"text":"{}"}],"isError":false}}`))
+	}))
+	defer srv.Close()
+	wr := NewMCPSheetWriter(srv.URL, "", "org")
+	err := wr.BatchWrite(context.Background(), "u", []CellWrite{
+		{SpreadsheetID: "ss", RowIdx: 0, ColIdx: 0, Value: "x"},
+	})
+	if err != nil {
+		t.Fatalf("BatchWrite: want success after retries, got %v", err)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("want 3 attempts (2 rate-limited + 1 success), got %d", got)
+	}
+}
+
+// TestMCPSheetWriter_NonRetryableAuthErrorFailsFast verifies the
+// retry loop does NOT eat the backoff budget on errors that won't
+// recover — auth failures, validation, etc.
+func TestMCPSheetWriter_NonRetryableAuthErrorFailsFast(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"text":"auth_failed: token revoked"}]}}`))
+	}))
+	defer srv.Close()
+	wr := NewMCPSheetWriter(srv.URL, "", "org")
+	err := wr.BatchWrite(context.Background(), "u", []CellWrite{
+		{SpreadsheetID: "ss", RowIdx: 0, ColIdx: 0, Value: "x"},
+	})
+	if err == nil {
+		t.Fatal("want error on auth failure, got nil")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("auth failure must NOT retry — want 1 attempt, got %d", got)
+	}
+}
+
+// TestIsRateLimitError covers the substring patterns we treat as
+// rate-limit signals. Keep this in sync with isRateLimitError's
+// allow-list — false positives here would cause auth errors to spin
+// in the retry loop until exhaustion.
+func TestIsRateLimitError(t *testing.T) {
+	rate := []string{
+		"composio GOOGLESHEETS_VALUES_UPDATE 429: too many",
+		"composio tool error: RESOURCE_EXHAUSTED: Quota exceeded",
+		"Quota exceeded for quota metric 'Write requests per minute per user'",
+		"rate limit hit",
+		"Too Many Requests",
+	}
+	for _, m := range rate {
+		if !isRateLimitError(fmt.Errorf("%s", m)) {
+			t.Errorf("expected rate-limit: %q", m)
+		}
+	}
+	notRate := []string{
+		"composio tool error: auth_failed: token revoked",
+		"Invalid range: Sheet1!XX99",
+		"network: connection refused",
+		"",
+	}
+	for _, m := range notRate {
+		if isRateLimitError(fmt.Errorf("%s", m)) {
+			t.Errorf("expected NOT rate-limit: %q", m)
+		}
 	}
 }
 

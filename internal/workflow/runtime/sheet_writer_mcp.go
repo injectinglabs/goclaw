@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"sort"
 	"strings"
@@ -75,19 +76,102 @@ func NewMCPSheetWriter(composioURL, _unusedLegacyToken, orgID string) *MCPSheetW
 
 // BatchWrite implements SheetWriter. Groups cells into per-column
 // contiguous row runs and issues one composio GOOGLESHEETS_VALUES_
-// UPDATE call per run. Returns the FIRST error to fail-fast on auth/
-// quota — per-cell retries are the orchestrator's job at the next
-// wave boundary.
+// UPDATE call per run. Each run is retried with exponential backoff
+// on Google Sheets rate-limit responses (HTTP 429 /
+// RESOURCE_EXHAUSTED) so bursts above the per-user 60-write/min quota
+// drain through instead of failing the whole wave. Non-rate-limit
+// errors (auth, validation, network) fail-fast — per-cell retry at
+// the orchestrator level is the right place to handle those.
 func (w *MCPSheetWriter) BatchWrite(ctx context.Context, userID string, writes []CellWrite) error {
 	if len(writes) == 0 {
 		return nil
 	}
 	for _, run := range groupContiguousRuns(writes) {
-		if err := w.writeRange(ctx, userID, run); err != nil {
+		if err := w.writeRangeWithRetry(ctx, userID, run); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// writeRangeWithRetry wraps writeRange in a bounded exponential-
+// backoff loop over rate-limit errors. Google's per-user write quota
+// (default 60/min, rolling) is shared across all this user's sheet
+// activity — under bursty loads a wave may temporarily exceed it.
+// Retrying with backoff is Google's documented recommendation
+// (https://developers.google.com/sheets/api/limits#error_codes).
+//
+// Backoff schedule (with up to 50% jitter per step): 1s, 2s, 4s, 8s,
+// 16s. Total worst-case wait ≈ 31s + 5 actual call attempts. After
+// the 5th failure we surface the underlying error so the orchestrator
+// can mark the run as errored and the user sees a real failure
+// rather than an indefinite hang.
+//
+// Context cancellation cuts the loop short — partial writes are
+// retried on the next wave (orchestrator-level retry).
+const writeRangeMaxAttempts = 5
+
+func (w *MCPSheetWriter) writeRangeWithRetry(ctx context.Context, userID string, r cellRun) error {
+	var lastErr error
+	for attempt := 0; attempt < writeRangeMaxAttempts; attempt++ {
+		err := w.writeRange(ctx, userID, r)
+		if err == nil {
+			return nil
+		}
+		if !isRateLimitError(err) {
+			return err
+		}
+		lastErr = err
+		// 1s, 2s, 4s, 8s, 16s with ±25% jitter so concurrent waves
+		// from the same tenant don't synchronize on the retry tick.
+		base := time.Duration(1<<attempt) * time.Second
+		jitter := time.Duration(rand.Int63n(int64(base) / 2))
+		wait := base + jitter - base/4
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return fmt.Errorf("composio GOOGLESHEETS_VALUES_UPDATE rate-limited after %d attempts: %w", writeRangeMaxAttempts, lastErr)
+}
+
+// isRateLimitError matches Google Sheets API rate-limit signals as
+// they surface through composio-mcp's response envelope. Three
+// shapes seen in practice:
+//
+//   - HTTP 429 status code (rare — composio usually swallows it into
+//     its envelope, but cover the case for defense-in-depth).
+//   - Composio tool error envelope text containing "RESOURCE_EXHAUSTED"
+//     (Google's canonical error code for write-quota exhaustion).
+//   - Plain-language quota substrings ("Quota exceeded", "rate limit",
+//     "quota metric 'Write requests'") that some Composio actions
+//     emit instead of the canonical code.
+//
+// Auth / validation errors deliberately do NOT match — retrying those
+// just wastes the backoff budget; the orchestrator surfaces them as
+// run failures and the user sees the real cause.
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "429") {
+		return true
+	}
+	low := strings.ToLower(msg)
+	for _, needle := range []string{
+		"resource_exhausted",
+		"quota exceeded",
+		"rate limit",
+		"ratelimit",
+		"too many requests",
+	} {
+		if strings.Contains(low, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // cellRun is a contiguous block of cells in the SAME column with
