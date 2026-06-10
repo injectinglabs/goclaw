@@ -388,6 +388,38 @@ func ParentProviderFromCtx(ctx context.Context) string {
 	return ""
 }
 
+// --- Parent agent tool registry (for subagent MCP-tool inheritance) ---
+//
+// The per-agent tool registry is built in agent/resolver.go: it's a clone of
+// the global registry into which per-agent MCP BridgeTools (composio-mcp,
+// document-mcp, …) are registered via mcpMgr.LoadForAgent. Without this
+// context bridge, SubagentManager.runTask falls back to the global registry
+// captured at gateway startup — which has NO MCP tools — so subagents
+// cannot call BULK_SHEET_WRITE / Composio actions / synthetic MCP tools the
+// parent uses. Pass the parent's registry through ctx so the subagent's
+// tool factory can clone IT instead of the global.
+
+const ctxParentRegistry toolContextKey = "tool_parent_registry"
+
+// WithParentRegistry attaches the parent agent's tool registry to ctx so
+// SubagentManager can build subagent tool registries that include MCP tools
+// the parent agent has access to.
+func WithParentRegistry(ctx context.Context, reg *Registry) context.Context {
+	if reg == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxParentRegistry, reg)
+}
+
+// ParentRegistryFromCtx returns the parent agent's tool registry from ctx,
+// or nil if no parent registry was attached.
+func ParentRegistryFromCtx(ctx context.Context) *Registry {
+	if v, _ := ctx.Value(ctxParentRegistry).(*Registry); v != nil {
+		return v
+	}
+	return nil
+}
+
 // --- Per-agent subagent config override ---
 
 const ctxSubagentCfg toolContextKey = "tool_subagent_config"

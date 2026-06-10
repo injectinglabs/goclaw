@@ -230,8 +230,13 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 		return 0
 	}
 
-	// Build tools for subagent (no spawn/subagent tools to prevent recursion)
-	toolsReg := sm.createTools()
+	// Build tools for subagent (no spawn/subagent tools to prevent recursion).
+	// ctx carries ParentRegistry (set in agent/loop_context.go) so the factory
+	// can clone the parent's per-agent registry — which has MCP tools loaded
+	// via mcpMgr.LoadForAgent — instead of the global registry captured at
+	// gateway startup. Without this, subagents can't see composio-mcp /
+	// document-mcp / etc. and skills relying on synthetic MCP tools fail.
+	toolsReg := sm.createTools(ctx)
 	sm.applyDenyList(toolsReg, task.Depth, task.spawnConfig)
 
 	// Determine model (cascading priority):

@@ -164,6 +164,15 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	if l.provider != nil {
 		ctx = tools.WithParentProvider(ctx, l.provider.Name())
 	}
+	// Pass the agent's per-agent tool registry so spawned subagents inherit
+	// MCP tools the parent has loaded (composio-mcp, document-mcp, …).
+	// Without this the subagent's tool factory falls back to the global
+	// registry from gateway startup, which has NO per-agent MCP tools, so
+	// e.g. BULK_SHEET_WRITE from composio-mcp is "unknown tool" inside the
+	// child run. See tools.ParentRegistryFromCtx + setupSubagents factory.
+	if l.tools != nil {
+		ctx = tools.WithParentRegistry(ctx, l.tools)
+	}
 	if l.memoryCfg != nil {
 		ctx = tools.WithMemoryConfig(ctx, l.memoryCfg)
 	}
