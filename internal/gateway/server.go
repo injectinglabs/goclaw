@@ -503,6 +503,14 @@ func (s *Server) SetMediaImportHandler(h *httpapi.MediaImportHandler) {
 	s.handlers = append(s.handlers, h)
 }
 
+// SetWorkflowEnqueueHandler sets the internal workflow-enqueue handler
+// (used by sheets-mcp's sheets_enrich_run tool + future cron / webhook
+// callers to kick off a Sheet Workflows orchestrator run). Routes:
+// POST /v1/internal/workflows/enqueue.
+func (s *Server) SetWorkflowEnqueueHandler(h *httpapi.WorkflowEnqueueHandler) {
+	s.handlers = append(s.handlers, h)
+}
+
 // SetMemoryHandler sets the memory management handler.
 func (s *Server) SetMemoryHandler(h *httpapi.MemoryHandler) { s.handlers = append(s.handlers, h) }
 

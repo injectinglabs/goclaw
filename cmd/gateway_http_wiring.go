@@ -2,8 +2,11 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/audio"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
@@ -11,9 +14,12 @@ import (
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
 	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
 	"github.com/nextlevelbuilder/goclaw/internal/media"
+	"github.com/nextlevelbuilder/goclaw/internal/providerresolve"
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/store/pg"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
+	"github.com/nextlevelbuilder/goclaw/internal/workflow/runtime"
 )
 
 // httpHandlers bundles the results of wireHTTP() for passing to wireHTTPHandlersOnServer.
@@ -237,6 +243,99 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 		// SignMediaPath on every history fetch, so chat-embedded links
 		// stay live for as long as the bucket lifecycle keeps the object.
 		d.server.SetMediaImportHandler(httpapi.NewMediaImportHandler(mediaStore))
+	}
+
+	// Sheet Workflows — orchestrator runtime + internal enqueue endpoint.
+	// Wires together: PG store (workflow + run + cell state), tenant-aware
+	// LLMCellExecutor (provider resolved per tenant via the same registry
+	// chat sessions use), MCPSheetWriter (POSTs sheets_batch_update to the
+	// sheets-mcp sidecar per wave flush), BusEventBus (forwards run /
+	// cell events onto the same WS bus the SPA already subscribes to).
+	//
+	// Workflows are disabled by default — only spin up when the DB is
+	// configured. The writer drives composio-mcp's
+	// GOOGLESHEETS_VALUES_UPDATE per cell (best practice: piggyback on
+	// the user's Composio Google OAuth, no duplicate connect prompt).
+	if d.pgStores != nil && d.pgStores.DB != nil {
+		workflowStore := pg.NewPGSheetWorkflowStore(d.pgStores.DB)
+
+		// Resolve provider + model via the same path background workers
+		// use (dreaming / episodic / vault enrich consolidation). This
+		// honours system_configs background.provider / background.model
+		// overrides, falls back to agent.default_*, and ultimately to
+		// the ai_models alias chain — no hardcoded model name, no
+		// hardcoded provider name.
+		registry := d.providerRegistry
+		sysCfgs := d.pgStores.SystemConfigs
+		llmExec := runtime.NewLLMCellExecutorTenant(
+			func(ctx context.Context, tenantID uuid.UUID) (providers.Provider, string, error) {
+				p, m := providerresolve.ResolveBackgroundProvider(ctx, tenantID, registry, sysCfgs)
+				if p == nil {
+					return nil, "", fmt.Errorf("no background provider for tenant %s", tenantID)
+				}
+				return p, m, nil
+			},
+			d.pgStores.Tenants,
+		)
+
+		// composio-mcp lives on the docker internal network at a fixed
+		// host (no env override — it's a same-stack sidecar). Auth is
+		// per-call via X-Proxy-User; no shared service token.
+		composioURL := "http://composio-mcp:9300"
+		writer := runtime.NewMCPSheetWriter(composioURL, "" /*legacy token unused*/, "")
+		evtBus := runtime.NewBusEventBus(d.msgBus)
+		orch := runtime.New(workflowStore, llmExec, evtBus, writer)
+		orch.SetMaxConcurrent(d.cfg.Workflows.MaxConcurrent)
+
+		// MCP tools (sheets_enrich_run) know only the user_id; this
+		// resolver looks up the tenant via tenant_users so the agent
+		// doesn't need to plumb tenant_id through the tool call.
+		// Picks the first (oldest) tenant for the user — multi-tenant
+		// users (rare) can pass tenant_id explicitly to override.
+		db := d.pgStores.DB
+		resolveTenant := func(ctx context.Context, userID string) (uuid.UUID, error) {
+			var tid uuid.UUID
+			err := db.QueryRowContext(ctx,
+				`SELECT tenant_id FROM tenant_users
+				 WHERE user_id = $1
+				 ORDER BY created_at ASC
+				 LIMIT 1`, userID).Scan(&tid)
+			if err != nil {
+				return uuid.Nil, fmt.Errorf("tenant_users lookup user_id=%s: %w", userID, err)
+			}
+			return tid, nil
+		}
+		enqueueH := httpapi.NewWorkflowEnqueueHandler(workflowStore, orch).
+			WithTenantResolver(resolveTenant).
+			WithTenantStore(d.pgStores.Tenants)
+		d.server.SetWorkflowEnqueueHandler(enqueueH)
+
+		// SPA-facing WS methods:
+		//   workflow.runState  — reconnect rehydration of the canvas
+		//                        grid status (read-only).
+		//   workflow.enqueue   — Enrich wizard kicks off a new run on
+		//                        behalf of the WS-authenticated user.
+		//   workflow.peekSheet — reads actual Google Sheet values via
+		//                        the user's own composio OAuth; used
+		//                        by the chat-bubble grid so values
+		//                        come from the source of truth (the
+		//                        sheet) rather than goclaw's DB cache.
+		// All three share the same tenant scoping as chat.* — caller's
+		// WS session is authoritative, client-supplied tenant_id ignored.
+		reader := runtime.NewMCPSheetReader(composioURL)
+		// evtBus is the same instance the orchestrator publishes to —
+		// passing it to WorkflowMethods lets workflow.runsSubscribe
+		// read from its per-run resume ring buffer.
+		methods.NewWorkflowMethods(workflowStore, enqueueH, reader, evtBus).Register(d.server.Router())
+
+		slog.Info("workflows orchestrator wired",
+			"writer", "composio-mcp",
+			"reader", "composio-mcp",
+			"resolver", "providerresolve.ResolveBackgroundProvider",
+			"ws_methods", "workflow.runState, workflow.enqueue, workflow.peekSheet, workflow.runsSubscribe",
+		)
+	} else {
+		slog.Info("workflows orchestrator disabled (no PG store)")
 	}
 
 	// ElevenLabs voice list + refresh endpoints (GET /v1/voices, POST /v1/voices/refresh).
