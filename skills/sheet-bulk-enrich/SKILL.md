@@ -1,9 +1,18 @@
 ---
 name: sheet-bulk-enrich
-description: Bulk-enrich rows in a user's Google Sheet — fill out one or more columns by running a single orchestrator workflow. Use when the user asks to "enrich my sheet", "research these companies in my spreadsheet", "fill in CEO/LinkedIn/funding for each row", "find data for every row in column A", or similar multi-row research-and-fill requests over a Google Sheet they have access to.
+description: |
+  Fill multiple attributes for every item in a list using the Sheet Workflows orchestrator. Use this skill whenever the user wants the SAME set of fields filled in for EACH of N items — regardless of whether they explicitly mention a Google Sheet, spreadsheet, or "enrichment". The pattern is "N items × M attributes", not the wording. If the sheet doesn't exist yet, this skill creates it and seeds the input column before kicking off the orchestrator.
+
+  Trigger phrasings to recognise (semantic match, not literal — paraphrases and translations into any language fire too):
+  - Spreadsheet-explicit: "enrich my sheet", "fill column C for every row in B", "research each company in my spreadsheet", "for each ticker in A get price + news in B and C".
+  - Table-implicit: "make/build/create a table with these N items and fill columns X, Y, Z for each", "compile data on these N items — for each give me A, B, C", "compare these N things by attributes A/B/C", "get X, Y, Z for each of <list>", "list N items with their X, Y, Z".
+
+  Do NOT use this skill when: the user asks for a single answer (one company, one fact), a markdown table they just want to read in chat with no follow-up writes, or a sheet they want READ rather than filled. For a markdown-table reply to a small finite question, answer directly — do not spin up a workflow.
+
+  Heuristic: if you would otherwise need to (a) iterate over N items and (b) produce more than one attribute per item, this skill is correct. The user mentioning "table" / "таблица" without a sheet is a strong signal — assume they want a real persistent Google Sheet they can open, NOT a markdown blob in chat.
 metadata:
   author: injecting.ai
-  version: "2.0.0"
+  version: "2.1.0"
 ---
 
 # Sheet Bulk Enrich
@@ -12,13 +21,26 @@ A playbook for filling many cells in a user's Google Sheet via the Sheet Workflo
 
 ## When to trigger
 
-Activate this skill when the user asks to populate or enrich data in a Google Sheet they own. Typical phrasings:
+Activate this skill any time the user wants the SAME M attributes filled in for EACH of N items — whether the sheet already exists or you need to create it first. The signal is "N × M", not the wording.
+
+**Sheet-explicit phrasings** (user already has or wants a Google Sheet):
 - "Enrich my sheet 'Q3 Prospects' — for each company find CEO, LinkedIn, last funding"
 - "Fill column C with the LinkedIn URL for each person in column B"
 - "Research every row in my spreadsheet and add summary in D"
 - "For each ticker in column A, get current price + 1-line news in B and C"
 
-If the user just wants to read a sheet or write a few cells, do NOT use this skill — use `mcp_composio_mcp__GOOGLESHEETS_VALUES_GET` / `GOOGLESHEETS_VALUES_UPDATE` directly.
+**Table-implicit phrasings** (user just wants a table — but a real persistent Sheet, not chat-markdown):
+- "Make/build/create a table with <list of N items> and fill columns X, Y, Z for each"
+- "Compile data on <these N items>: X, Y, Z"
+- "Compare <these N things> across X, Y, Z"
+- "For each of <list>, give me X, Y, Z"
+- "List N items with their X / Y / Z"
+
+**Cross-language**: the skill matcher is multilingual. Paraphrases and translations of any of the above patterns into other languages fire the same — treat them identically.
+
+**Do NOT trigger when**: the user asks for a SINGLE answer (one company, one fact), a markdown table they want IN-CHAT with no follow-up actions, or a sheet they want READ rather than filled. For "what's the CEO of Acme?" answer directly. For "show me a markdown table of N items with X, Y, Z, don't make a sheet" — also answer directly.
+
+For ad-hoc cell reads/writes when a sheet already exists and the user wants just a tiny one-off update, use `mcp_composio_mcp__GOOGLESHEETS_VALUES_GET` / `GOOGLESHEETS_VALUES_UPDATE` directly — not this skill.
 
 ## Architecture (so you pick the right tools)
 
