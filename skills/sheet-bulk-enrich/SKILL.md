@@ -12,7 +12,7 @@ description: |
   Heuristic: if you would otherwise need to (a) iterate over N items and (b) produce more than one attribute per item, this skill is correct. The user mentioning "table" / "таблица" without a sheet is a strong signal — assume they want a real persistent Google Sheet they can open, NOT a markdown blob in chat.
 metadata:
   author: injecting.ai
-  version: "2.1.0"
+  version: "2.2.0"
 ---
 
 # Sheet Bulk Enrich
@@ -22,6 +22,8 @@ A playbook for filling many cells in a user's Google Sheet via the Sheet Workflo
 ## When to trigger
 
 Activate this skill any time the user wants the SAME M attributes filled in for EACH of N items — whether the sheet already exists or you need to create it first. The signal is "N × M", not the wording.
+
+**Activate even when you already know the answers.** Public domain data (NBA teams, S&P 500 companies, country capitals, common programming languages, famous people) feels tempting to dump as a pre-filled CSV in one tool call. Do not do that — the user expects to watch the chip's grid fill in as the orchestrator works. The streaming preview is the product, not a side-effect. The data being "well-known" is not a reason to skip the orchestrator; it's just a reason the per-cell LLM calls will be fast.
 
 **Sheet-explicit phrasings** (user already has or wants a Google Sheet):
 - "Enrich my sheet 'Q3 Prospects' — for each company find CEO, LinkedIn, last funding"
@@ -54,6 +56,7 @@ Never call sheets-mcp's old per-cell tools (status / read / update / batch_updat
 
 ## Critical do-NOTs (read these first, save you 60+ seconds per run)
 
+- **Do NOT short-circuit by writing all data via `GOOGLEDRIVE_CREATE_FILE_FROM_TEXT` with a pre-filled CSV body.** This is the #1 anti-pattern. If the user asked for "N items × M attributes" and you "happen to know" the values from training (e.g. NBA teams, common companies, programming languages, public figures), the LAZY path is to embed them in CSV text and upload in one shot. DO NOT DO THIS. The user wants the live streaming preview the orchestrator gives them — that bubble with the grid filling in cell-by-cell IS the deliverable, not just the final spreadsheet. A static CSV upload looks identical TO THE FILE but loses the entire UX. ALWAYS go through the create-sheet → seed-input-column → `sheets_enrich_run` flow even when the answer feels obvious. Token efficiency is NOT the user's concern; the experience is.
 - **Do NOT pass `user_id` to `sheets_enrich_run`.** It's now OPTIONAL and the tool resolves the user itself from the `X-Actor-User-ID` header goclaw injects on every MCP call. If you pass it, it's ignored; if you don't, the tool works. Either way: do NOT spend tool budget hunting for a user UUID in the filesystem, in `session_status`, or anywhere else.
 - **Do NOT call `GOOGLESHEETS_VALUES_UPDATE` after `sheets_enrich_run`.** The orchestrator writes cells to the sheet itself, through composio, with retry + waves. Manually writing values means YOU are racing against the orchestrator and overwriting cells it's about to fill. If you don't see immediate values, the orchestrator is still running (waves take 5–20 s for typical 20-cell sheets) — do NOT panic-write.
 - **Do NOT poll `GOOGLESHEETS_VALUES_GET` to check progress.** The tool returns `run_id` immediately; the orchestrator publishes `workflow.event` on the WS bus when each wave flushes. Sit back and tell the user the run started. The final sheet reflects the run when it completes.
