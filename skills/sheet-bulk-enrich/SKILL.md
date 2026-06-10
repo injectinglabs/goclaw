@@ -12,7 +12,7 @@ description: |
   Heuristic: if you would otherwise need to (a) iterate over N items and (b) produce more than one attribute per item, this skill is correct. The user mentioning "table" / "таблица" without a sheet is a strong signal — assume they want a real persistent Google Sheet they can open, NOT a markdown blob in chat.
 metadata:
   author: injecting.ai
-  version: "3.3.1"
+  version: "3.3.2"
 ---
 
 # Sheet Bulk Enrich
@@ -65,7 +65,6 @@ The parallel-subagent fan-out is the visible UX — the user expects to see N re
 - **Do NOT spawn subagents sequentially.** Issue all N `spawn` calls in ONE assistant turn (one message with N tool calls). The runtime fans them out in parallel; sequential spawning serializes the wall-clock.
 - **Do NOT weaken the HARD CONSTRAINT block in Step 4's task prompt.** Each subagent MUST do exactly one web_search and stop. Without that block, subagents iterate 10-20× and burn 50-200 K tokens each on slop-loops.
 - **Do NOT skip the `wait` step.** You must call `spawn({action:"wait"})` to collect results before writing.
-- **Do NOT call `sheets_enrich_run`.** Legacy orchestrator path; the pipeline below replaces it. Ignore it if it appears in the catalog.
 
 ## Pipeline
 
@@ -213,6 +212,6 @@ Include the sheet URL. Mention any rows where the subagent couldn't find data.
 | `wait` reports `[failed]` tasks | Include in user summary; skip their cells in `BULK_SHEET_WRITE`. |
 | User cancels mid-run | Spawned subagents continue but commits don't happen. Report what would have run; user can re-invoke. |
 
-## What this skill replaces (historical note)
+## Generalises beyond Sheets
 
-Previous v2.x versions of this skill called `sheets_enrich_run` (an MCP tool that delegated to a dedicated server-side orchestrator). v3.x runs the same pattern as plain agent tool calls (`spawn` + `BULK_SHEET_WRITE`). Same UX, less specialized code path. The same approach generalizes to any "N items × M attributes" workload — bulk email, bulk Slack messages, bulk ticket classification, etc. — by swapping the final BULK_SHEET_WRITE for the appropriate sink tool.
+The pattern `spawn N research subagents → wait → bulk-commit tool` works for any "N items × M attributes" workload — bulk email (final commit: `mcp_composio_mcp__GMAIL_SEND_EMAIL` per result), bulk Slack messages (`SLACK_CHAT_POST_MESSAGE`), bulk ticket classification (the appropriate sink), bulk Notion page creation (`NOTION_CREATE_NOTION_PAGE`), etc. Only the final commit-tool changes; the spawn pipeline stays identical.
