@@ -73,6 +73,13 @@ type RunEvent struct {
 	ColIdx     *int    `json:"col_idx,omitempty"`
 	CellStatus *string `json:"cell_status,omitempty"`
 	CellError  *string `json:"cell_error,omitempty"`
+	// CellValue is the resolved cell content emitted with cell.update
+	// when CellStatus == "done". Lets the SPA render values from the
+	// event stream the moment a cell finishes instead of waiting on
+	// the next wave-end Google Sheets BatchWrite + peek refresh.
+	// Backend still BatchWrites for persistence; this field is the
+	// streaming overlay for UI.
+	CellValue *string `json:"cell_value,omitempty"`
 
 	// run.progress / run.completed fields
 	Completed int    `json:"completed,omitempty"`
@@ -479,6 +486,7 @@ func (o *Orchestrator) runCellWithRetry(
 			if appendWrite != nil {
 				appendWrite(t, res.Value)
 			}
+			value := res.Value
 			o.emit(ctx, RunEvent{
 				Type:       "cell.update",
 				RunID:      t.RunID,
@@ -488,6 +496,7 @@ func (o *Orchestrator) runCellWithRetry(
 				RowIdx:     intPtr(t.RowIdx),
 				ColIdx:     intPtr(t.ColIdx),
 				CellStatus: strPtr("done"),
+				CellValue:  &value,
 			})
 			return
 		}
