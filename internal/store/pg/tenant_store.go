@@ -70,6 +70,29 @@ func (s *PGTenantStore) GetTenantBySlug(ctx context.Context, slug string) (*stor
 	return &d, nil
 }
 
+// GetTenantByExternalOrgID does a JSONB lookup against
+// settings->>'external_org_id'. Backed by idx_tenants_external_org_id
+// (migration 000075). Returns (nil, nil) on no match — callers
+// distinguish "not found" from "query failed" via the nil pointer.
+func (s *PGTenantStore) GetTenantByExternalOrgID(ctx context.Context, externalOrgID string) (*store.TenantData, error) {
+	if externalOrgID == "" {
+		return nil, nil
+	}
+	var d store.TenantData
+	err := pkgSqlxDB.GetContext(ctx, &d,
+		`SELECT id, name, slug, status, settings, created_at, updated_at
+		 FROM tenants
+		 WHERE settings->>'external_org_id' = $1
+		 LIMIT 1`, externalOrgID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
 func (s *PGTenantStore) ListTenants(ctx context.Context) ([]store.TenantData, error) {
 	var tenants []store.TenantData
 	err := pkgSqlxDB.SelectContext(ctx, &tenants,

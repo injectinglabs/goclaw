@@ -73,6 +73,30 @@ func (s *SQLiteTenantStore) GetTenantBySlug(ctx context.Context, slug string) (*
 	return &d, nil
 }
 
+// GetTenantByExternalOrgID matches the pg impl. SQLite has no JSONB
+// type — settings is stored as TEXT and we use json_extract on the
+// path. Acceptable cost: tenants table is small (single-instance
+// local dev) so the full scan doesn't matter. Returns (nil, nil) on
+// no match so callers can chain alternative lookups.
+func (s *SQLiteTenantStore) GetTenantByExternalOrgID(ctx context.Context, externalOrgID string) (*store.TenantData, error) {
+	if externalOrgID == "" {
+		return nil, nil
+	}
+	var row tenantRow
+	err := pkgSqlxDB.GetContext(ctx, &row,
+		`SELECT `+tenantSelectCols+` FROM tenants
+		 WHERE json_extract(settings, '$.external_org_id') = ?
+		 LIMIT 1`, externalOrgID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	d := row.toTenantData()
+	return &d, nil
+}
+
 func (s *SQLiteTenantStore) ListTenants(ctx context.Context) ([]store.TenantData, error) {
 	var rows []tenantRow
 	err := pkgSqlxDB.SelectContext(ctx, &rows,

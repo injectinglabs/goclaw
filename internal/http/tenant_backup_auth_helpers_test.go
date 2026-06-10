@@ -26,6 +26,9 @@ func (f fakeTenantStore) GetTenant(context.Context, uuid.UUID) (*store.TenantDat
 func (f fakeTenantStore) GetTenantBySlug(context.Context, string) (*store.TenantData, error) {
 	return f.tenant, f.err
 }
+func (f fakeTenantStore) GetTenantByExternalOrgID(context.Context, string) (*store.TenantData, error) {
+	return nil, nil
+}
 func (f fakeTenantStore) ListTenants(context.Context) ([]store.TenantData, error)       { return nil, nil }
 func (f fakeTenantStore) UpdateTenant(context.Context, uuid.UUID, map[string]any) error { return nil }
 func (f fakeTenantStore) AddUser(context.Context, uuid.UUID, string, string) error      { return nil }
