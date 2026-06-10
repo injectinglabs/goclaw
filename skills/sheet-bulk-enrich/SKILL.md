@@ -12,7 +12,7 @@ description: |
   Heuristic: if you would otherwise need to (a) iterate over N items and (b) produce more than one attribute per item, this skill is correct. The user mentioning "table" / "таблица" without a sheet is a strong signal — assume they want a real persistent Google Sheet they can open, NOT a markdown blob in chat.
 metadata:
   author: injecting.ai
-  version: "3.5.0"
+  version: "3.6.0"
 ---
 
 # Sheet Bulk Enrich
@@ -42,17 +42,16 @@ Activate this skill any time the user wants the SAME M attributes filled in for 
 
 ## Architecture (so you pick the right tools)
 
-Per-row live writes: each subagent commits its OWN row. The parent NEVER does a final batch write.
+Parent-side batch write at the end. Subagents do NOT have direct access to `BULK_SHEET_WRITE` (synthetic MCP tools aren't propagated into subagents in the current goclaw build), so each subagent returns its data as JSON and the parent commits one batch at the end.
 
 1. `mcp_composio_mcp__GOOGLEDRIVE_CREATE_FILE_FROM_TEXT` — create Sheet with header row only.
 2. `mcp_composio_mcp__BULK_SHEET_WRITE` — seed column A with item names.
-3. `spawn` N subagents in ONE turn. Each subagent's task contains: `spreadsheet_id`, its `row_idx`, the column→field mapping, and the instruction to call `BULK_SHEET_WRITE` itself with its own row when done.
-4. `spawn({action:"wait"})` — block until every subagent has finished writing its row.
-5. Post the Sheet URL + a short summary to the user. NO final BULK_SHEET_WRITE — every cell was already committed by its subagent.
+3. `spawn` N subagents in ONE turn. Each subagent's task: research its item via 1 `web_search` and return STRICT JSON with the column values. The subagent does NOT write to the Sheet itself.
+4. `spawn({action:"wait"})` — block until every subagent returns.
+5. Parse each subagent's JSON, build a cells array.
+6. `mcp_composio_mcp__BULK_SHEET_WRITE` — commit every (row, col) cell in ONE optimized batch call.
 
-The user can open the Sheet during the wait and watch rows fill in live, one per subagent finishing. Wall-clock = the slowest single subagent (typically 30-60s), not the sum across rows.
-
-`BULK_SHEET_WRITE` retries on Google 429 / RESOURCE_EXHAUSTED automatically with exponential backoff. With N subagents writing simultaneously, brief 429 bursts are expected; the retry loop drains them.
+`BULK_SHEET_WRITE` packs cells by column and writes contiguous-row ranges (one Google API call per column run, not per cell), retrying on 429 / RESOURCE_EXHAUSTED with exponential backoff. Total Google API calls: ~M (one per output column), well under the 60 writes/min quota.
 
 ## Critical do-NOTs (read these first)
 
@@ -118,15 +117,15 @@ You will ALWAYS use spawn mode below (parallel subagents, one per row). The user
 
 If `web_search` errors at the parent (e.g. provider timeout), DO NOT retry and DO NOT abort the run. Proceed without it — you have the list in your head already. Move straight to Step 4 (spawn).
 
-### Step 4 — Spawn N subagents, each writing its OWN row live
+### Step 4 — Spawn N subagents to return JSON
 
 For EACH item (N items total), call `spawn`. Issue all N calls in ONE assistant turn so the runtime fans them out in parallel.
 
-**Each subagent does ONE `web_search`, then commits its row directly via `BULK_SHEET_WRITE`.** No web_fetch (Wikipedia returns 20-50KB of text which blows up context and slows the batch 4×). If `web_search` returns nothing useful, the subagent MUST fall back to training knowledge and still write the row — empty cells are ONLY for fields the subagent genuinely can't recall AND search didn't cover.
+**Each subagent does ONE `web_search` then returns STRICT JSON with the column values.** Subagents do NOT have access to `BULK_SHEET_WRITE` (synthetic MCP tools aren't propagated into subagents — this is a known goclaw limitation, do not try to teach the subagent to write directly, it'll waste 20 iterations chasing tool names). The parent collects the JSONs after `wait` and does ONE final `BULK_SHEET_WRITE`.
 
-Critical: the parent agent must include `spreadsheet_id`, the subagent's `row_idx`, and the column→field mapping IN THE TASK PROMPT. The subagent uses these to call `BULK_SHEET_WRITE` itself. The parent does NOT collect JSON and does NOT do a final `BULK_SHEET_WRITE` — each cell is committed by its subagent live, so the user watching the open Sheet sees rows filling in one by one.
+If `web_search` returns nothing useful, the subagent MUST fall back to training knowledge — empty cells are ONLY for fields the subagent genuinely can't recall AND search didn't cover.
 
-The constraint block below MUST be pasted into every spawn task verbatim — do not paraphrase, do not edit, do not trim. It is the single most important thing in this skill.
+The constraint block below MUST be pasted into every spawn task verbatim — do not paraphrase, do not edit, do not trim.
 
 ```json
 {
@@ -135,7 +134,7 @@ The constraint block below MUST be pasted into every spawn task verbatim — do 
     "action": "spawn",
     "mode": "async",
     "label": "row-2-Apple",
-    "task": "Research \"Apple Inc.\" and write row 2 of the Sheet directly via BULK_SHEET_WRITE.\n\nSheet context (PARENT FILLS THESE PER SPAWN):\n- spreadsheet_id: <id from CREATE_FILE_FROM_TEXT response>\n- sheet_tab: \"Sheet1\"\n- row_idx: 0  (0-based, your assigned row; this maps to sheet row 2)\n- column mapping (col_idx → field):\n    col_idx 1 → CEO full name\n    col_idx 2 → CEO LinkedIn URL\n    col_idx 3 → last funding round (e.g. \"Series X, $Y, YYYY-MM\" or \"public\")\n\nHARD CONSTRAINTS:\n\n1. Make EXACTLY ONE `web_search` call. Single broad query (e.g. 'Apple Inc CEO LinkedIn last funding 2025'). One call, no retries, no per-field, no refinement.\n\n2. NEVER call `web_fetch`. Wikipedia pages are huge (20-50KB) and bloat your context, slowing the whole batch. Skip it.\n\n3. Fill values: use `web_search` snippets first for any field they cover. For any field the search did NOT cover, fall back to your TRAINING KNOWLEDGE. Apple's CEO is Tim Cook. Apple is public. Same for any well-known unicorn / NBA team / top company / country capital / language — write them from training, do NOT leave empty.\n\n4. Empty string \"\" / \"нет данных\" is ONLY for a field truly unknowable after search AND training (e.g. private company's exact dollar amount from last week). NEVER all-empty for a famous-entity row.\n\n5. WRITE YOUR ROW: call `mcp_composio_mcp__BULK_SHEET_WRITE` once with:\n   { spreadsheet_id: \"<the id above>\", sheet_tab: \"Sheet1\", cells: [\n     {row_idx: 0, col_idx: 1, value: \"<CEO name>\"},\n     {row_idx: 0, col_idx: 2, value: \"<LinkedIn URL>\"},\n     {row_idx: 0, col_idx: 3, value: \"<funding round>\"}\n   ] }\n   Replace row_idx with YOUR assigned row_idx from the context above.\n\n6. NEVER bash. NEVER web_fetch. NEVER write_file. NEVER any tool other than ONE web_search + ONE BULK_SHEET_WRITE. Two tool calls TOTAL.\n\n7. After BULK_SHEET_WRITE returns success, output a one-line confirmation like 'row 2 (Apple) committed'. That's it — no JSON of the data, no prose, just the confirmation.\n\n25 siblings in parallel — be FAST (one search, one write) and COMPLETE (every field filled from search OR training)."
+    "task": "Look up \"Apple Inc.\" and return STRICT JSON with the keys the parent asked for (example: {\"ceo\": \"<full name>\", \"linkedin\": \"<URL>\", \"funding\": \"<Series X, $Y, YYYY-MM or 'public'>\"}).\n\nHARD CONSTRAINTS:\n\n1. Make EXACTLY ONE `web_search` call. Single broad query (e.g. 'Apple Inc CEO LinkedIn last funding 2025'). One call, no retries, no per-field, no refinement.\n\n2. NEVER call `web_fetch`. Wikipedia pages are huge (20-50KB) and bloat your context, slowing the whole batch. Skip it.\n\n3. Fill values: use `web_search` snippets first for any field they cover. For any field the search did NOT cover, fall back to your TRAINING KNOWLEDGE. Apple's CEO is Tim Cook. Apple is public. Same for any well-known unicorn / NBA team / top company / country capital / language — write them from training, do NOT leave empty.\n\n4. Empty string \"\" / \"нет данных\" is ONLY for a field truly unknowable after search AND training (e.g. private company's exact dollar amount from last week). NEVER all-empty JSON for a famous-entity row.\n\n5. DO NOT try to write to the Sheet yourself. NEVER call BULK_SHEET_WRITE, GOOGLESHEETS_VALUES_UPDATE, exec, bash, or any composio/sheet tool — they are NOT in your toolset and you'll waste iterations chasing 'unknown tool' errors. The parent agent handles the Sheet write after collecting your JSON.\n\n6. Output ONLY the JSON object on its own line. No prose. No markdown fences. The first character of your final response MUST be `{`.\n\n25 siblings in parallel — your job is FAST (one search, one JSON output) and COMPLETE (every field filled from search OR training)."
   }
 }
 ```
@@ -143,11 +142,7 @@ The constraint block below MUST be pasted into every spawn task verbatim — do 
 Conventions:
 - Embed each row's value (the column-A entry) directly in the prompt where the example shows "Apple Inc.".
 - Use `label = row-<sheet_row>-<short_item_name>` so the wait-result list is scannable.
-- Match the JSON keys to the column schema the user asked for. Example above uses ceo/linkedin/funding; a different prompt might use country/founded/last_round/lead_investor/industry/product.
-
-**Web-search reliability note**: stage AWS IP is blocked by DuckDuckGo (the only free search provider currently configured). Until a Brave or Tavily API key is added to stage config, `web_search` will return empty most of the time — that's why the "fallback to training" rule above is critical. Subagents that follow rule #3 will still fill the row correctly. Subagents that don't fall back leave empty cells.
-
-**Expected per-subagent cost: ~3-8 K tokens (one LLM turn + one web_search), ~5-15 seconds** depending on search provider speed. For 25 rows in parallel, total wall-clock ~15-30 s, total tokens ~80-200 K.
+- Match the JSON keys to the column schema the user asked for.
 
 ### Step 5 — Wait for every subagent to finish
 
@@ -157,21 +152,52 @@ After spawning, in the next turn issue ONE tool call — `spawn` with action `wa
 { "tool": "spawn", "arguments": { "action": "wait", "timeout": 600 } }
 ```
 
-`wait` blocks until every child of this agent completes (or `timeout` seconds elapse). The result is a formatted list, one line per task, with the task's full result text (capped at 4 KB per task).
+`wait` blocks until every child completes (or `timeout` seconds elapse). The result lists each task's full result text (capped at 4 KB).
 
-**Do NOT call `spawn({action:"list"})` to check on progress.** The `wait` already blocks until completion — `list` adds an iteration for zero new information.
+**Do NOT call `spawn({action:"list"})`.** The `wait` already blocks until completion — `list` adds an iteration for zero new information.
 
-**Do NOT re-spawn rows that `list` shows as completed.** "Completed" means the result is already collected; the next `wait` will include it. Re-spawning the same label is the single biggest tool-budget waste — it cost an entire test run on v3.3.x.
+**Do NOT re-spawn rows.** A spawned subagent's result is delivered via `wait`; re-spawning the same label is the single biggest tool-budget waste.
 
-If any task shows `[failed]`: include the row in the final summary but DON'T fail the batch — that row's cells will simply remain empty.
+If any task shows `[failed]`: include the row in the final summary but DON'T fail the batch — write empty cells for it in Step 7.
 
-### Step 6 — Report to user (NO final BULK_SHEET_WRITE)
+### Step 6 — Parse JSON and immediately commit (combined — no thinking break)
 
-Each subagent has already committed its own row via `BULK_SHEET_WRITE`. The parent does NOT do a final batch write — the Sheet is already populated by the time `wait` returns.
+In the SAME assistant message that received the `wait` result:
 
-In the SAME assistant message that received the `wait` result, post the summary directly. Do NOT enter a thinking block titled "Reviewing Task Outcomes" or "Verifying Data". Do NOT call `BULK_SHEET_WRITE`. The data is already in the Sheet.
+1. Parse each task's final text as JSON. Be defensive — strip ```json fences if present. On parse failure, treat the row's fields as empty strings.
+2. Build the cells array (Step 7).
+3. Call `BULK_SHEET_WRITE` once (Step 8).
 
-### Step 7 — Report to user
+ONE assistant turn, ONE tool call (BULK_SHEET_WRITE). NEVER enter a thinking block titled "Reviewing Task Outcomes" between `wait` and the write — that eats the remaining iteration budget. Commit as-is; the user can ask for re-runs after seeing the result.
+
+### Step 7 — Build the cells array
+
+One entry per (row, col) value from the parsed JSONs. row_idx matches the row's 0-based data index (same numbering as Step 2). col_idx matches each output column.
+
+```js
+cells = []
+for (i, result) in enumerate(results):
+  cells.push({row_idx: i, col_idx: 1, value: result.ceo})       // B = col 1
+  cells.push({row_idx: i, col_idx: 2, value: result.linkedin})  // C = col 2
+  cells.push({row_idx: i, col_idx: 3, value: result.funding})   // D = col 3
+```
+
+### Step 8 — Commit all values in ONE call
+
+```json
+{
+  "tool": "mcp_composio_mcp__BULK_SHEET_WRITE",
+  "arguments": {
+    "spreadsheet_id": "<id>",
+    "sheet_tab": "Sheet1",
+    "cells": [ /* all rows × all cols */ ]
+  }
+}
+```
+
+The tool packs cells by column and writes contiguous-row ranges (one VALUES_UPDATE per run), with retry on 429.
+
+### Step 9 — Report to user
 
 One-line summary:
 
