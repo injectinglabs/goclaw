@@ -212,12 +212,21 @@ func setupSubagents(providerReg *providers.Registry, cfg *config.Config, msgBus 
 		}
 	}
 
-	// Tool factory: clone parent registry (inherits web_fetch, web_search, browser, MCP tools, etc.)
-	// then override file/exec tools with workspace-scoped versions.
-	// NOTE: SubagentManager.applyDenyList() handles deny lists after createTools(),
-	// so we don't apply deny lists here.
-	toolsFactory := func() *tools.Registry {
-		reg := toolsReg.Clone()
+	// Tool factory: prefer the spawning parent agent's per-agent registry
+	// (it has MCP BridgeTools loaded via mcpMgr.LoadForAgent in resolver.go —
+	// composio-mcp, document-mcp, sheets, etc.). Fall back to the global
+	// registry captured at gateway startup when no parent registry is in ctx
+	// (e.g. RunSync paths invoked outside the agent loop, or legacy callers).
+	// Then override file/exec tools with workspace-scoped versions.
+	//
+	// NOTE: SubagentManager.applyDenyList() handles deny lists after
+	// createTools(), so we don't apply deny lists here.
+	toolsFactory := func(ctx context.Context) *tools.Registry {
+		base := tools.ParentRegistryFromCtx(ctx)
+		if base == nil {
+			base = toolsReg
+		}
+		reg := base.Clone()
 		if sandboxMgr != nil {
 			reg.Register(tools.NewSandboxedReadFileTool(workspace, agentCfg.RestrictToWorkspace, sandboxMgr))
 			reg.Register(tools.NewSandboxedWriteFileTool(workspace, agentCfg.RestrictToWorkspace, sandboxMgr))

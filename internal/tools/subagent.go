@@ -126,7 +126,10 @@ type SubagentManager struct {
 	msgBus      *bus.MessageBus
 
 	// createTools builds a tool registry for subagents (without spawn/subagent tools).
-	createTools   func() *Registry
+	// Receives the subagent's run ctx so the factory can prefer the parent agent's
+	// per-agent registry (with MCP tools loaded) over the global registry captured
+	// at gateway startup — see ParentRegistryFromCtx in context_keys.go.
+	createTools   func(context.Context) *Registry
 	announceQueue *AnnounceQueue          // optional: batches announces with debounce
 	taskStore     store.SubagentTaskStore // optional: persists tasks to DB (fire-and-forget)
 
@@ -147,7 +150,7 @@ func NewSubagentManager(
 	providerReg *providers.Registry,
 	model string,
 	msgBus *bus.MessageBus,
-	createTools func() *Registry,
+	createTools func(context.Context) *Registry,
 	cfg SubagentConfig,
 ) *SubagentManager {
 	return &SubagentManager{
