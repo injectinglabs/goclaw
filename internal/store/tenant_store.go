@@ -60,10 +60,10 @@ type TenantStore interface {
 	// GetTenantByExternalOrgID resolves the local goclaw tenant from the
 	// web-backend organizations.id UUID stamped on tenants.settings.
 	// external_org_id by auth-proxy. This is the reverse of the lookup
-	// resolveOrgID does in internal/actorheaders, used by inbound
-	// API boundaries (e.g. /v1/internal/workflows/enqueue) that
-	// receive X-Actor-Org-ID and need to map back to a goclaw
-	// tenant. Returns (nil, nil) when no tenant has that external id.
+	// resolveOrgID does in internal/actorheaders, used by any inbound
+	// API boundary that receives X-Actor-Org-ID and needs to map back
+	// to a goclaw tenant. Returns (nil, nil) when no tenant has that
+	// external id.
 	GetTenantByExternalOrgID(ctx context.Context, externalOrgID string) (*TenantData, error)
 	ListTenants(ctx context.Context) ([]TenantData, error)
 	UpdateTenant(ctx context.Context, id uuid.UUID, updates map[string]any) error
