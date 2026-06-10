@@ -28,12 +28,11 @@ func TestColLetter(t *testing.T) {
 	}
 }
 
-// TestMCPSheetWriter_BatchUpdate_ComposioRouting asserts the writer
-// issues exactly ONE GOOGLESHEETS_VALUES_BATCH_UPDATE composio-mcp call for a
-// wave with multiple cells, with X-Proxy-User identity and the wave's
-// cells packed into the data array. Batching is what keeps a large
-// wave under Google's "60 write req/min per user" quota.
-func TestMCPSheetWriter_BatchUpdate_ComposioRouting(t *testing.T) {
+// TestMCPSheetWriter_PerColumnPacking asserts that contiguous-row
+// cells in the same column collapse into ONE composio VALUES_UPDATE
+// call with a multi-row range — the mechanism that keeps a typical
+// 100+-cell wave under Google's 60/min write quota.
+func TestMCPSheetWriter_PerColumnPacking(t *testing.T) {
 	type recv struct {
 		path        string
 		proxyUser   string
@@ -60,51 +59,86 @@ func TestMCPSheetWriter_BatchUpdate_ComposioRouting(t *testing.T) {
 	defer srv.Close()
 
 	wr := NewMCPSheetWriter(srv.URL, "ignored-legacy-token", "org-slug")
+	// Two contiguous rows in col 0, then a single cell in col 26 (AA).
+	// Expect 2 calls: one for the col-0 run (range A2:A3), one for the
+	// col-AA single cell (range AA3:AA3).
 	err := wr.BatchWrite(context.Background(), "user-1", []CellWrite{
 		{SpreadsheetID: "ss-1", SheetTab: "Sheet1", RowIdx: 0, ColIdx: 0, Value: "Acme"},
-		{SpreadsheetID: "ss-1", SheetTab: "Sheet1", RowIdx: 0, ColIdx: 1, Value: "Jane"},
-		{SpreadsheetID: "ss-1", SheetTab: "Sheet1", RowIdx: 1, ColIdx: 26, Value: "v"}, // AA column
+		{SpreadsheetID: "ss-1", SheetTab: "Sheet1", RowIdx: 1, ColIdx: 0, Value: "Beta"},
+		{SpreadsheetID: "ss-1", SheetTab: "Sheet1", RowIdx: 1, ColIdx: 26, Value: "v"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if len(calls) != 1 {
-		t.Fatalf("want 1 composio batchUpdate call, got %d", len(calls))
+	if len(calls) != 2 {
+		t.Fatalf("want 2 composio calls (col-0 run + col-AA single), got %d", len(calls))
 	}
-	c := calls[0]
-	if c.path != "/mcp" {
-		t.Errorf("path: want /mcp, got %s", c.path)
+	for i, c := range calls {
+		if c.path != "/mcp" {
+			t.Errorf("call %d path: want /mcp, got %s", i, c.path)
+		}
+		if c.proxyUser != "user-1" {
+			t.Errorf("call %d X-Proxy-User: want user-1, got %q", i, c.proxyUser)
+		}
+		if c.authPresent {
+			t.Errorf("call %d must NOT send Authorization (composio is unauth on internal net)", i)
+		}
+		if c.svcPresent {
+			t.Errorf("call %d must NOT send X-Service-Token (that was the retired sheets-mcp path)", i)
+		}
+		params, _ := c.body["params"].(map[string]any)
+		if name, _ := params["name"].(string); name != "GOOGLESHEETS_VALUES_UPDATE" {
+			t.Errorf("call %d tool name: want GOOGLESHEETS_VALUES_UPDATE, got %s", i, name)
+		}
+		args, _ := params["arguments"].(map[string]any)
+		if args["spreadsheet_id"] != "ss-1" {
+			t.Errorf("call %d spreadsheet_id: got %v", i, args["spreadsheet_id"])
+		}
 	}
-	if c.proxyUser != "user-1" {
-		t.Errorf("X-Proxy-User: want user-1, got %q", c.proxyUser)
+
+	// First call: col 0 run packs 2 cells into A2:A3.
+	args0, _ := calls[0].body["params"].(map[string]any)["arguments"].(map[string]any)
+	if args0["range"] != "Sheet1!A2:A3" {
+		t.Errorf("call 0 range: want Sheet1!A2:A3, got %v", args0["range"])
 	}
-	if c.authPresent {
-		t.Errorf("must NOT send Authorization (composio is unauth on internal net)")
+	values0, ok := args0["values"].([]any)
+	if !ok || len(values0) != 2 {
+		t.Errorf("call 0 values: want 2 rows, got %v", args0["values"])
 	}
-	if c.svcPresent {
-		t.Errorf("must NOT send X-Service-Token (that was the retired sheets-mcp path)")
+	// Second call: AA single cell at row 1 → AA3:AA3.
+	args1, _ := calls[1].body["params"].(map[string]any)["arguments"].(map[string]any)
+	if args1["range"] != "Sheet1!AA3:AA3" {
+		t.Errorf("call 1 range: want Sheet1!AA3:AA3, got %v", args1["range"])
 	}
-	params, _ := c.body["params"].(map[string]any)
-	if name, _ := params["name"].(string); name != "GOOGLESHEETS_VALUES_BATCH_UPDATE" {
-		t.Errorf("tool name: want GOOGLESHEETS_VALUES_BATCH_UPDATE, got %s", name)
+}
+
+// TestGroupContiguousRuns verifies the run-packing logic directly so
+// regressions on the grouping invariant surface without needing the
+// HTTP server.
+func TestGroupContiguousRuns(t *testing.T) {
+	runs := groupContiguousRuns([]CellWrite{
+		// col 0 rows 0,1,2 (run of 3)
+		{SpreadsheetID: "ss", SheetTab: "S1", RowIdx: 0, ColIdx: 0, Value: "a"},
+		{SpreadsheetID: "ss", SheetTab: "S1", RowIdx: 1, ColIdx: 0, Value: "b"},
+		{SpreadsheetID: "ss", SheetTab: "S1", RowIdx: 2, ColIdx: 0, Value: "c"},
+		// col 0 row 5 (split — gap at rows 3,4)
+		{SpreadsheetID: "ss", SheetTab: "S1", RowIdx: 5, ColIdx: 0, Value: "d"},
+		// col 1 rows 0,1 (different column → separate run)
+		{SpreadsheetID: "ss", SheetTab: "S1", RowIdx: 0, ColIdx: 1, Value: "x"},
+		{SpreadsheetID: "ss", SheetTab: "S1", RowIdx: 1, ColIdx: 1, Value: "y"},
+	})
+	if len(runs) != 3 {
+		t.Fatalf("want 3 runs (col0 rows 0-2, col0 row 5, col1 rows 0-1), got %d", len(runs))
 	}
-	args, _ := params["arguments"].(map[string]any)
-	if args["spreadsheet_id"] != "ss-1" {
-		t.Errorf("spreadsheet_id: got %v", args["spreadsheet_id"])
+	if runs[0].ColIdx != 0 || runs[0].StartRow != 0 || len(runs[0].Values) != 3 {
+		t.Errorf("run 0: want col=0 start=0 len=3, got col=%d start=%d len=%d", runs[0].ColIdx, runs[0].StartRow, len(runs[0].Values))
 	}
-	data, ok := args["data"].([]any)
-	if !ok || len(data) != 3 {
-		t.Fatalf("data: want 3 entries, got %v", args["data"])
+	if runs[1].ColIdx != 0 || runs[1].StartRow != 5 || len(runs[1].Values) != 1 {
+		t.Errorf("run 1: want col=0 start=5 len=1, got col=%d start=%d len=%d", runs[1].ColIdx, runs[1].StartRow, len(runs[1].Values))
 	}
-	// Range mapping: row 0 → row 2 (header offset), col 26 → AA.
-	e0, _ := data[0].(map[string]any)
-	if e0["range"] != "Sheet1!A2" {
-		t.Errorf("data[0] range: want Sheet1!A2, got %v", e0["range"])
-	}
-	e2, _ := data[2].(map[string]any)
-	if e2["range"] != "Sheet1!AA3" {
-		t.Errorf("data[2] range: want Sheet1!AA3, got %v", e2["range"])
+	if runs[2].ColIdx != 1 || runs[2].StartRow != 0 || len(runs[2].Values) != 2 {
+		t.Errorf("run 2: want col=1 start=0 len=2, got col=%d start=%d len=%d", runs[2].ColIdx, runs[2].StartRow, len(runs[2].Values))
 	}
 }
 
@@ -172,7 +206,7 @@ func TestMCPSheetWriter_DefaultSheetTab(t *testing.T) {
 	})
 	params, _ := received["params"].(map[string]any)
 	args, _ := params["arguments"].(map[string]any)
-	if args["range"] != "Sheet1!A2" {
-		t.Errorf("default tab: want Sheet1!A2 range, got %v", args["range"])
+	if args["range"] != "Sheet1!A2:A2" {
+		t.Errorf("default tab: want Sheet1!A2:A2 range, got %v", args["range"])
 	}
 }
