@@ -6,45 +6,46 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
 
 // MCPSheetWriter writes cell values back to the user's Google Sheet
-// through composio-mcp's `GOOGLESHEETS_VALUES_BATCH_UPDATE` synthetic
-// tool. The sidecar routes this name through Composio's `tools.
-// proxyExecute` to Google's NATIVE `spreadsheets.values.batchUpdate`
-// API endpoint, with Composio injecting the user's OAuth credentials.
+// through composio-mcp's `GOOGLESHEETS_VALUES_UPDATE` action. Composio
+// holds the user's already-established Google OAuth — the orchestrator
+// piggybacks on it instead of running a parallel OAuth flow, which
+// gave users a confusing second "Connect Google" prompt.
 //
-// Why proxy-execute (not a curated Composio action): Composio's
-// curated `GOOGLESHEETS_BATCH_UPDATE` is a wrapper with its own opinion
-// about argument shape and doesn't accept Google's native multi-range
-// `data` array. Sending Google-native format gets rejected with
-// "WRONG FORMAT: this tool requires a different schema". The
-// `proxyExecute` path is exactly the escape valve Composio documents
-// for "endpoint not covered by a predefined tool / request shape a
-// predefined tool cannot express" — it's the upstream-recommended
-// pattern, not a workaround.
+// Why composio (not sheets-mcp's batch_update): users already
+// authorize Google through Composio's verified OAuth app for Gmail/
+// Drive/etc. Maintaining a separate sheets-mcp OAuth doubled the
+// consent step and kept two token stores in sync. Routing the writer
+// through composio-mcp consolidates to one auth surface.
 //
-// Why composio at all (not direct Google API): users already authorize
-// Google through Composio's verified OAuth app for Gmail/Drive/etc.
-// Composio-managed tokens are masked so we can't extract them, but
-// proxyExecute lets us call Google directly with Composio injecting
-// auth — keeping a single OAuth surface while gaining native API
-// access.
+// Batching strategy — per-column run packing:
 //
-// Batching: ONE proxyExecute call writes the entire wave (any number
-// of cells across any number of distinct ranges) as ONE Google Sheets
-// API request. Previous designs fanned out one call per cell and hit
-// Google's "60 Write requests per minute per user" quota on any wave
-// >60 cells; native batchUpdate sidesteps the quota entirely (1 wave
-// = 1 quota unit regardless of cell count).
+// A naive one-cell-per-call fan-out hits Google's "60 Write requests
+// per minute per user" quota on any wave with >60 cells (typical for
+// 20-row × 6-col enrichments). The ideal solution would be Google's
+// native `values.batchUpdate` (one API call for arbitrary disjoint
+// ranges), but the two routes to it are unavailable on our Composio
+// plan: (a) the curated `GOOGLESHEETS_BATCH_UPDATE` action expects a
+// different schema and rejects native-format payloads, and (b)
+// `composio.tools.proxyExecute` requires a paid feature flag on the
+// API key (returns 403 ExternalProxy_OrgNotAllowed without it).
+//
+// Instead we pack cells into per-column CONTIGUOUS-ROW runs and emit
+// one VALUES_UPDATE per run with a range like `Sheet1!B2:B21`. For a
+// typical wave that writes whole columns this collapses 120 calls
+// into 6 (one per output column) — well under quota for any
+// realistic workflow shape (would only matter at ~60 distinct output
+// columns per wave, which is atypical).
 //
 // Auth: composio-mcp listens on a private docker network and reads
 // the acting user from `X-Proxy-User`. No service token (it's
 // internal). The header value MUST be the goclaw-internal user UUID;
-// composio-mcp resolves it to a Composio connectedAccountId and
-// supplies that to proxyExecute.
+// composio maps it to the user's connected Google account.
 type MCPSheetWriter struct {
 	// composioURL is the base URL of composio-mcp (e.g.
 	// http://composio-mcp:9300). The writer appends /mcp.
@@ -56,15 +57,15 @@ type MCPSheetWriter struct {
 	httpClient *http.Client
 }
 
-// NewMCPSheetWriter constructs a composio-backed writer. composioURL is
-// the URL of the composio-mcp sidecar; orgID is the tenant's external
-// org id (kept for forward compatibility — composio identifies via
-// X-Proxy-User only today).
+// NewMCPSheetWriter constructs a composio-backed writer. composioURL
+// is the URL of the composio-mcp sidecar; orgID is the tenant's
+// external org id (kept for forward compatibility — composio
+// identifies via X-Proxy-User only today).
 func NewMCPSheetWriter(composioURL, _unusedLegacyToken, orgID string) *MCPSheetWriter {
 	// _unusedLegacyToken: kept in the signature to avoid touching all
-	// call sites in this PR. The old sheets-mcp X-Service-Token is not
-	// sent anywhere — composio-mcp runs unauthenticated on the docker
-	// internal network and uses X-Proxy-User for identity.
+	// call sites in this PR. The old sheets-mcp X-Service-Token is
+	// not sent anywhere — composio-mcp runs unauthenticated on the
+	// docker internal network and uses X-Proxy-User for identity.
 	return &MCPSheetWriter{
 		composioURL: strings.TrimRight(composioURL, "/"),
 		orgID:       orgID,
@@ -72,43 +73,119 @@ func NewMCPSheetWriter(composioURL, _unusedLegacyToken, orgID string) *MCPSheetW
 	}
 }
 
-// BatchWrite implements SheetWriter. Packs the whole wave's writes
-// into ONE composio-mcp tools/call to GOOGLESHEETS_VALUES_BATCH_UPDATE
-// (the sidecar's synthetic proxy tool) regardless of how many cells
-// or how many distinct ranges they touch. Returns an error only on
-// transport / auth failure of that single call — per-cell retries are
-// the orchestrator's job at the next wave boundary.
+// BatchWrite implements SheetWriter. Groups cells into per-column
+// contiguous row runs and issues one composio GOOGLESHEETS_VALUES_
+// UPDATE call per run. Returns the FIRST error to fail-fast on auth/
+// quota — per-cell retries are the orchestrator's job at the next
+// wave boundary.
 func (w *MCPSheetWriter) BatchWrite(ctx context.Context, userID string, writes []CellWrite) error {
 	if len(writes) == 0 {
 		return nil
 	}
-
-	// All writes in a single BatchWrite target the same spreadsheet.
-	// Each CellWrite becomes one entry in the batch `data` array
-	// targeting a single-cell A1 range; Google's native batchUpdate
-	// handles arbitrary mixed ranges in one round-trip. Field names
-	// match Google's API verbatim (camelCase) — composio-mcp forwards
-	// the body to `/v4/spreadsheets/{id}/values:batchUpdate` without
-	// renaming, so the closer we are to Google's schema, the fewer
-	// translation seams.
-	spreadsheetID := writes[0].SpreadsheetID
-	data := make([]map[string]any, 0, len(writes))
-	for _, c := range writes {
-		tab := c.SheetTab
-		if tab == "" {
-			tab = "Sheet1"
+	for _, run := range groupContiguousRuns(writes) {
+		if err := w.writeRange(ctx, userID, run); err != nil {
+			return err
 		}
-		a1 := fmt.Sprintf("%s!%s%d", tab, colLetter(c.ColIdx), c.RowIdx+2)
-		data = append(data, map[string]any{
-			"range":  a1,
-			"values": [][]any{{c.Value}},
-		})
+	}
+	return nil
+}
+
+// cellRun is a contiguous block of cells in the SAME column with
+// strictly-increasing row indices that differ by 1. Emitted as one
+// VALUES_UPDATE per run with range `tab!{col}{startRow+2}:{col}{
+// startRow+1+len(Values)}` and a column of values.
+type cellRun struct {
+	SpreadsheetID string
+	SheetTab      string
+	ColIdx        int
+	StartRow      int
+	Values        []string
+}
+
+// groupContiguousRuns partitions the cell write list into the minimum
+// set of contiguous-row runs per (spreadsheet, tab, column). Cells in
+// the same column with consecutive rows pack together; a gap (skipped
+// row — e.g. one cell errored mid-wave) splits the run.
+//
+// Time: O(N log N) — dominated by the sort. N ≤ wave size, typically
+// a few hundred. Allocates one slice per (col × contiguous-segment).
+func groupContiguousRuns(writes []CellWrite) []cellRun {
+	if len(writes) == 0 {
+		return nil
+	}
+	// Sort by (spreadsheet, tab, col, row) so contiguous runs sit
+	// next to each other in the sorted order.
+	sorted := make([]CellWrite, len(writes))
+	copy(sorted, writes)
+	sort.Slice(sorted, func(i, j int) bool {
+		a, b := sorted[i], sorted[j]
+		if a.SpreadsheetID != b.SpreadsheetID {
+			return a.SpreadsheetID < b.SpreadsheetID
+		}
+		if a.SheetTab != b.SheetTab {
+			return a.SheetTab < b.SheetTab
+		}
+		if a.ColIdx != b.ColIdx {
+			return a.ColIdx < b.ColIdx
+		}
+		return a.RowIdx < b.RowIdx
+	})
+
+	out := make([]cellRun, 0, len(sorted))
+	var cur cellRun
+	curOpen := false
+	for _, c := range sorted {
+		if curOpen &&
+			c.SpreadsheetID == cur.SpreadsheetID &&
+			c.SheetTab == cur.SheetTab &&
+			c.ColIdx == cur.ColIdx &&
+			c.RowIdx == cur.StartRow+len(cur.Values) {
+			cur.Values = append(cur.Values, c.Value)
+			continue
+		}
+		if curOpen {
+			out = append(out, cur)
+		}
+		cur = cellRun{
+			SpreadsheetID: c.SpreadsheetID,
+			SheetTab:      c.SheetTab,
+			ColIdx:        c.ColIdx,
+			StartRow:      c.RowIdx,
+			Values:        []string{c.Value},
+		}
+		curOpen = true
+	}
+	if curOpen {
+		out = append(out, cur)
+	}
+	return out
+}
+
+// writeRange issues one VALUES_UPDATE for a contiguous column run.
+// Range follows the header-offset convention: rowIdx 0 → sheet row 2.
+// Values must be 2-D row-major; a single column maps to N rows × 1
+// cell each: [["v1"], ["v2"], ...].
+func (w *MCPSheetWriter) writeRange(ctx context.Context, userID string, r cellRun) error {
+	tab := r.SheetTab
+	if tab == "" {
+		tab = "Sheet1"
+	}
+	col := colLetter(r.ColIdx)
+	startA1 := fmt.Sprintf("%s%d", col, r.StartRow+2)
+	endA1 := fmt.Sprintf("%s%d", col, r.StartRow+1+len(r.Values))
+	a1 := fmt.Sprintf("%s!%s:%s", tab, startA1, endA1)
+
+	values := make([][]any, 0, len(r.Values))
+	for _, v := range r.Values {
+		values = append(values, []any{v})
 	}
 
 	args := map[string]any{
-		"spreadsheet_id":   spreadsheetID,
-		"valueInputOption": "USER_ENTERED",
-		"data":             data,
+		"spreadsheet_id":             r.SpreadsheetID,
+		"range":                      a1,
+		"values":                     values,
+		"value_input_option":         "USER_ENTERED",
+		"include_values_in_response": false,
 	}
 
 	payload := map[string]any{
@@ -116,7 +193,7 @@ func (w *MCPSheetWriter) BatchWrite(ctx context.Context, userID string, writes [
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]any{
-			"name":      "GOOGLESHEETS_VALUES_BATCH_UPDATE",
+			"name":      "GOOGLESHEETS_VALUES_UPDATE",
 			"arguments": args,
 		},
 	}
@@ -141,13 +218,13 @@ func (w *MCPSheetWriter) BatchWrite(ctx context.Context, userID string, writes [
 	if resp.StatusCode >= 400 {
 		buf := new(bytes.Buffer)
 		_, _ = buf.ReadFrom(resp.Body)
-		return fmt.Errorf("composio GOOGLESHEETS_VALUES_BATCH_UPDATE %s: %s", resp.Status, truncate(buf.String(), 300))
+		return fmt.Errorf("composio GOOGLESHEETS_VALUES_UPDATE %s: %s", resp.Status, truncate(buf.String(), 300))
 	}
 
 	// Composio-mcp wraps action results in MCP's content envelope. A
-	// soft failure (e.g. auth_expired, quota) lands as result.isError=
-	// true with a human-readable text payload; surface that as an
-	// error so the orchestrator can retry / mark the run failed.
+	// soft failure (e.g. auth_expired) lands as result.isError=true
+	// with a human-readable text payload; surface that as an error so
+	// the orchestrator can retry / mark the cell failed.
 	var rpc struct {
 		Result struct {
 			IsError bool `json:"isError"`
