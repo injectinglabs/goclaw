@@ -12,7 +12,7 @@ description: |
   Heuristic: if you would otherwise need to (a) iterate over N items and (b) produce more than one attribute per item, this skill is correct. The user mentioning "table" / "таблица" without a sheet is a strong signal — assume they want a real persistent Google Sheet they can open, NOT a markdown blob in chat.
 metadata:
   author: injecting.ai
-  version: "3.4.1"
+  version: "3.4.2"
 ---
 
 # Sheet Bulk Enrich
@@ -119,11 +119,11 @@ You will ALWAYS use spawn mode below (parallel subagents, one per row). The user
 
 If `web_search` errors at the parent (e.g. provider timeout), DO NOT retry and DO NOT abort the run. Proceed without it — you have the list in your head already. Move straight to Step 4 (spawn).
 
-### Step 4 — Spawn N ULTRA-LIGHTWEIGHT subagents (training-only, no tools)
+### Step 4 — Spawn N subagents (web_search + mandatory training fallback)
 
 For EACH item (N items total), call `spawn`. Issue all N calls in ONE assistant turn so the runtime fans them out in parallel.
 
-**Each subagent answers PURELY from its training knowledge and outputs JSON immediately — NO tool calls at all.** For the well-known entities this skill handles (top public companies, top unicorns, NBA teams, country capitals, top universities, S&P 500, famous people, programming languages), the subagent's training data has every field. Web search is unreliable on stage right now (DDG blocks our IP) and not needed for known facts. Subagents that pause to web_search just slow the batch and return empty when DDG times out — both bad outcomes. Skip the search entirely.
+**Each subagent does EXACTLY ONE `web_search` and then writes JSON.** If `web_search` succeeds and snippets contain field values, use them — that gives the user the freshest data (latest funding round, current CEO, recent news). If `web_search` returns nothing or errors out, **the subagent MUST fall back to its own training knowledge** and fill every field it can name. Empty-string is ONLY for fields the subagent truly can't recall from training (e.g. precise dollar amount of a 6-month-old private round). NEVER all-empty for a famous entity.
 
 The constraint block below MUST be pasted into every spawn task verbatim — do not paraphrase, do not edit, do not trim. It is the single most important thing in this skill.
 
@@ -134,7 +134,7 @@ The constraint block below MUST be pasted into every spawn task verbatim — do 
     "action": "spawn",
     "mode": "async",
     "label": "row-2-Apple",
-    "task": "Return STRICT JSON for the company \"Apple Inc.\" with the keys the parent agent asked for (example: {\"ceo\": \"<full name>\", \"linkedin\": \"<URL>\", \"funding\": \"<Series X, $Y, YYYY-MM or 'public'>\"}).\n\nHARD CONSTRAINTS — these are absolute, no exceptions:\n\n1. FILL EVERY FIELD FROM YOUR TRAINING KNOWLEDGE. Apple's CEO is Tim Cook. Apple is public. Apple's HQ is Cupertino, USA, founded 1976. These are facts you already know — write them directly. Same logic for any well-known unicorn, NBA team, top company, country capital, language, university.\n\n2. DO NOT call ANY tools. NO web_search. NO web_fetch. NO bash. NO write_file. ZERO tool calls. Your ENTIRE job is to output one JSON object from what you already know.\n\n3. If a field is truly unknown (e.g. precise dollar-amount of a private company's last round from 6 months ago that's not stable in your training), use empty string \"\" or \"нет данных\". Use this for the field, not for the whole object. NEVER return all-empty JSON for a famous company you can describe in plain language — that's a knowledge failure, not a data-source failure.\n\n4. Output ONLY the JSON object on its own line. No prose. No markdown fences. No commentary. The first character of your final response MUST be `{`. One line of JSON, then done.\n\nYou have 25 siblings running in parallel — your job is fast (~5 sec, no tool calls) and complete (every field filled from training)."
+    "task": "Look up \"Apple Inc.\" and return STRICT JSON with the keys the parent asked for (example: {\"ceo\": \"<full name>\", \"linkedin\": \"<URL>\", \"funding\": \"<Series X, $Y, YYYY-MM or 'public'>\"}).\n\nHARD CONSTRAINTS:\n\n1. Attempt 1 — `web_search` with one broad query (e.g. 'Apple Inc CEO LinkedIn last funding 2025'). If snippets cover the JSON fields → fill from them and STOP.\n\n2. Attempt 2 (only if Attempt 1 returned nothing useful) — `web_fetch` on Wikipedia: 'https://en.wikipedia.org/wiki/<EntityName>' (URL-encode, e.g. 'Apple_Inc.'). If the page text covers the JSON fields → fill from them and STOP.\n\n3. Attempt 3 (only if Attempts 1 + 2 both returned nothing) — ONE more `web_search` with a refined query specifically aimed at the missing fields (e.g. 'Apple Inc CEO 2025' or 'Apple Inc last funding round'). Fill the JSON from any new snippets.\n\n4. After up to 3 attempts, for any STILL-missing fields fall back to your TRAINING KNOWLEDGE. Apple's CEO is Tim Cook. Apple's HQ is Cupertino, USA, founded 1976. Same for any well-known unicorn / NBA team / top company / country capital / language — these are facts in training, write them, do NOT return empty.\n\n5. Empty string \"\" / \"нет данных\" is ONLY for a field truly unknowable after all 3 attempts AND training (e.g. private company's exact round size from last week). NEVER all-empty JSON for a famous-entity row.\n\n6. HARD CAP: 3 tool calls TOTAL per subagent across all attempts. NEVER bash, NEVER write_file, NEVER any tool other than web_search / web_fetch. After 3 calls, output JSON immediately even if some fields are training-fallback.\n\n7. Output ONLY the JSON object on its own line. No prose. No markdown fences. First character MUST be `{`.\n\n25 siblings in parallel — be FAST (early-stop after Attempt 1 if it covers the fields) and COMPLETE (every field filled from search OR training, never empty for famous entities)."
   }
 }
 ```
@@ -143,9 +143,10 @@ Conventions:
 - Embed each row's value (the column-A entry) directly in the prompt where the example shows "Apple Inc.".
 - Use `label = row-<sheet_row>-<short_item_name>` so the wait-result list is scannable.
 - Match the JSON keys to the column schema the user asked for. Example above uses ceo/linkedin/funding; a different prompt might use country/founded/last_round/lead_investor/industry/product.
-- The "no tools" rule is THE thing. Subagents that call web_search hit DDG, time out, return empty — and the cell is blank. Subagents that just answer from training fill the row. Force-disable the tool path via the prompt.
 
-**Expected per-subagent cost: ~1-3 K tokens (one LLM turn, zero tool latency), ~3-8 seconds.** For 25 rows in parallel, total wall-clock ~8-15 s, total tokens ~30-80 K — much cheaper than the v3.3.x "one search each" path.
+**Web-search reliability note**: stage AWS IP is blocked by DuckDuckGo (the only free search provider currently configured). Until a Brave or Tavily API key is added to stage config, `web_search` will return empty most of the time — that's why the "fallback to training" rule above is critical. Subagents that follow rule #3 will still fill the row correctly. Subagents that don't fall back leave empty cells.
+
+**Expected per-subagent cost: ~3-8 K tokens (one LLM turn + one web_search), ~5-15 seconds** depending on search provider speed. For 25 rows in parallel, total wall-clock ~15-30 s, total tokens ~80-200 K.
 
 ### Step 5 — Wait for every subagent to finish
 
