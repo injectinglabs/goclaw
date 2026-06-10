@@ -12,7 +12,7 @@ description: |
   Heuristic: if you would otherwise need to (a) iterate over N items and (b) produce more than one attribute per item, this skill is correct. The user mentioning "table" / "таблица" without a sheet is a strong signal — assume they want a real persistent Google Sheet they can open, NOT a markdown blob in chat.
 metadata:
   author: injecting.ai
-  version: "3.3.2"
+  version: "3.4.0"
 ---
 
 # Sheet Bulk Enrich
@@ -63,6 +63,8 @@ The parallel-subagent fan-out is the visible UX — the user expects to see N re
 - **Do NOT loop `GOOGLESHEETS_VALUES_UPDATE` per cell.** Hits the 60/min quota and is N× slower. Use `BULK_SHEET_WRITE` instead.
 - **Do NOT skip spawn mode.** Even when items are well-known to you (NBA, top companies, unicorns) — spawn anyway. The user wants to SEE N parallel research chips. That's the UX. Trust the constraint block to keep each subagent cheap (~3-8 K tokens).
 - **Do NOT spawn subagents sequentially.** Issue all N `spawn` calls in ONE assistant turn (one message with N tool calls). The runtime fans them out in parallel; sequential spawning serializes the wall-clock.
+- **Do NOT re-spawn a row that has already been spawned.** If you called `spawn` for `row-2-ByteDance` once, you have already issued that task. Do NOT call `spawn` again for the same label even if `spawn({action:"list"})` shows it as completed — the result is already in the system, you'll collect it via `wait`. Re-spawning the same labels burned 9 extra spawns on the v3.3.x test, eating the iteration budget so the final `BULK_SHEET_WRITE` never fired. ONE spawn per row, period.
+- **Do NOT verify or review after `wait` — go DIRECTLY to BULK_SHEET_WRITE.** When `wait` returns, your VERY NEXT tool call MUST be `BULK_SHEET_WRITE` with the full cells array. Do NOT enter a thinking block titled "Reviewing Task Outcomes" or "Verifying Data" — the data is whatever the subagents returned, and your job is to commit it as-is. Empty subagent fields become empty cells. Wrong-looking values can be fixed in a follow-up turn. The fastest path from `wait` to user-visible Sheet is ONE tool call; any thinking step in between risks eating the remaining iteration budget.
 - **Do NOT weaken the HARD CONSTRAINT block in Step 4's task prompt.** Each subagent MUST do exactly one web_search and stop. Without that block, subagents iterate 10-20× and burn 50-200 K tokens each on slop-loops.
 - **Do NOT skip the `wait` step.** You must call `spawn({action:"wait"})` to collect results before writing.
 
@@ -145,7 +147,7 @@ Conventions:
 
 ### Step 5 — Wait for every subagent to finish
 
-After spawning, in the next turn issue:
+After spawning, in the next turn issue ONE tool call — `spawn` with action `wait`:
 
 ```json
 { "tool": "spawn", "arguments": { "action": "wait", "timeout": 600 } }
@@ -153,13 +155,21 @@ After spawning, in the next turn issue:
 
 `wait` blocks until every child of this agent completes (or `timeout` seconds elapse). The result is a formatted list, one line per task, with the task's full result text (capped at 4 KB per task).
 
-If any task shows `[failed]`: include it in the user-facing summary but DON'T fail the whole batch — just skip its cells in the next step.
+**Do NOT call `spawn({action:"list"})` to check on progress.** The `wait` already blocks until completion — `list` adds an iteration for zero new information.
 
-### Step 6 — Parse JSON outputs
+**Do NOT re-spawn rows that `list` shows as completed.** "Completed" means the result is already collected; the next `wait` will include it. Re-spawning the same label is the single biggest tool-budget waste — it cost an entire test run on v3.3.x.
 
-For each completed task in the wait result, extract the JSON object. Be defensive:
-- Strip any leading/trailing markdown fences (```json … ```) the model might have added despite instructions.
-- If parsing fails for a row, treat all its fields as empty strings and note the row in the user summary.
+If any task shows `[failed]`: include the row in the final summary but DON'T fail the batch — write an empty cell for it in Step 7.
+
+### Step 6 — Parse JSON outputs AND immediately commit (combined step — no thinking break)
+
+In the SAME assistant message that received the `wait` result, do all of this:
+
+1. Parse each task's JSON. Be defensive — strip ```json fences if present. On parse failure, treat the row's fields as empty strings.
+2. Build the cells array (Step 7 below).
+3. Call `BULK_SHEET_WRITE` (Step 8 below).
+
+That is ONE assistant turn with ONE tool call (BULK_SHEET_WRITE). Do NOT enter a thinking block titled "Reviewing Task Outcomes" or "Cross-checking Data" — that wastes the remaining iteration budget. The data is whatever the subagents returned; commit it as-is. The user can ask to re-run for specific rows after seeing the result.
 
 ### Step 7 — Build the cells array
 
