@@ -305,7 +305,9 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 			}
 			return tid, nil
 		}
-		enqueueH := httpapi.NewWorkflowEnqueueHandler(workflowStore, orch).WithTenantResolver(resolveTenant)
+		enqueueH := httpapi.NewWorkflowEnqueueHandler(workflowStore, orch).
+			WithTenantResolver(resolveTenant).
+			WithTenantStore(d.pgStores.Tenants)
 		d.server.SetWorkflowEnqueueHandler(enqueueH)
 
 		// SPA-facing WS methods:

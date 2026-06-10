@@ -45,28 +45,65 @@ import (
 type WorkflowEnqueueHandler struct {
 	workflowStore store.SheetWorkflowStore
 	orchestrator  *runtime.Orchestrator
-	// resolveTenant maps a user_id to its tenant_id. Used when the
-	// caller omits tenant_id from the request body — MCP tools like
-	// sheets_enrich_run usually only know the user, and the tenant
-	// can be looked up from tenant_users(user_id → tenant_id).
-	// nil → tenant_id must be supplied in the request body.
+	// resolveTenant maps a user_id to its tenant_id. Used as a
+	// last-resort fallback when neither the request body nor the
+	// X-Actor-Org-ID header tell us which tenant the user is acting
+	// under. Picks the user's oldest tenant — fine for single-tenant
+	// users but wrong for multi-tenant ones (the WS session knows the
+	// "current" tenant; the HTTP path doesn't, so we lean on header).
 	resolveTenant func(ctx context.Context, userID string) (uuid.UUID, error)
+	// tenantStore resolves X-Actor-Org-ID (which may be a UUID OR a
+	// slug — sheets-mcp passes through whatever the goclaw mcp-bridge
+	// injected; that's external_org_id if set, else the tenant slug)
+	// into a concrete tenant UUID. Without this, slug-format header
+	// values fall through to the resolveTenant fallback above and the
+	// orchestrator writes the run with the wrong tenant, which then
+	// blocks workflow.event WS delivery to the user's session.
+	tenantStore store.TenantStore
 }
 
-// NewWorkflowEnqueueHandler constructs the handler. resolveTenant is
-// optional; when nil, callers must supply tenant_id in the request
-// body. In production wiring this is a closure over the goclaw users
-// store; passing nil is fine for tests.
+// NewWorkflowEnqueueHandler constructs the handler. resolveTenant /
+// tenantStore are wired separately via With* setters so the inline
+// construction site doesn't grow positional args.
 func NewWorkflowEnqueueHandler(s store.SheetWorkflowStore, o *runtime.Orchestrator) *WorkflowEnqueueHandler {
 	return &WorkflowEnqueueHandler{workflowStore: s, orchestrator: o}
 }
 
-// WithTenantResolver returns h with the tenant resolver attached.
-// Wiring uses this so the inline-construction call site doesn't grow
-// extra positional args.
+// WithTenantResolver returns h with the user_id → tenant_id fallback
+// resolver attached.
 func (h *WorkflowEnqueueHandler) WithTenantResolver(fn func(ctx context.Context, userID string) (uuid.UUID, error)) *WorkflowEnqueueHandler {
 	h.resolveTenant = fn
 	return h
+}
+
+// WithTenantStore returns h with the tenant store attached — used to
+// resolve X-Actor-Org-ID values that arrive as slugs into UUIDs.
+func (h *WorkflowEnqueueHandler) WithTenantStore(ts store.TenantStore) *WorkflowEnqueueHandler {
+	h.tenantStore = ts
+	return h
+}
+
+// resolveTenantFromHeader takes the raw X-Actor-Org-ID value (as
+// injected by goclaw's mcp-bridge on outbound MCP calls and passed
+// through by sidecars) and returns the concrete tenant UUID. Accepts
+// both UUID and slug shapes; returns uuid.Nil if neither matches a
+// known tenant.
+func (h *WorkflowEnqueueHandler) resolveTenantFromHeader(ctx context.Context, value string) uuid.UUID {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return uuid.Nil
+	}
+	if id, err := uuid.Parse(v); err == nil {
+		return id
+	}
+	if h.tenantStore == nil {
+		return uuid.Nil
+	}
+	t, err := h.tenantStore.GetTenantBySlug(ctx, v)
+	if err != nil || t == nil {
+		return uuid.Nil
+	}
+	return t.ID
 }
 
 func (h *WorkflowEnqueueHandler) RegisterRoutes(mux *http.ServeMux) {
@@ -193,10 +230,21 @@ func (h *WorkflowEnqueueHandler) handleEnqueue(w http.ResponseWriter, r *http.Re
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	// Derive tenant_id from user_id when the caller omitted it.
-	// sheets_enrich_run (the most common caller) is an MCP tool that
-	// knows the cognito sub but doesn't have direct access to the
-	// tenant — goclaw can look it up via tenant_users.
+	// Tenant resolution — three sources, in priority order:
+	//   1. body `tenant_id` (UUID) — trusted internal caller knew it
+	//   2. X-Actor-Org-ID header — goclaw's mcp-bridge injects this on
+	//      every outbound MCP call with the CURRENT tenant the user is
+	//      acting under. sheets-mcp passes it through. May be UUID
+	//      (external_org_id) or slug (tenant.slug) — we accept both.
+	//   3. resolveTenant by user_id — last-resort fallback for callers
+	//      that have only the cognito sub. Picks user's oldest tenant
+	//      which is WRONG for multi-tenant users; (1) and (2) must
+	//      catch the real call path before we hit this.
+	if req.TenantID == uuid.Nil {
+		if hdr := r.Header.Get("X-Actor-Org-ID"); hdr != "" {
+			req.TenantID = h.resolveTenantFromHeader(ctx, hdr)
+		}
+	}
 	if req.TenantID == uuid.Nil {
 		if h.resolveTenant == nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tenant_id missing and no resolver configured"})
