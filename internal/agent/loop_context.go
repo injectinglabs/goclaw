@@ -170,8 +170,10 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	// registry from gateway startup, which has NO per-agent MCP tools, so
 	// e.g. BULK_SHEET_WRITE from composio-mcp is "unknown tool" inside the
 	// child run. See tools.ParentRegistryFromCtx + setupSubagents factory.
-	if l.tools != nil {
-		ctx = tools.WithParentRegistry(ctx, l.tools)
+	// l.tools is the ToolExecutor interface; cast to *tools.Registry so the
+	// factory can call .Clone(). Mirrors loop_mcp_user.go's assertion path.
+	if reg, ok := l.tools.(*tools.Registry); ok && reg != nil {
+		ctx = tools.WithParentRegistry(ctx, reg)
 	}
 	if l.memoryCfg != nil {
 		ctx = tools.WithMemoryConfig(ctx, l.memoryCfg)
