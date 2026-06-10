@@ -12,7 +12,7 @@ description: |
   Heuristic: if you would otherwise need to (a) iterate over N items and (b) produce more than one attribute per item, this skill is correct. The user mentioning "table" / "таблица" without a sheet is a strong signal — assume they want a real persistent Google Sheet they can open, NOT a markdown blob in chat.
 metadata:
   author: injecting.ai
-  version: "3.5.0"
+  version: "3.5.1"
 ---
 
 # Sheet Bulk Enrich
@@ -61,7 +61,7 @@ The user can open the Sheet during the wait and watch rows fill in live, one per
 - **Do NOT use `GOOGLEDRIVE_CREATE_FILE_FROM_TEXT` with a pre-filled CSV body containing data rows.** Header-row-only seed is correct; embedding all answers in CSV defeats the BULK_SHEET_WRITE step and skips parallel-subagent visibility. Always seed column A first, then spawn N subagents, then BULK_SHEET_WRITE.
 - **Do NOT loop `GOOGLESHEETS_VALUES_UPDATE` per cell.** Hits the 60/min quota and is N× slower. Use `BULK_SHEET_WRITE` instead.
 - **Do NOT skip spawn mode.** Even when items are well-known to you (NBA, top companies, unicorns) — spawn anyway. The user wants to SEE N parallel research chips. That's the UX. Trust the constraint block to keep each subagent cheap (~3-8 K tokens).
-- **Do NOT spawn subagents sequentially.** Issue all N `spawn` calls in ONE assistant turn (one message with N tool calls). The runtime fans them out in parallel; sequential spawning serializes the wall-clock.
+- **Spawn in BATCHES OF 5, never all N at once.** Issue exactly 5 `spawn` calls per assistant turn, then immediately call `spawn({action:"wait"})` to let those 5 finish, then issue the next 5, and so on until all N rows are done. Trying to emit 25+ spawn calls in a single turn truncates the LLM's output mid-stream (the test log shows this: "previous truncation was due to exceeding token limits when attempting to spawn all subagents simultaneously") and the parent then spends extra iterations recovering. Five-at-a-time fits cleanly inside the per-turn output budget for every supported model and gives a predictable, deterministic batch cadence. The 5 subagents inside a batch still run TRULY in parallel — only batches are sequential.
 - **Do NOT re-spawn a row that has already been spawned.** If you called `spawn` for `row-2-ByteDance` once, you have already issued that task. Do NOT call `spawn` again for the same label even if `spawn({action:"list"})` shows it as completed — the result is already in the system, you'll collect it via `wait`. Re-spawning the same labels burned 9 extra spawns on the v3.3.x test, eating the iteration budget so the final `BULK_SHEET_WRITE` never fired. ONE spawn per row, period.
 - **Do NOT verify or review after `wait` — go DIRECTLY to BULK_SHEET_WRITE.** When `wait` returns, your VERY NEXT tool call MUST be `BULK_SHEET_WRITE` with the full cells array. Do NOT enter a thinking block titled "Reviewing Task Outcomes" or "Verifying Data" — the data is whatever the subagents returned, and your job is to commit it as-is. Empty subagent fields become empty cells. Wrong-looking values can be fixed in a follow-up turn. The fastest path from `wait` to user-visible Sheet is ONE tool call; any thinking step in between risks eating the remaining iteration budget.
 - **Do NOT weaken the HARD CONSTRAINT block in Step 4's task prompt.** Each subagent MUST do exactly one web_search and stop. Without that block, subagents iterate 10-20× and burn 50-200 K tokens each on slop-loops.
@@ -118,9 +118,18 @@ You will ALWAYS use spawn mode below (parallel subagents, one per row). The user
 
 If `web_search` errors at the parent (e.g. provider timeout), DO NOT retry and DO NOT abort the run. Proceed without it — you have the list in your head already. Move straight to Step 4 (spawn).
 
-### Step 4 — Spawn N subagents, each writing its OWN row live
+### Step 4 — Spawn N subagents in BATCHES OF 5, each writing its OWN row live
 
-For EACH item (N items total), call `spawn`. Issue all N calls in ONE assistant turn so the runtime fans them out in parallel.
+Process the N items in batches of 5. Per batch:
+1. In one assistant turn, issue **exactly 5** `spawn` calls (one per row) — the 5 subagents inside the batch run truly in parallel.
+2. In the next turn issue ONE `spawn({action:"wait", timeout: 300})` — block until those 5 are done.
+3. Repeat for the next 5 rows.
+
+For 25 items that's 5 batches × (1 spawn turn + 1 wait turn) = 10 turns total.
+
+**Why 5 and not all 25**: trying to emit 25 spawn tool-calls in one assistant turn hits the model's per-turn output token limit and truncates mid-stream — the parent then burns iterations recovering. Five fits cleanly inside the budget for every supported model.
+
+**Concurrency inside a batch is still parallel.** The runtime fans the 5 spawn calls out simultaneously; wall-clock per batch ≈ slowest of those 5 subagents (~30-60 s with web_search), not the sum.
 
 **Each subagent does ONE `web_search`, then commits its row directly via `BULK_SHEET_WRITE`.** No web_fetch (Wikipedia returns 20-50KB of text which blows up context and slows the batch 4×). If `web_search` returns nothing useful, the subagent MUST fall back to training knowledge and still write the row — empty cells are ONLY for fields the subagent genuinely can't recall AND search didn't cover.
 
@@ -147,23 +156,25 @@ Conventions:
 
 **Web-search reliability note**: stage AWS IP is blocked by DuckDuckGo (the only free search provider currently configured). Until a Brave or Tavily API key is added to stage config, `web_search` will return empty most of the time — that's why the "fallback to training" rule above is critical. Subagents that follow rule #3 will still fill the row correctly. Subagents that don't fall back leave empty cells.
 
-**Expected per-subagent cost: ~3-8 K tokens (one LLM turn + one web_search), ~5-15 seconds** depending on search provider speed. For 25 rows in parallel, total wall-clock ~15-30 s, total tokens ~80-200 K.
+**Expected per-subagent cost: ~3-8 K tokens (one LLM turn + one web_search), ~5-15 seconds** depending on search provider speed. With batches of 5, 25 rows take 5 batches × ~30-60 s slowest-of-five = roughly 2-5 min total wall-clock.
 
-### Step 5 — Wait for every subagent to finish
+### Step 5 — Wait after each batch of 5
 
-After spawning, in the next turn issue ONE tool call — `spawn` with action `wait`:
+Immediately after each batch's 5 spawn calls, in the very next turn issue ONE tool call — `spawn` with action `wait`:
 
 ```json
-{ "tool": "spawn", "arguments": { "action": "wait", "timeout": 600 } }
+{ "tool": "spawn", "arguments": { "action": "wait", "timeout": 300 } }
 ```
 
-`wait` blocks until every child of this agent completes (or `timeout` seconds elapse). The result is a formatted list, one line per task, with the task's full result text (capped at 4 KB per task).
+`wait` blocks until every still-running child completes (or `timeout` seconds elapse). It returns a formatted list, one line per task, with the task's full result text (capped at 4 KB per task). Each `wait` covers ONLY the children spawned so far that haven't been collected yet, so calling it once per batch is correct.
+
+After `wait` returns, immediately issue the next batch of 5 spawn calls (or finish, if there are no more rows).
 
 **Do NOT call `spawn({action:"list"})` to check on progress.** The `wait` already blocks until completion — `list` adds an iteration for zero new information.
 
-**Do NOT re-spawn rows that `list` shows as completed.** "Completed" means the result is already collected; the next `wait` will include it. Re-spawning the same label is the single biggest tool-budget waste — it cost an entire test run on v3.3.x.
+**Do NOT re-spawn rows that previously completed.** Each row is spawned exactly once across the whole run. Re-spawning the same label is the single biggest tool-budget waste — it cost an entire test run on v3.3.x.
 
-If any task shows `[failed]`: include the row in the final summary but DON'T fail the batch — that row's cells will simply remain empty.
+If any task shows `[failed]` in a batch's wait: include the row in the final summary but DON'T fail the run — proceed to the next batch. That row's cells will simply remain empty.
 
 ### Step 6 — Report to user (NO final BULK_SHEET_WRITE)
 
