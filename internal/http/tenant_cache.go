@@ -78,9 +78,9 @@ func (c *tenantCache) GetTenantBySlug(ctx context.Context, slug string) (*store.
 }
 
 // GetTenantByExternalOrgID passes through to the underlying store and
-// seeds the id/slug cache with the result. This path is cold (once
-// per workflow enqueue), so we don't maintain a third lookup map
-// keyed on external_org_id.
+// seeds the id/slug cache with the result. This path is cold (called
+// once per X-Actor-Org-ID resolution at boundary entry), so we don't
+// maintain a third lookup map keyed on external_org_id.
 func (c *tenantCache) GetTenantByExternalOrgID(ctx context.Context, externalOrgID string) (*store.TenantData, error) {
 	t, err := c.store.GetTenantByExternalOrgID(ctx, externalOrgID)
 	if err != nil {
