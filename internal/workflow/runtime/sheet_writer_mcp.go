@@ -10,30 +10,41 @@ import (
 	"time"
 )
 
-// MCPSheetWriter writes cell values back to the user's Google Sheet by
-// driving composio-mcp's `GOOGLESHEETS_BATCH_UPDATE` action (which
-// maps to Google's `spreadsheets.values.batchUpdate` API). Composio
-// holds the user's already-established Google OAuth — the orchestrator
-// piggybacks on it instead of running a parallel OAuth flow, which gave
-// users a confusing second "Connect Google" prompt.
+// MCPSheetWriter writes cell values back to the user's Google Sheet
+// through composio-mcp's `GOOGLESHEETS_VALUES_BATCH_UPDATE` synthetic
+// tool. The sidecar routes this name through Composio's `tools.
+// proxyExecute` to Google's NATIVE `spreadsheets.values.batchUpdate`
+// API endpoint, with Composio injecting the user's OAuth credentials.
 //
-// Why composio (not sheets-mcp's batch_update): users already authorize
+// Why proxy-execute (not a curated Composio action): Composio's
+// curated `GOOGLESHEETS_BATCH_UPDATE` is a wrapper with its own opinion
+// about argument shape and doesn't accept Google's native multi-range
+// `data` array. Sending Google-native format gets rejected with
+// "WRONG FORMAT: this tool requires a different schema". The
+// `proxyExecute` path is exactly the escape valve Composio documents
+// for "endpoint not covered by a predefined tool / request shape a
+// predefined tool cannot express" — it's the upstream-recommended
+// pattern, not a workaround.
+//
+// Why composio at all (not direct Google API): users already authorize
 // Google through Composio's verified OAuth app for Gmail/Drive/etc.
-// Maintaining a separate sheets-mcp OAuth doubled the consent step and
-// kept two token stores in sync. Routing the writer through composio-
-// mcp consolidates to one auth surface.
+// Composio-managed tokens are masked so we can't extract them, but
+// proxyExecute lets us call Google directly with Composio injecting
+// auth — keeping a single OAuth surface while gaining native API
+// access.
 //
-// Batching: a single batchUpdate call writes the entire wave (any
-// number of cells across any number of ranges) as ONE Google Sheets
-// API request. Previous design fanned out one VALUES_UPDATE per cell —
-// for waves with 60+ cells that hit Google's "Write requests per
-// minute per user" quota (default 60/min) and failed half the run.
-// One call per wave keeps a 500-cell run well under quota.
+// Batching: ONE proxyExecute call writes the entire wave (any number
+// of cells across any number of distinct ranges) as ONE Google Sheets
+// API request. Previous designs fanned out one call per cell and hit
+// Google's "60 Write requests per minute per user" quota on any wave
+// >60 cells; native batchUpdate sidesteps the quota entirely (1 wave
+// = 1 quota unit regardless of cell count).
 //
-// Auth: composio-mcp listens on a private docker network and reads the
-// acting user from `X-Proxy-User`. No service token (it's internal).
-// The header value MUST be the goclaw-internal user UUID; composio
-// maps it to the user's connected Google account.
+// Auth: composio-mcp listens on a private docker network and reads
+// the acting user from `X-Proxy-User`. No service token (it's
+// internal). The header value MUST be the goclaw-internal user UUID;
+// composio-mcp resolves it to a Composio connectedAccountId and
+// supplies that to proxyExecute.
 type MCPSheetWriter struct {
 	// composioURL is the base URL of composio-mcp (e.g.
 	// http://composio-mcp:9300). The writer appends /mcp.
@@ -62,11 +73,11 @@ func NewMCPSheetWriter(composioURL, _unusedLegacyToken, orgID string) *MCPSheetW
 }
 
 // BatchWrite implements SheetWriter. Packs the whole wave's writes
-// into ONE composio GOOGLESHEETS_BATCH_UPDATE call (one Google Sheets
-// API request) regardless of how many cells or how many distinct
-// ranges they touch. Returns an error only on transport / auth / quota
-// failure of that single call — per-cell retries are the
-// orchestrator's job at the next wave boundary.
+// into ONE composio-mcp tools/call to GOOGLESHEETS_VALUES_BATCH_UPDATE
+// (the sidecar's synthetic proxy tool) regardless of how many cells
+// or how many distinct ranges they touch. Returns an error only on
+// transport / auth failure of that single call — per-cell retries are
+// the orchestrator's job at the next wave boundary.
 func (w *MCPSheetWriter) BatchWrite(ctx context.Context, userID string, writes []CellWrite) error {
 	if len(writes) == 0 {
 		return nil
@@ -74,8 +85,12 @@ func (w *MCPSheetWriter) BatchWrite(ctx context.Context, userID string, writes [
 
 	// All writes in a single BatchWrite target the same spreadsheet.
 	// Each CellWrite becomes one entry in the batch `data` array
-	// targeting a single-cell A1 range; Google's batchUpdate handles
-	// arbitrary mixed ranges in one round-trip.
+	// targeting a single-cell A1 range; Google's native batchUpdate
+	// handles arbitrary mixed ranges in one round-trip. Field names
+	// match Google's API verbatim (camelCase) — composio-mcp forwards
+	// the body to `/v4/spreadsheets/{id}/values:batchUpdate` without
+	// renaming, so the closer we are to Google's schema, the fewer
+	// translation seams.
 	spreadsheetID := writes[0].SpreadsheetID
 	data := make([]map[string]any, 0, len(writes))
 	for _, c := range writes {
@@ -91,9 +106,9 @@ func (w *MCPSheetWriter) BatchWrite(ctx context.Context, userID string, writes [
 	}
 
 	args := map[string]any{
-		"spreadsheet_id":     spreadsheetID,
-		"value_input_option": "USER_ENTERED",
-		"data":               data,
+		"spreadsheet_id":   spreadsheetID,
+		"valueInputOption": "USER_ENTERED",
+		"data":             data,
 	}
 
 	payload := map[string]any{
@@ -101,7 +116,7 @@ func (w *MCPSheetWriter) BatchWrite(ctx context.Context, userID string, writes [
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]any{
-			"name":      "GOOGLESHEETS_BATCH_UPDATE",
+			"name":      "GOOGLESHEETS_VALUES_BATCH_UPDATE",
 			"arguments": args,
 		},
 	}
@@ -126,7 +141,7 @@ func (w *MCPSheetWriter) BatchWrite(ctx context.Context, userID string, writes [
 	if resp.StatusCode >= 400 {
 		buf := new(bytes.Buffer)
 		_, _ = buf.ReadFrom(resp.Body)
-		return fmt.Errorf("composio GOOGLESHEETS_BATCH_UPDATE %s: %s", resp.Status, truncate(buf.String(), 300))
+		return fmt.Errorf("composio GOOGLESHEETS_VALUES_BATCH_UPDATE %s: %s", resp.Status, truncate(buf.String(), 300))
 	}
 
 	// Composio-mcp wraps action results in MCP's content envelope. A

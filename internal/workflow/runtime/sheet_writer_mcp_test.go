@@ -29,7 +29,7 @@ func TestColLetter(t *testing.T) {
 }
 
 // TestMCPSheetWriter_BatchUpdate_ComposioRouting asserts the writer
-// issues exactly ONE GOOGLESHEETS_BATCH_UPDATE composio-mcp call for a
+// issues exactly ONE GOOGLESHEETS_VALUES_BATCH_UPDATE composio-mcp call for a
 // wave with multiple cells, with X-Proxy-User identity and the wave's
 // cells packed into the data array. Batching is what keeps a large
 // wave under Google's "60 write req/min per user" quota.
@@ -86,8 +86,8 @@ func TestMCPSheetWriter_BatchUpdate_ComposioRouting(t *testing.T) {
 		t.Errorf("must NOT send X-Service-Token (that was the retired sheets-mcp path)")
 	}
 	params, _ := c.body["params"].(map[string]any)
-	if name, _ := params["name"].(string); name != "GOOGLESHEETS_BATCH_UPDATE" {
-		t.Errorf("tool name: want GOOGLESHEETS_BATCH_UPDATE, got %s", name)
+	if name, _ := params["name"].(string); name != "GOOGLESHEETS_VALUES_BATCH_UPDATE" {
+		t.Errorf("tool name: want GOOGLESHEETS_VALUES_BATCH_UPDATE, got %s", name)
 	}
 	args, _ := params["arguments"].(map[string]any)
 	if args["spreadsheet_id"] != "ss-1" {
