@@ -89,6 +89,18 @@ func (t *SpawnTool) executeWait(ctx context.Context, args map[string]any) *Resul
 	return t.formatWaitResult(tasks, err)
 }
 
+// waitResultPerTaskMaxChars caps each subagent's final-result text in the
+// formatted wait summary. The previous 200-char cap was tuned for short
+// human-readable summaries; bulk-action skills (spawn N subagents → collect
+// JSON → write to sheet/gmail/slack) need each task's full structured result
+// to round-trip through the parent agent. 4 KB per task is plenty for the
+// JSON-blob style returns these skills emit, while still bounding the total
+// wait-message size (with the default MaxConcurrent=0 / unlimited fan-out, a
+// truly N=100 wait still tops out at ~400 KB ≈ 100 K tokens — large but not
+// runaway). Callers that need the original short-summary behavior can ask the
+// subagents to emit shorter results in their task prompt.
+const waitResultPerTaskMaxChars = 4000
+
 func (t *SpawnTool) formatWaitResult(tasks []*SubagentTask, waitErr error) *Result {
 	if len(tasks) == 0 {
 		msg := "No subagent tasks found."
@@ -110,7 +122,7 @@ func (t *SpawnTool) formatWaitResult(tasks []*SubagentTask, waitErr error) *Resu
 		}
 		totalIn += task.TotalInputTokens
 		totalOut += task.TotalOutputTokens
-		sb.WriteString(fmt.Sprintf("- [%s] %s: %s\n", task.Status, task.Label, truncate(task.Result, 200)))
+		sb.WriteString(fmt.Sprintf("- [%s] %s: %s\n", task.Status, task.Label, truncate(task.Result, waitResultPerTaskMaxChars)))
 	}
 
 	header := fmt.Sprintf("All %d subagent tasks finished (%d completed, %d failed). Total tokens: %d in / %d out\n\n",
