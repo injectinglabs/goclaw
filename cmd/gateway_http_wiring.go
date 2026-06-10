@@ -323,13 +323,16 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 		// All three share the same tenant scoping as chat.* — caller's
 		// WS session is authoritative, client-supplied tenant_id ignored.
 		reader := runtime.NewMCPSheetReader(composioURL)
-		methods.NewWorkflowMethods(workflowStore, enqueueH, reader).Register(d.server.Router())
+		// evtBus is the same instance the orchestrator publishes to —
+		// passing it to WorkflowMethods lets workflow.runsSubscribe
+		// read from its per-run resume ring buffer.
+		methods.NewWorkflowMethods(workflowStore, enqueueH, reader, evtBus).Register(d.server.Router())
 
 		slog.Info("workflows orchestrator wired",
 			"writer", "composio-mcp",
 			"reader", "composio-mcp",
 			"resolver", "providerresolve.ResolveBackgroundProvider",
-			"ws_methods", "workflow.runState, workflow.enqueue, workflow.peekSheet",
+			"ws_methods", "workflow.runState, workflow.enqueue, workflow.peekSheet, workflow.runsSubscribe",
 		)
 	} else {
 		slog.Info("workflows orchestrator disabled (no PG store)")

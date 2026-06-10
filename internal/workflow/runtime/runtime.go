@@ -67,6 +67,13 @@ type RunEvent struct {
 	WorkflowID uuid.UUID `json:"workflow_id"`
 	TenantID   uuid.UUID `json:"tenant_id"`
 	UserID     string    `json:"user_id"`
+	// Seq is a per-run monotonic sequence stamped by BusEventBus at
+	// publish time. The SPA records the highest Seq it has seen and
+	// on WS reconnect calls workflow.runsSubscribe(run_id, since_seq)
+	// to fetch any events emitted while disconnected — same pattern
+	// as agent runs.subscribe. Zero on emit-time RunEvent literals;
+	// PublishWorkflowEvent overwrites it before broadcast.
+	Seq int64 `json:"seq,omitempty"`
 
 	// cell.update fields
 	RowIdx     *int    `json:"row_idx,omitempty"`
