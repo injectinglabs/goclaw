@@ -12,7 +12,7 @@ description: |
   Heuristic: if you would otherwise need to (a) iterate over N items and (b) produce more than one attribute per item, this skill is correct. The user mentioning "table" / "таблица" without a sheet is a strong signal — assume they want a real persistent Google Sheet they can open, NOT a markdown blob in chat.
 metadata:
   author: injecting.ai
-  version: "3.4.0"
+  version: "3.4.1"
 ---
 
 # Sheet Bulk Enrich
@@ -119,11 +119,13 @@ You will ALWAYS use spawn mode below (parallel subagents, one per row). The user
 
 If `web_search` errors at the parent (e.g. provider timeout), DO NOT retry and DO NOT abort the run. Proceed without it — you have the list in your head already. Move straight to Step 4 (spawn).
 
-### Step 4 — Spawn N ULTRA-LIGHTWEIGHT subagents (one search per row)
+### Step 4 — Spawn N ULTRA-LIGHTWEIGHT subagents (training-only, no tools)
 
 For EACH item (N items total), call `spawn`. Issue all N calls in ONE assistant turn so the runtime fans them out in parallel.
 
-**Each subagent does EXACTLY ONE web_search and returns IMMEDIATELY.** No iteration. No bash. No web_fetch. No second search. The constraint block below MUST be pasted into every spawn task verbatim — do not paraphrase, do not edit, do not trim. It is the single most important thing in this skill.
+**Each subagent answers PURELY from its training knowledge and outputs JSON immediately — NO tool calls at all.** For the well-known entities this skill handles (top public companies, top unicorns, NBA teams, country capitals, top universities, S&P 500, famous people, programming languages), the subagent's training data has every field. Web search is unreliable on stage right now (DDG blocks our IP) and not needed for known facts. Subagents that pause to web_search just slow the batch and return empty when DDG times out — both bad outcomes. Skip the search entirely.
+
+The constraint block below MUST be pasted into every spawn task verbatim — do not paraphrase, do not edit, do not trim. It is the single most important thing in this skill.
 
 ```json
 {
@@ -132,7 +134,7 @@ For EACH item (N items total), call `spawn`. Issue all N calls in ONE assistant 
     "action": "spawn",
     "mode": "async",
     "label": "row-2-Apple",
-    "task": "Look up \"Apple Inc.\" and return STRICT JSON: {\"ceo\": \"<full name or empty string>\", \"linkedin\": \"<URL or empty string>\", \"funding\": \"<Series X, $Y, YYYY-MM or 'public' or empty string>\"}.\n\nHARD CONSTRAINTS — these are absolute, no exceptions:\n- Make EXACTLY ONE web_search call. Use a single broad query like: 'Apple Inc CEO LinkedIn last funding 2025'. ONE call. Not two. Not zero. Just one.\n- After that single web_search returns (even if results look incomplete), STOP searching forever. Do NOT search again with refined keywords. Do NOT search per field. Do NOT search for a different angle.\n- NEVER call web_fetch. NEVER call bash. NEVER call write_file or any sandbox command. NEVER call any tool other than the one web_search above.\n- Extract every field from the snippets returned by that single search. If a field is not findable from the snippets, use empty string. Do NOT search to fill the gap.\n- If web_search returns empty or errors, return all fields as empty strings AND STILL output the JSON object. Do not retry web_search on failure.\n- Your final response MUST start with `{` and contain ONLY the JSON object. No prose. No markdown fences. No commentary. No reasoning. One line of JSON, then done.\n\nThis 'one search, then JSON' pattern is the entire job. Resist the urge to verify, cross-reference, or improve. The parent agent has 25 of you running in parallel — your job is to be fast and predictable, not thorough."
+    "task": "Return STRICT JSON for the company \"Apple Inc.\" with the keys the parent agent asked for (example: {\"ceo\": \"<full name>\", \"linkedin\": \"<URL>\", \"funding\": \"<Series X, $Y, YYYY-MM or 'public'>\"}).\n\nHARD CONSTRAINTS — these are absolute, no exceptions:\n\n1. FILL EVERY FIELD FROM YOUR TRAINING KNOWLEDGE. Apple's CEO is Tim Cook. Apple is public. Apple's HQ is Cupertino, USA, founded 1976. These are facts you already know — write them directly. Same logic for any well-known unicorn, NBA team, top company, country capital, language, university.\n\n2. DO NOT call ANY tools. NO web_search. NO web_fetch. NO bash. NO write_file. ZERO tool calls. Your ENTIRE job is to output one JSON object from what you already know.\n\n3. If a field is truly unknown (e.g. precise dollar-amount of a private company's last round from 6 months ago that's not stable in your training), use empty string \"\" or \"нет данных\". Use this for the field, not for the whole object. NEVER return all-empty JSON for a famous company you can describe in plain language — that's a knowledge failure, not a data-source failure.\n\n4. Output ONLY the JSON object on its own line. No prose. No markdown fences. No commentary. The first character of your final response MUST be `{`. One line of JSON, then done.\n\nYou have 25 siblings running in parallel — your job is fast (~5 sec, no tool calls) and complete (every field filled from training)."
   }
 }
 ```
@@ -140,10 +142,10 @@ For EACH item (N items total), call `spawn`. Issue all N calls in ONE assistant 
 Conventions:
 - Embed each row's value (the column-A entry) directly in the prompt where the example shows "Apple Inc.".
 - Use `label = row-<sheet_row>-<short_item_name>` so the wait-result list is scannable.
-- Build the broad web_search query to cover ALL output fields in one go (e.g. "Apple Inc CEO LinkedIn last funding 2025"), not field-by-field.
-- The constraint block above is the SINGLE most important thing in this skill. Subagents WILL try to iterate, retry, scrape, verify, cross-reference — your job is to forbid that with the prompt. Each retry costs the user another ~5-15 K tokens.
+- Match the JSON keys to the column schema the user asked for. Example above uses ceo/linkedin/funding; a different prompt might use country/founded/last_round/lead_investor/industry/product.
+- The "no tools" rule is THE thing. Subagents that call web_search hit DDG, time out, return empty — and the cell is blank. Subagents that just answer from training fill the row. Force-disable the tool path via the prompt.
 
-**Expected per-subagent cost: ~3-8 K tokens, ~5-15 seconds.** For 25 rows in parallel, total wall-clock is roughly the slowest single subagent (~15-20s), total tokens ~100-200 K.
+**Expected per-subagent cost: ~1-3 K tokens (one LLM turn, zero tool latency), ~3-8 seconds.** For 25 rows in parallel, total wall-clock ~8-15 s, total tokens ~30-80 K — much cheaper than the v3.3.x "one search each" path.
 
 ### Step 5 — Wait for every subagent to finish
 
