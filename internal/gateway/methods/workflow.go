@@ -167,6 +167,10 @@ type runStateRun struct {
 	SpreadsheetID string `json:"spreadsheet_id,omitempty"`
 	SheetTab      string `json:"sheet_tab,omitempty"`
 	WorkflowName  string `json:"workflow_name,omitempty"`
+	// Cumulative enrichment token cost (all cells, all search round-trips).
+	// Lets the chip restore the total-cost display after a reload.
+	TokensIn  int `json:"tokens_in,omitempty"`
+	TokensOut int `json:"tokens_out,omitempty"`
 }
 
 // handleRunState returns the full per-cell snapshot for one run.
