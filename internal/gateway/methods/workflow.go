@@ -160,6 +160,13 @@ type runStateRun struct {
 	ErrorMessage   *string   `json:"error_message,omitempty"`
 	StartedAt      *string   `json:"started_at,omitempty"`
 	FinishedAt     *string   `json:"finished_at,omitempty"`
+	// Sheet metadata lifted from the parent workflow row so the SPA
+	// chip can call workflow.peekSheet after a reload without scraping
+	// the (display-truncated) tool-result text. Mirrors the same
+	// fields run.started carries on the live workflow.event stream.
+	SpreadsheetID string `json:"spreadsheet_id,omitempty"`
+	SheetTab      string `json:"sheet_tab,omitempty"`
+	WorkflowName  string `json:"workflow_name,omitempty"`
 }
 
 // handleRunState returns the full per-cell snapshot for one run.
@@ -247,6 +254,14 @@ func (m *WorkflowMethods) handleRunState(ctx context.Context, client *gateway.Cl
 		CompletedCount: run.CompletedCount,
 		ErrorCount:     run.ErrorCount,
 		ErrorMessage:   run.ErrorMessage,
+	}
+	// Best-effort: a missing workflow row (deleted after the run) just
+	// leaves the sheet metadata empty — the chip falls back to its
+	// tool-result-derived props, same as before this field existed.
+	if wf, err := m.store.GetWorkflow(ctx, run.WorkflowID); err == nil && wf != nil {
+		resp.SpreadsheetID = wf.SpreadsheetID
+		resp.SheetTab = wf.SheetTab
+		resp.WorkflowName = wf.Name
 	}
 	if run.StartedAt != nil {
 		s := run.StartedAt.UTC().Format("2006-01-02T15:04:05.000Z")
