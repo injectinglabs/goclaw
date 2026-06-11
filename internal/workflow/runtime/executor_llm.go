@@ -226,15 +226,17 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 
 	// Bounded web_search retry loop. While the model keeps issuing a
 	// web_search tool call and we haven't hit the cap, run the search and
-	// re-prompt. This lets the model search AGAIN when the first query
-	// returns "(no results)" — the prompt tells it to refine and retry.
-	// Capped so a chatty model can't freeze the wave. The final iteration
-	// drops Tools so the model is forced to emit a value.
+	// collect the result snippets. We do NOT trust the model's free-form
+	// content from these tool-call turns as the cell value — reasoning
+	// models leak chain-of-thought + the raw search dump into Content
+	// there. Instead, after gathering notes, a separate clean extraction
+	// call (no tools) turns the notes into a single value.
+	var searchNotes []string
 	if e.webSearch != nil {
 		const maxCellSearches = 3
 		for searches := 0; searches < maxCellSearches; searches++ {
 			if resp.FinishReason != "tool_calls" || len(resp.ToolCalls) == 0 {
-				break // model emitted a final value — done.
+				break // model emitted a final value without (more) search.
 			}
 			var call *providers.ToolCall
 			for i := range resp.ToolCalls {
@@ -244,7 +246,7 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 				}
 			}
 			if call == nil {
-				break // no web_search call (model hallucinated another tool) — stop.
+				break // model requested a tool we didn't offer — stop.
 			}
 			query, _ := call.Arguments["query"].(string)
 			var searchResult string
@@ -254,6 +256,7 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 			if searchResult == "" {
 				searchResult = "(no results)"
 			}
+			searchNotes = append(searchNotes, searchResult)
 			req.Messages = append(req.Messages,
 				providers.Message{
 					Role:      "assistant",
@@ -266,14 +269,9 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 					Content:    searchResult,
 				},
 			)
-			// On the LAST allowed iteration drop Tools so the model must
-			// emit a final value instead of requesting yet another search.
-			if searches == maxCellSearches-1 {
-				req.Tools = nil
-			}
 			next, chatErr := prov.Chat(chatCtx, req)
 			if chatErr != nil {
-				slog.Warn("cell executor: post-search chat failed, using last good content",
+				slog.Warn("cell executor: post-search chat failed",
 					"err", chatErr, "tenant", t.TenantID, "col", t.Column.ID, "search", searches+1)
 				break
 			}
@@ -286,8 +284,61 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 	}
 
 	value := normalizeCellValue(resp.Content)
+
+	// If the model searched but its final content is empty, still looks
+	// like a tool-call turn, or leaked the raw search dump / reasoning
+	// into the cell, run ONE clean extraction call: fresh minimal
+	// messages, NO tools, search snippets handed over as plain context,
+	// strict "return ONLY the value" instruction. This is what keeps the
+	// cell from being filled with the <<<EXTERNAL_UNTRUSTED_CONTENT>>>
+	// envelope + the model's "let's look up…" reasoning.
+	if len(searchNotes) > 0 && (value == "" || resp.FinishReason == "tool_calls" || looksLikeSearchDump(value)) {
+		notes := strings.Join(searchNotes, "\n---\n")
+		if len(notes) > 6000 {
+			notes = notes[:6000]
+		}
+		extractReq := providers.ChatRequest{
+			Model: req.Model,
+			Messages: []providers.Message{
+				{Role: "system", Content: cellSystemPrompt},
+				{Role: "user", Content: user +
+					"\n\nResearch notes (web search results):\n" + notes +
+					"\n\nUsing the notes above (and your training as backup), return ONLY the cell value. " +
+					"No reasoning, no sources, no URLs, no quotes — just the value."},
+			},
+		}
+		if ex, exErr := prov.Chat(chatCtx, extractReq); exErr == nil && ex != nil {
+			addUsage(ex)
+			if v := normalizeCellValue(ex.Content); v != "" && !looksLikeSearchDump(v) {
+				value = v
+			}
+		}
+	}
+
+	// Last-ditch guard: never persist a leaked dump as a cell value.
+	if looksLikeSearchDump(value) {
+		value = ""
+	}
+
 	out := CellResult{Value: value, TokensIn: totalIn, TokensOut: totalOut}
 	return out, nil
+}
+
+// looksLikeSearchDump reports whether s is clearly NOT a clean cell value
+// but the raw search-tool output and/or the model's chain-of-thought that
+// leaked through (envelope markers, the formatted "Search results for:"
+// header, or implausibly long for a single cell).
+func looksLikeSearchDump(s string) bool {
+	if s == "" {
+		return false
+	}
+	if strings.Contains(s, "EXTERNAL_UNTRUSTED_CONTENT") ||
+		strings.Contains(s, "Search results for:") ||
+		strings.Contains(s, "[REMINDER:") {
+		return true
+	}
+	// A real cell value is short. 600+ chars is a paragraph, not a value.
+	return len(s) > 600
 }
 
 // buildCellUserPrompt assembles the user-role message from a CellTask.
