@@ -132,6 +132,26 @@ func (c *Config) applyEnvOverrides() {
 	envStr("GOCLAW_SLACK_APP_TOKEN", &c.Channels.Slack.AppToken)
 	envStr("GOCLAW_SLACK_USER_TOKEN", &c.Channels.Slack.UserToken)
 
+	// Web-search provider keys. DuckDuckGo (the free fallback) is blocked
+	// from our AWS egress IPs, so a paid provider key is required for
+	// web_search to return anything on stage/prod. Keys are secrets →
+	// injected via Secrets Manager .env, never committed to the json5
+	// config. Presence of a key auto-enables that provider (mirrors the
+	// channel-token pattern below); the default provider_order already
+	// puts paid providers ahead of DuckDuckGo.
+	envStr("GOCLAW_TAVILY_API_KEY", &c.Tools.Web.Tavily.APIKey)
+	envStr("GOCLAW_BRAVE_API_KEY", &c.Tools.Web.Brave.APIKey)
+	envStr("GOCLAW_EXA_API_KEY", &c.Tools.Web.Exa.APIKey)
+	if c.Tools.Web.Tavily.APIKey != "" {
+		c.Tools.Web.Tavily.Enabled = true
+	}
+	if c.Tools.Web.Brave.APIKey != "" {
+		c.Tools.Web.Brave.Enabled = true
+	}
+	if c.Tools.Web.Exa.APIKey != "" {
+		c.Tools.Web.Exa.Enabled = true
+	}
+
 	// TTS secrets
 	envStr("GOCLAW_TTS_OPENAI_API_KEY", &c.Tts.OpenAI.APIKey)
 	envStr("GOCLAW_TTS_ELEVENLABS_API_KEY", &c.Tts.ElevenLabs.APIKey)
