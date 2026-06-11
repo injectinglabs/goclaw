@@ -132,6 +132,98 @@ func TestExecutor_StableContextKeyOrdering(t *testing.T) {
 	}
 }
 
+// whiffSearch is a CellWebSearch that always returns "" — simulates the
+// provider missing on every query (rate limit / no relevant hits).
+type whiffSearch struct{}
+
+func (whiffSearch) Search(context.Context, string) string { return "" }
+
+// hitSearch returns a fixed snippet — simulates a real search result.
+type hitSearch struct{ out string }
+
+func (h hitSearch) Search(context.Context, string) string { return h.out }
+
+// When the model insists on searching a trivial fact and every search
+// whiffs, the cell must fall back to a clean training-knowledge call
+// instead of coming back blank (the ByteDance "HQ Country"/"Industry"
+// regression). Tokens from every call still accumulate.
+func TestExecutor_TrainingFallbackWhenSearchWhiffs(t *testing.T) {
+	prov := &fakeProvider{respond: func(req providers.ChatRequest) (*providers.ChatResponse, error) {
+		if len(req.Tools) > 0 {
+			// Model keeps asking to search even for a well-known fact.
+			return &providers.ChatResponse{
+				FinishReason: "tool_calls",
+				ToolCalls: []providers.ToolCall{{
+					ID: "c1", Name: "web_search",
+					Arguments: map[string]any{"query": "ByteDance HQ country"},
+				}},
+				Usage: &providers.Usage{PromptTokens: 50, CompletionTokens: 5},
+			}, nil
+		}
+		// No-tools call = the training-knowledge fallback (no useful notes
+		// to extract from, so no extraction call precedes it).
+		return &providers.ChatResponse{
+			Content: "China",
+			Usage:   &providers.Usage{PromptTokens: 30, CompletionTokens: 2},
+		}, nil
+	}}
+	exec := NewLLMCellExecutor(prov)
+	exec.SetWebSearch(whiffSearch{})
+	out, err := exec.ExecuteCell(context.Background(), CellTask{
+		Column: colExec("hq", "HQ Country", "country of HQ"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Value != "China" {
+		t.Errorf("want 'China' from training fallback, got %q", out.Value)
+	}
+	if out.TokensIn == 0 || out.TokensOut == 0 {
+		t.Errorf("expected accumulated tokens across all calls, got (%d,%d)", out.TokensIn, out.TokensOut)
+	}
+}
+
+// When search DOES return data, the extraction call turns the snippet
+// into a clean value — and the training fallback must NOT fire (value
+// already resolved).
+func TestExecutor_ExtractsFromRealSearchNotes(t *testing.T) {
+	noToolsCalls := 0
+	prov := &fakeProvider{respond: func(req providers.ChatRequest) (*providers.ChatResponse, error) {
+		if len(req.Tools) > 0 {
+			return &providers.ChatResponse{
+				FinishReason: "tool_calls",
+				ToolCalls: []providers.ToolCall{{
+					ID: "c1", Name: "web_search",
+					Arguments: map[string]any{"query": "Acme latest funding"},
+				}},
+				Usage: &providers.Usage{PromptTokens: 40, CompletionTokens: 3},
+			}, nil
+		}
+		noToolsCalls++
+		// First no-tools call is the extraction from notes.
+		return &providers.ChatResponse{
+			Content: "$50M",
+			Usage:   &providers.Usage{PromptTokens: 20, CompletionTokens: 2},
+		}, nil
+	}}
+	exec := NewLLMCellExecutor(prov)
+	exec.SetWebSearch(hitSearch{out: "Acme raised a $50M Series B led by Foo Capital."})
+	out, err := exec.ExecuteCell(context.Background(), CellTask{
+		Column: colExec("funding", "Last Funding", "most recent round size"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Value != "$50M" {
+		t.Errorf("want '$50M' from extraction, got %q", out.Value)
+	}
+	// Exactly ONE no-tools call (extraction). The training fallback must
+	// not also fire once the value is resolved.
+	if noToolsCalls != 1 {
+		t.Errorf("expected 1 no-tools call (extraction only), got %d", noToolsCalls)
+	}
+}
+
 func TestExecutor_NilProvider(t *testing.T) {
 	exec := &LLMCellExecutor{provider: nil}
 	_, err := exec.ExecuteCell(context.Background(), CellTask{Column: colExec("a", "A", "p")})
