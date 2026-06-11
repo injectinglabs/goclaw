@@ -94,6 +94,19 @@ type RunEvent struct {
 	Total     int    `json:"total,omitempty"`
 	Status    string `json:"status,omitempty"`
 	Message   string `json:"message,omitempty"`
+
+	// run.started metadata. The SPA chip needs the spreadsheet id +
+	// tab to peek cell values via workflow.peekSheet. Historically it
+	// scraped these from the sheets_enrich_run tool-result text, which
+	// the tool.result WS event truncates at 1000 chars — on large runs
+	// (25 rows × 6 cols) the JSON tail holding spreadsheet_id got cut
+	// and the chip showed "No spreadsheet id on this run" while the
+	// progress bar (driven by run_id-keyed events) kept moving.
+	// Shipping the ids on the structured event channel removes the
+	// dependency on tool-result parsing entirely.
+	SpreadsheetID string `json:"spreadsheet_id,omitempty"`
+	SheetTab      string `json:"sheet_tab,omitempty"`
+	WorkflowName  string `json:"workflow_name,omitempty"`
 }
 
 // EventBus is the publish-only interface the orchestrator uses to push
@@ -273,12 +286,15 @@ func (o *Orchestrator) StartRun(ctx context.Context, in StartRunInput) (uuid.UUI
 	o.activeMu.Unlock()
 
 	o.emit(runCtx, RunEvent{
-		Type:       "run.started",
-		RunID:      run.ID,
-		WorkflowID: w.ID,
-		TenantID:   w.TenantID,
-		UserID:     in.UserID,
-		Total:      rowCount * colCount,
+		Type:          "run.started",
+		RunID:         run.ID,
+		WorkflowID:    w.ID,
+		TenantID:      w.TenantID,
+		UserID:        in.UserID,
+		Total:         rowCount * colCount,
+		SpreadsheetID: w.SpreadsheetID,
+		SheetTab:      w.SheetTab,
+		WorkflowName:  w.Name,
 	})
 
 	go o.executeRun(runCtx, w, run, in)
