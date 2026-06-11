@@ -284,16 +284,36 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 	}
 
 	value := normalizeCellValue(resp.Content)
+	// Never let a leaked search dump survive as the value — null it so the
+	// extraction / training-knowledge passes below get a chance to replace
+	// it. (Moved ahead of those passes: a dumped value must be treated as
+	// "no value yet", not kept until a final guard.)
+	if looksLikeSearchDump(value) {
+		value = ""
+	}
 
-	// If the model searched but its final content is empty, still looks
-	// like a tool-call turn, or leaked the raw search dump / reasoning
-	// into the cell, run ONE clean extraction call: fresh minimal
-	// messages, NO tools, search snippets handed over as plain context,
-	// strict "return ONLY the value" instruction. This is what keeps the
-	// cell from being filled with the <<<EXTERNAL_UNTRUSTED_CONTENT>>>
-	// envelope + the model's "let's look up…" reasoning.
-	if len(searchNotes) > 0 && (value == "" || resp.FinishReason == "tool_calls" || looksLikeSearchDump(value)) {
-		notes := strings.Join(searchNotes, "\n---\n")
+	// Partition the gathered notes: keep only substantive ones, drop the
+	// "(no results)" / empty placeholders. Handing the extraction step
+	// notes that say only "(no results)" made the model echo emptiness
+	// back — it read "no data found" and returned "" even for facts its
+	// training knows cold (HQ country, industry). Keeping only real notes
+	// means we either extract from actual data or fall through to the
+	// training-knowledge call below.
+	usefulNotes := make([]string, 0, len(searchNotes))
+	for _, n := range searchNotes {
+		if t := strings.TrimSpace(n); t != "" && t != "(no results)" {
+			usefulNotes = append(usefulNotes, n)
+		}
+	}
+
+	// 1) Clean extraction from REAL search results. Runs only when the
+	// value is still unusable AND we actually have substantive notes:
+	// fresh minimal messages, NO tools, snippets as plain context, strict
+	// "return ONLY the value" instruction. Keeps the
+	// <<<EXTERNAL_UNTRUSTED_CONTENT>>> envelope + the model's "let's look
+	// up…" reasoning out of the cell.
+	if value == "" && len(usefulNotes) > 0 {
+		notes := strings.Join(usefulNotes, "\n---\n")
 		if len(notes) > 6000 {
 			notes = notes[:6000]
 		}
@@ -304,6 +324,7 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 				{Role: "user", Content: user +
 					"\n\nResearch notes (web search results):\n" + notes +
 					"\n\nUsing the notes above (and your training as backup), return ONLY the cell value. " +
+					"If the notes don't contain the answer, use your own knowledge. " +
 					"No reasoning, no sources, no URLs, no quotes — just the value."},
 			},
 		}
@@ -315,9 +336,29 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 		}
 	}
 
-	// Last-ditch guard: never persist a leaked dump as a cell value.
-	if looksLikeSearchDump(value) {
-		value = ""
+	// 2) Training-knowledge fallback. If the value is STILL empty after the
+	// search path — searches whiffed ("(no results)"), the model looped on
+	// tool_calls without ever emitting a value, or there were no useful
+	// notes — make ONE clean no-tools call on the base prompt. Well-known
+	// categorical facts (HQ country, industry, founding year) live in the
+	// model's training; without this they came back blank whenever search
+	// happened to miss. Gated on webSearch != nil: with search disabled the
+	// FIRST call already WAS this exact training-only call, so repeating it
+	// would only burn tokens. A genuinely-unknown value still ends up "".
+	if value == "" && e.webSearch != nil {
+		fbReq := providers.ChatRequest{
+			Model: req.Model,
+			Messages: []providers.Message{
+				{Role: "system", Content: cellSystemPrompt},
+				{Role: "user", Content: user},
+			},
+		}
+		if fb, fbErr := prov.Chat(chatCtx, fbReq); fbErr == nil && fb != nil {
+			addUsage(fb)
+			if v := normalizeCellValue(fb.Content); v != "" && !looksLikeSearchDump(v) {
+				value = v
+			}
+		}
 	}
 
 	out := CellResult{Value: value, TokensIn: totalIn, TokensOut: totalOut}
