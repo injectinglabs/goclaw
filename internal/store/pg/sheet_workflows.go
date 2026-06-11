@@ -333,6 +333,16 @@ func (s *PGSheetWorkflowStore) UpdateRunProgress(ctx context.Context, runID uuid
 	return err
 }
 
+func (s *PGSheetWorkflowStore) SumRunCellTokens(ctx context.Context, runID uuid.UUID) (int, int, error) {
+	var tokensIn, tokensOut int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(tokens_in), 0), COALESCE(SUM(tokens_out), 0)
+		  FROM sheet_workflow_cells
+		 WHERE run_id = $1
+	`, runID).Scan(&tokensIn, &tokensOut)
+	return tokensIn, tokensOut, err
+}
+
 func (s *PGSheetWorkflowStore) FinishRun(ctx context.Context, runID uuid.UUID, status string, errorMessage *string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

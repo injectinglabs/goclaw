@@ -224,6 +224,17 @@ func (s *SheetWorkflowStore) UpdateRunProgress(_ context.Context, runID uuid.UUI
 	return nil
 }
 
+func (s *SheetWorkflowStore) SumRunCellTokens(_ context.Context, runID uuid.UUID) (int, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var tokensIn, tokensOut int
+	for _, c := range s.cells[runID] {
+		tokensIn += c.TokensIn
+		tokensOut += c.TokensOut
+	}
+	return tokensIn, tokensOut, nil
+}
+
 func (s *SheetWorkflowStore) FinishRun(_ context.Context, runID uuid.UUID, status string, errMsg *string) error {
 	s.mu.Lock()
 	r, ok := s.runs[runID]
