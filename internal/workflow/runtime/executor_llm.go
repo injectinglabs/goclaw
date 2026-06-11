@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -12,6 +13,19 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
+
+// CellWebSearch is the minimal interface the cell executor needs to call
+// out to a search provider for live data. Kept tiny + here (rather than
+// importing internal/tools) to avoid coupling the runtime to the full tool
+// registry. The wiring adapts internal/tools.WebSearchTool.Execute into
+// this shape — see cmd/gateway_http_wiring.go.
+type CellWebSearch interface {
+	// Search runs one query and returns the serialized result the
+	// executor will hand back to the LLM as the tool message. An empty
+	// string is treated as "no results" — the LLM will then fall back to
+	// training knowledge.
+	Search(ctx context.Context, query string) string
+}
 
 // ProviderResolver returns the (Provider, model) pair that should serve
 // a cell for a given tenant. Production wiring uses
@@ -49,6 +63,20 @@ type LLMCellExecutor struct {
 	tenantStore store.TenantStore
 	// Optional model override; falls back to provider.DefaultModel().
 	Model string
+	// Optional live-search hook. When non-nil the executor exposes a
+	// single web_search tool to the cell LLM and runs at most ONE tool
+	// iteration per cell. Without this, the cell LLM resolves values
+	// from training knowledge only — fast but stale. Set via
+	// SetWebSearch from the wiring path so existing callers
+	// (NewLLMCellExecutor / NewLLMCellExecutorTenant) keep their
+	// signatures unchanged.
+	webSearch CellWebSearch
+}
+
+// SetWebSearch installs a per-cell web_search hook. Passing nil disables
+// the feature (default). Called once at startup from the wiring path.
+func (e *LLMCellExecutor) SetWebSearch(ws CellWebSearch) {
+	e.webSearch = ws
 }
 
 // NewLLMCellExecutor wires a fixed Provider — used by tests + single-
@@ -78,6 +106,42 @@ explanation. If you cannot determine a reliable value, return the
 literal string "" (empty). Do not hallucinate. Verify via web sources
 when uncertain.`
 
+// cellSystemPromptWithSearch extends the base prompt with web_search
+// usage rules when the executor is wired with a live-search hook. Kept
+// terse — one bullet block — to avoid bloating per-cell prompt tokens.
+const cellSystemPromptWithSearch = cellSystemPrompt + `
+
+You may call the web_search tool ONCE per cell to fetch fresh data
+when the answer depends on recent events (latest CEO, last funding
+round, current price, etc.). One broad query, no retries, no
+refinement. After the search result returns, emit the final cell
+value as plain text — no further tool calls.
+
+Skip the search for facts your training already covers (country of HQ,
+founding year, well-known categorical attributes). When in doubt about
+recency, search.`
+
+// cellWebSearchToolDef is the function schema exposed to the cell LLM.
+// One required arg, "query", matching the canonical web_search tool's
+// surface in internal/tools/web_search.go.
+var cellWebSearchToolDef = providers.ToolDefinition{
+	Type: "function",
+	Function: providers.ToolFunctionSchema{
+		Name:        "web_search",
+		Description: "Search the web for current information. One call per cell, single broad query.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{
+					"type":        "string",
+					"description": "Search query — broad and specific to the entity + field you need.",
+				},
+			},
+			"required": []string{"query"},
+		},
+	},
+}
+
 func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResult, error) {
 	var prov providers.Provider
 	var resolvedModel string
@@ -95,11 +159,18 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 	}
 	user := buildCellUserPrompt(t)
 
+	systemPrompt := cellSystemPrompt
+	if e.webSearch != nil {
+		systemPrompt = cellSystemPromptWithSearch
+	}
 	req := providers.ChatRequest{
 		Messages: []providers.Message{
-			{Role: "system", Content: cellSystemPrompt},
+			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: user},
 		},
+	}
+	if e.webSearch != nil {
+		req.Tools = []providers.ToolDefinition{cellWebSearchToolDef}
 	}
 	// Model precedence:
 	//  1. Explicit Model override on the executor (test / per-deploy
@@ -135,12 +206,69 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 		return CellResult{}, errors.New("provider returned nil response")
 	}
 
-	value := normalizeCellValue(resp.Content)
-	out := CellResult{Value: value}
+	totalIn := 0
+	totalOut := 0
 	if resp.Usage != nil {
-		out.TokensIn = resp.Usage.PromptTokens
-		out.TokensOut = resp.Usage.CompletionTokens
+		totalIn += resp.Usage.PromptTokens
+		totalOut += resp.Usage.CompletionTokens
 	}
+
+	// Single tool-iteration loop. If web_search was offered AND the
+	// model issued a web_search tool call, execute it and re-prompt
+	// with the result so the model emits the final cell value. Capped
+	// at ONE iteration on purpose — keeps per-cell wall-clock bounded
+	// (a chatty model with N tool calls would freeze the whole wave).
+	if e.webSearch != nil && resp.FinishReason == "tool_calls" && len(resp.ToolCalls) > 0 {
+		// Find the first (and expected only) web_search call. Skip
+		// anything else the model hallucinated — we only offered
+		// web_search in req.Tools.
+		var call *providers.ToolCall
+		for i := range resp.ToolCalls {
+			if resp.ToolCalls[i].Name == "web_search" {
+				call = &resp.ToolCalls[i]
+				break
+			}
+		}
+		if call != nil {
+			query, _ := call.Arguments["query"].(string)
+			var searchResult string
+			if query != "" {
+				searchResult = e.webSearch.Search(chatCtx, query)
+			}
+			if searchResult == "" {
+				searchResult = "(no results)"
+			}
+			req.Messages = append(req.Messages,
+				providers.Message{
+					Role:      "assistant",
+					Content:   resp.Content,
+					ToolCalls: []providers.ToolCall{*call},
+				},
+				providers.Message{
+					Role:       "tool",
+					ToolCallID: call.ID,
+					Content:    searchResult,
+				},
+			)
+			// Drop Tools on the second call — we don't want another
+			// round-trip; the model must emit the final value now.
+			req.Tools = nil
+			resp2, err := prov.Chat(chatCtx, req)
+			if err != nil {
+				slog.Warn("cell executor: post-tool chat failed, falling back to first-pass content",
+					"err", err, "tenant", t.TenantID, "col", t.Column.ID)
+			} else if resp2 != nil {
+				resp = resp2
+				if resp.Usage != nil {
+					totalIn += resp.Usage.PromptTokens
+					totalOut += resp.Usage.CompletionTokens
+				}
+			}
+		}
+	}
+
+	value := normalizeCellValue(resp.Content)
+	out := CellResult{Value: value, TokensIn: totalIn, TokensOut: totalOut}
 	return out, nil
 }
 
