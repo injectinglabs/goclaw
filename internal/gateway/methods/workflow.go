@@ -258,6 +258,11 @@ func (m *WorkflowMethods) handleRunState(ctx context.Context, client *gateway.Cl
 		CompletedCount: run.CompletedCount,
 		ErrorCount:     run.ErrorCount,
 		ErrorMessage:   run.ErrorMessage,
+		// Authoritative cumulative token cost from the DB — what lets the
+		// chip + parent bubble restore the real total after a reload
+		// instead of resetting to 0.
+		TokensIn:  run.TotalTokensIn,
+		TokensOut: run.TotalTokensOut,
 	}
 	// Best-effort: a missing workflow row (deleted after the run) just
 	// leaves the sheet metadata empty — the chip falls back to its
