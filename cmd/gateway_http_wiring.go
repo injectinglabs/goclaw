@@ -278,6 +278,17 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 			d.pgStores.Tenants,
 		)
 
+		// Wire the per-cell web_search hook. Reuses the same tool the
+		// agent loop already has registered (Brave / Tavily / Serper /
+		// DDG fallback chain — see internal/tools/web_search.go). When
+		// the tool isn't registered (no provider configured) we leave
+		// the executor in pure-training mode by skipping SetWebSearch.
+		if d.toolsReg != nil {
+			if t, ok := d.toolsReg.Get("web_search"); ok {
+				llmExec.SetWebSearch(cellSearchAdapter{tool: t})
+			}
+		}
+
 		// composio-mcp lives on the docker internal network at a fixed
 		// host (no env override — it's a same-stack sidecar). Auth is
 		// per-call via X-Proxy-User; no shared service token.
@@ -388,4 +399,23 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 		backfillWebFetchSettings(context.Background(), d.pgStores.BuiltinTools)
 		applyBuiltinToolDisables(context.Background(), d.pgStores.BuiltinTools, d.toolsReg)
 	}
+}
+
+// cellSearchAdapter wraps the canonical web_search tool so it satisfies
+// runtime.CellWebSearch. Kept here (cmd/) rather than in workflow/runtime/
+// to avoid importing internal/tools from the runtime package and the
+// circular-dep risk that comes with it.
+type cellSearchAdapter struct {
+	tool tools.Tool
+}
+
+func (a cellSearchAdapter) Search(ctx context.Context, query string) string {
+	if a.tool == nil || query == "" {
+		return ""
+	}
+	res := a.tool.Execute(ctx, map[string]any{"query": query})
+	if res == nil {
+		return ""
+	}
+	return res.ForLLM
 }
