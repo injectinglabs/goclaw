@@ -166,6 +166,16 @@ type SheetWorkflowStore interface {
 	UpdateRunProgress(ctx context.Context, runID uuid.UUID, completed, errored int, tokensIn, tokensOut int) error
 	FinishRun(ctx context.Context, runID uuid.UUID, status string, errorMessage *string) error
 
+	// SumRunCellTokens returns the run's token totals as the SUM of its
+	// persisted cell rows. This is the single source of truth the
+	// orchestrator uses for the run's total_tokens and the WS
+	// progress/completed events — the figure shown in the chat bubble must
+	// never drift from the per-cell rows the grid renders. The in-memory
+	// progressTracker atomic can diverge from persisted state (e.g. a cell
+	// LLM call counted in the atomic but whose DB write failed), so we
+	// derive the authoritative number from the cells themselves.
+	SumRunCellTokens(ctx context.Context, runID uuid.UUID) (tokensIn, tokensOut int, err error)
+
 	// Cells — batch write & read for orchestrator + progress UI.
 	BulkInitCells(ctx context.Context, runID uuid.UUID, rowCount, colCount int) error
 	UpdateCellStatus(ctx context.Context, runID uuid.UUID, rowIdx, colIdx int, status string, errMsg *string, attempt int, tokensIn, tokensOut int, latencyMs *int) error

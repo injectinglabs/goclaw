@@ -157,6 +157,16 @@ func TestOrchestrator_HappyPath_SingleWave(t *testing.T) {
 	if run.ErrorCount != 0 {
 		t.Errorf("errors: want 0, got %d", run.ErrorCount)
 	}
+	// The persisted run total must equal the SUM of its cell rows — the
+	// single source of truth so the chat bubble can never disagree with
+	// the per-cell grid. 6 cells × (100 in, 20 out) = 600 in, 120 out.
+	if run.TotalTokensIn != 600 || run.TotalTokensOut != 120 {
+		t.Errorf("run totals: want (600,120) = sum of cells, got (%d,%d)", run.TotalTokensIn, run.TotalTokensOut)
+	}
+	sumIn, sumOut, _ := st.SumRunCellTokens(context.Background(), runID)
+	if sumIn != run.TotalTokensIn || sumOut != run.TotalTokensOut {
+		t.Errorf("run total (%d,%d) drifted from cell sum (%d,%d)", run.TotalTokensIn, run.TotalTokensOut, sumIn, sumOut)
+	}
 }
 
 func TestOrchestrator_DAG_WavesInOrder(t *testing.T) {

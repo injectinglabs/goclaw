@@ -458,6 +458,14 @@ func (o *Orchestrator) executeRun(ctx context.Context, w *store.SheetWorkflow, r
 	if err := o.store.FinishRun(ctx, run.ID, final, nil); err != nil {
 		slog.Warn("finish run", "err", err)
 	}
+	// Persist the final authoritative total (SUM of cells) before the
+	// completed event so the run row, the run.completed payload, and a
+	// later runState rehydration all agree on the same figure.
+	finalIn, finalOut := o.authoritativeTokens(ctx, run.ID, progress)
+	if err := o.store.UpdateRunProgress(ctx, run.ID,
+		int(progress.completed.Load()), int(progress.errored.Load()), finalIn, finalOut); err != nil {
+		slog.Warn("finalize run tokens", "run", run.ID, "err", err)
+	}
 	o.emit(ctx, RunEvent{
 		Type:       "run.completed",
 		RunID:      run.ID,
@@ -468,8 +476,8 @@ func (o *Orchestrator) executeRun(ctx context.Context, w *store.SheetWorkflow, r
 		Completed:  int(progress.completed.Load()),
 		Errored:    int(progress.errored.Load()),
 		Total:      progress.totalCells(),
-		TokensIn:   int(progress.tokensIn.Load()),
-		TokensOut:  int(progress.tokensOut.Load()),
+		TokensIn:   finalIn,
+		TokensOut:  finalOut,
 	})
 }
 
@@ -568,11 +576,25 @@ func (o *Orchestrator) markCellStatus(ctx context.Context, t CellTask, status st
 	}
 }
 
+// authoritativeTokens returns the run's token totals as the SUM of its
+// persisted cell rows — the single source of truth so the chat bubble can
+// never disagree with the per-cell grid it renders. Falls back to the
+// in-memory progressTracker atomic only if the DB sum query fails (so a
+// transient DB hiccup degrades to the old behaviour rather than zeroing
+// the counter).
+func (o *Orchestrator) authoritativeTokens(ctx context.Context, runID uuid.UUID, prog *progressTracker) (int, int) {
+	in, out, err := o.store.SumRunCellTokens(ctx, runID)
+	if err != nil {
+		slog.Warn("sum cell tokens; falling back to in-memory counter", "run", runID, "err", err)
+		return int(prog.tokensIn.Load()), int(prog.tokensOut.Load())
+	}
+	return in, out
+}
+
 func (o *Orchestrator) flushProgress(ctx context.Context, run *store.SheetWorkflowRun, w *store.SheetWorkflow, userID string, prog *progressTracker) {
 	completed := int(prog.completed.Load())
 	errored := int(prog.errored.Load())
-	tokIn := int(prog.tokensIn.Load())
-	tokOut := int(prog.tokensOut.Load())
+	tokIn, tokOut := o.authoritativeTokens(ctx, run.ID, prog)
 	if err := o.store.UpdateRunProgress(ctx, run.ID, completed, errored, tokIn, tokOut); err != nil {
 		slog.Warn("flush progress", "run", run.ID, "err", err)
 	}
