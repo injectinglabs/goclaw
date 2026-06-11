@@ -94,6 +94,13 @@ type RunEvent struct {
 	Total     int    `json:"total,omitempty"`
 	Status    string `json:"status,omitempty"`
 	Message   string `json:"message,omitempty"`
+	// Cumulative token cost across every cell LLM call so far (including
+	// each cell's web_search round-trips). Carried on run.progress +
+	// run.completed so the SPA chip can show the TRUE total cost of the
+	// enrichment — the parent chat message can't, since cells run in a
+	// detached background context after that message already streamed.
+	TokensIn  int `json:"tokens_in,omitempty"`
+	TokensOut int `json:"tokens_out,omitempty"`
 
 	// run.started metadata. The SPA chip needs the spreadsheet id +
 	// tab to peek cell values via workflow.peekSheet. Historically it
@@ -461,6 +468,8 @@ func (o *Orchestrator) executeRun(ctx context.Context, w *store.SheetWorkflow, r
 		Completed:  int(progress.completed.Load()),
 		Errored:    int(progress.errored.Load()),
 		Total:      progress.totalCells(),
+		TokensIn:   int(progress.tokensIn.Load()),
+		TokensOut:  int(progress.tokensOut.Load()),
 	})
 }
 
@@ -576,6 +585,8 @@ func (o *Orchestrator) flushProgress(ctx context.Context, run *store.SheetWorkfl
 		Completed:  completed,
 		Errored:    errored,
 		Total:      prog.totalCells(),
+		TokensIn:   tokIn,
+		TokensOut:  tokOut,
 	})
 }
 

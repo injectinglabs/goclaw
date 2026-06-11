@@ -108,18 +108,22 @@ when uncertain.`
 
 // cellSystemPromptWithSearch extends the base prompt with web_search
 // usage rules when the executor is wired with a live-search hook. Kept
-// terse — one bullet block — to avoid bloating per-cell prompt tokens.
+// terse to avoid bloating per-cell prompt tokens.
 const cellSystemPromptWithSearch = cellSystemPrompt + `
 
-You may call the web_search tool ONCE per cell to fetch fresh data
-when the answer depends on recent events (latest CEO, last funding
-round, current price, etc.). One broad query, no retries, no
-refinement. After the search result returns, emit the final cell
-value as plain text — no further tool calls.
+You may call the web_search tool to fetch fresh data when the answer
+depends on recent events (latest CEO, last funding round, current
+price, etc.). If the FIRST search comes back with "(no results)" or
+nothing relevant, refine the query and search AGAIN — up to a few
+attempts — before giving up. Only return "" (empty) once searches are
+genuinely exhausted and your training has nothing either.
 
-Skip the search for facts your training already covers (country of HQ,
-founding year, well-known categorical attributes). When in doubt about
-recency, search.`
+Once you have enough to answer, emit the final cell value as plain
+text with no further tool calls.
+
+Skip the search entirely for facts your training already covers
+(country of HQ, founding year, well-known categorical attributes).
+When in doubt about recency, search.`
 
 // cellWebSearchToolDef is the function schema exposed to the cell LLM.
 // One required arg, "query", matching the canonical web_search tool's
@@ -206,30 +210,42 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 		return CellResult{}, errors.New("provider returned nil response")
 	}
 
+	// Token accounting: sum across EVERY LLM call this cell makes (the
+	// initial call + every post-search re-prompt). The orchestrator rolls
+	// these into the run's total via prog.cellDone, so the user-facing
+	// total reflects the real cost including all search round-trips.
 	totalIn := 0
 	totalOut := 0
-	if resp.Usage != nil {
-		totalIn += resp.Usage.PromptTokens
-		totalOut += resp.Usage.CompletionTokens
-	}
-
-	// Single tool-iteration loop. If web_search was offered AND the
-	// model issued a web_search tool call, execute it and re-prompt
-	// with the result so the model emits the final cell value. Capped
-	// at ONE iteration on purpose — keeps per-cell wall-clock bounded
-	// (a chatty model with N tool calls would freeze the whole wave).
-	if e.webSearch != nil && resp.FinishReason == "tool_calls" && len(resp.ToolCalls) > 0 {
-		// Find the first (and expected only) web_search call. Skip
-		// anything else the model hallucinated — we only offered
-		// web_search in req.Tools.
-		var call *providers.ToolCall
-		for i := range resp.ToolCalls {
-			if resp.ToolCalls[i].Name == "web_search" {
-				call = &resp.ToolCalls[i]
-				break
-			}
+	addUsage := func(r *providers.ChatResponse) {
+		if r != nil && r.Usage != nil {
+			totalIn += r.Usage.PromptTokens
+			totalOut += r.Usage.CompletionTokens
 		}
-		if call != nil {
+	}
+	addUsage(resp)
+
+	// Bounded web_search retry loop. While the model keeps issuing a
+	// web_search tool call and we haven't hit the cap, run the search and
+	// re-prompt. This lets the model search AGAIN when the first query
+	// returns "(no results)" — the prompt tells it to refine and retry.
+	// Capped so a chatty model can't freeze the wave. The final iteration
+	// drops Tools so the model is forced to emit a value.
+	if e.webSearch != nil {
+		const maxCellSearches = 3
+		for searches := 0; searches < maxCellSearches; searches++ {
+			if resp.FinishReason != "tool_calls" || len(resp.ToolCalls) == 0 {
+				break // model emitted a final value — done.
+			}
+			var call *providers.ToolCall
+			for i := range resp.ToolCalls {
+				if resp.ToolCalls[i].Name == "web_search" {
+					call = &resp.ToolCalls[i]
+					break
+				}
+			}
+			if call == nil {
+				break // no web_search call (model hallucinated another tool) — stop.
+			}
 			query, _ := call.Arguments["query"].(string)
 			var searchResult string
 			if query != "" {
@@ -250,20 +266,22 @@ func (e *LLMCellExecutor) ExecuteCell(ctx context.Context, t CellTask) (CellResu
 					Content:    searchResult,
 				},
 			)
-			// Drop Tools on the second call — we don't want another
-			// round-trip; the model must emit the final value now.
-			req.Tools = nil
-			resp2, err := prov.Chat(chatCtx, req)
-			if err != nil {
-				slog.Warn("cell executor: post-tool chat failed, falling back to first-pass content",
-					"err", err, "tenant", t.TenantID, "col", t.Column.ID)
-			} else if resp2 != nil {
-				resp = resp2
-				if resp.Usage != nil {
-					totalIn += resp.Usage.PromptTokens
-					totalOut += resp.Usage.CompletionTokens
-				}
+			// On the LAST allowed iteration drop Tools so the model must
+			// emit a final value instead of requesting yet another search.
+			if searches == maxCellSearches-1 {
+				req.Tools = nil
 			}
+			next, chatErr := prov.Chat(chatCtx, req)
+			if chatErr != nil {
+				slog.Warn("cell executor: post-search chat failed, using last good content",
+					"err", chatErr, "tenant", t.TenantID, "col", t.Column.ID, "search", searches+1)
+				break
+			}
+			if next == nil {
+				break
+			}
+			addUsage(next)
+			resp = next
 		}
 	}
 
