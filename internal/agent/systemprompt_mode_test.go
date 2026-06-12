@@ -116,6 +116,8 @@ func TestSafetyAllowsAuthorizedBugBountyResearch(t *testing.T) {
 	for _, want := range []string{
 		"Security research and bug-bounty assistance is allowed",
 		"Do not refuse merely because the target is real",
+		"do not give a blanket refusal",
+		"passive OSINT and local code/repository analysis",
 		"Refuse requests to attack out-of-scope systems",
 	} {
 		if !strings.Contains(fullPrompt, want) {
@@ -128,6 +130,7 @@ func TestSafetyAllowsAuthorizedBugBountyResearch(t *testing.T) {
 	taskPrompt := BuildSystemPrompt(taskCfg)
 	for _, want := range []string{
 		"Security research and bug-bounty help is allowed",
+		"connect to these bug bounties and scan them one by one",
 		"verify scope before live testing or scanning",
 	} {
 		if !strings.Contains(taskPrompt, want) {
