@@ -111,6 +111,31 @@ func TestTaskModeSafetySlim(t *testing.T) {
 	}
 }
 
+func TestSafetyAllowsAuthorizedBugBountyResearch(t *testing.T) {
+	fullPrompt := BuildSystemPrompt(fullTestConfig())
+	for _, want := range []string{
+		"Security research and bug-bounty assistance is allowed",
+		"Do not refuse merely because the target is real",
+		"Refuse requests to attack out-of-scope systems",
+	} {
+		if !strings.Contains(fullPrompt, want) {
+			t.Errorf("full safety prompt missing %q", want)
+		}
+	}
+
+	taskCfg := fullTestConfig()
+	taskCfg.Mode = PromptTask
+	taskPrompt := BuildSystemPrompt(taskCfg)
+	for _, want := range []string{
+		"Security research and bug-bounty help is allowed",
+		"verify scope before live testing or scanning",
+	} {
+		if !strings.Contains(taskPrompt, want) {
+			t.Errorf("task safety prompt missing %q", want)
+		}
+	}
+}
+
 func TestTaskModeMemorySlim(t *testing.T) {
 	cfg := fullTestConfig()
 	cfg.Mode = PromptTask
