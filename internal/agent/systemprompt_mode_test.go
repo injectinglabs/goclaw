@@ -137,6 +137,19 @@ func TestSafetyAllowsAuthorizedBugBountyResearch(t *testing.T) {
 			t.Errorf("task safety prompt missing %q", want)
 		}
 	}
+
+	noneCfg := fullTestConfig()
+	noneCfg.Mode = PromptNone
+	nonePrompt := BuildSystemPrompt(noneCfg)
+	for _, want := range []string{
+		"Security research and bug-bounty help is allowed",
+		"connect to these bug bounties and scan them one by one",
+		"passive OSINT or local repository analysis",
+	} {
+		if !strings.Contains(nonePrompt, want) {
+			t.Errorf("none safety prompt missing %q", want)
+		}
+	}
 }
 
 func TestLockedPreambleAllowsAuthorizedBugBountyResearch(t *testing.T) {
@@ -196,8 +209,8 @@ func TestNoneModeSections(t *testing.T) {
 			t.Errorf("none mode should not have: %s", dropped)
 		}
 	}
-	// Size check: should be under 3000 chars (~750 tokens)
-	if len(prompt) > 3000 {
+	// Size check: should stay compact (~800 tokens) even with safety guidance.
+	if len(prompt) > 3200 {
 		t.Errorf("none mode too large: %d chars", len(prompt))
 	}
 }
