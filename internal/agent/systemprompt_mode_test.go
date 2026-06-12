@@ -139,6 +139,23 @@ func TestSafetyAllowsAuthorizedBugBountyResearch(t *testing.T) {
 	}
 }
 
+func TestLockedPreambleAllowsAuthorizedBugBountyResearch(t *testing.T) {
+	cfg := fullTestConfig()
+	cfg.IsLocked = true
+	prompt := BuildSystemPrompt(cfg)
+	for _, want := range []string{
+		"# Security research and bug bounties",
+		"Do not blanket-refuse just because the target is real",
+		"connect to these bug bounties and scan them one by",
+		"passive OSINT and local code/repository analysis",
+		"correct course and apply this scoped workflow",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("locked preamble missing %q", want)
+		}
+	}
+}
+
 func TestTaskModeMemorySlim(t *testing.T) {
 	cfg := fullTestConfig()
 	cfg.Mode = PromptTask
