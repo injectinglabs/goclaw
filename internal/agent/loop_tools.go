@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 
@@ -135,7 +136,10 @@ func (l *Loop) processToolResult(
 	if level, msg := rs.loopDetector.detect(registryName, argsHash); level != "" {
 		if level == "critical" {
 			slog.Warn("tool loop critical", "agent", l.id, "tool", registryName, "message", msg)
-			rs.finalContent = "I was unable to complete this task — I got stuck repeatedly calling " + registryName + " without making progress. Please try rephrasing your request."
+			rs.finalContent = "I was unable to complete this task — I kept repeating the same step" +
+				stuckToolDetail(registryName, tc.Arguments) +
+				" without making progress. This often means a form field won't accept the value, or a required field is empty. " +
+				"Tell me the missing detail (or what you'd like me to do differently) and I'll continue."
 			rs.loopKilled = true
 			return toolMsg, nil, toolResultBreak
 		}
@@ -153,7 +157,10 @@ func (l *Loop) processToolResult(
 				// Don't surface the raw "CRITICAL ... runaway loop" debug string to
 				// the user (the same-args path above uses a friendly message too).
 				// Any artifact already produced is still attached via deliverables.
-				rs.finalContent = "I've stopped because I was repeating the same step without getting a new result. If something's missing or you'd like me to adjust it, let me know."
+				rs.finalContent = "I've stopped because the same step kept producing the same result without moving forward" +
+					stuckToolDetail(registryName, tc.Arguments) +
+					". This usually means a required field is missing or the page rejected the input. " +
+					"If you can give me the missing detail (or tell me what to do differently), I'll continue."
 				rs.loopKilled = true
 				return toolMsg, nil, toolResultBreak
 			}
@@ -163,6 +170,24 @@ func (l *Loop) processToolResult(
 	}
 
 	return toolMsg, warningMsgs, action
+}
+
+// stuckToolDetail renders a short, user-facing description of what a tool was
+// repeatedly doing, appended to loop-stop messages so the user can see what got
+// stuck (and supply a missing value) instead of a generic "I repeated a step".
+// Returns "" when there's nothing specific worth surfacing.
+func stuckToolDetail(toolName string, args map[string]any) string {
+	if toolName == "execute_action" {
+		action, _ := args["action"].(string)
+		selector, _ := args["selector"].(string)
+		switch {
+		case action != "" && selector != "":
+			return fmt.Sprintf(" (repeatedly trying to %s `%s`)", action, selector)
+		case selector != "":
+			return fmt.Sprintf(" (repeatedly acting on `%s`)", selector)
+		}
+	}
+	return ""
 }
 
 // checkReadOnlyStreak detects when the agent is stuck in a read-only loop.

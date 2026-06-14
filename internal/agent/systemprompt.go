@@ -709,6 +709,9 @@ func buildBrowserPageSection() []string {
 		"",
 		"Selector tips for execute_action: prefer `#id`, `[name=\"…\"]`, `[data-testid=\"…\"]`, `[aria-label=\"…\"]` over index-based selectors. Never invent a selector that was not in the snapshot — if you can't find the element, say so.",
 		"",
+		"When a submit / 'Save and Continue' / 'Next' does not advance the page: do NOT click it again and again. The execute_action result reports the current URL and any invalid/required fields after a click — read it. If the URL is unchanged and fields are flagged invalid, the form rejected the submit. Fill the missing required field, fix the flagged value, then submit once more.",
+		"If a required field's value is not something you have (e.g. a street address not in the user's CV, a code you weren't given), STOP and ask the user for it — do not invent a value and do not keep retrying the same submit. Repeating an identical action that yields an identical result is never progress; change the input, change the approach, or ask the user.",
+		"",
 	}
 }
 

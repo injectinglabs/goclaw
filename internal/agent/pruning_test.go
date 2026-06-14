@@ -570,3 +570,71 @@ func testTruncate(s string, n int) string {
 	}
 	return s[:n] + "..."
 }
+
+// ─── supersedeStaleSnapshots ──────────────────────────────────────────────
+
+// helper: assistant message that calls a tool with the given id+name.
+func asstToolCall(id, name string) providers.Message {
+	return providers.Message{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: id, Name: name}}}
+}
+
+func TestSupersedeStaleSnapshots_CollapsesAllButLatest(t *testing.T) {
+	msgs := []providers.Message{
+		{Role: "user", Content: "fill the form"},
+		asstToolCall("c1", "refresh_page_content"),
+		{Role: "tool", ToolCallID: "c1", Content: "SNAPSHOT-1 (big page dump)"},
+		asstToolCall("c2", "execute_action"),
+		{Role: "tool", ToolCallID: "c2", Content: "Clicked #next"},
+		asstToolCall("c3", "refresh_page_content"),
+		{Role: "tool", ToolCallID: "c3", Content: "SNAPSHOT-2 (big page dump)"},
+		asstToolCall("c4", "refresh_page_content"),
+		{Role: "tool", ToolCallID: "c4", Content: "SNAPSHOT-3 (latest)"},
+	}
+
+	out, n := supersedeStaleSnapshots(msgs)
+	if n != 2 {
+		t.Fatalf("collapsed = %d, want 2", n)
+	}
+	if out[2].Content != supersededSnapshotPlaceholder {
+		t.Errorf("snapshot-1 not superseded: %q", out[2].Content)
+	}
+	if out[6].Content != supersededSnapshotPlaceholder {
+		t.Errorf("snapshot-2 not superseded: %q", out[6].Content)
+	}
+	if out[8].Content != "SNAPSHOT-3 (latest)" {
+		t.Errorf("latest snapshot must stay full, got %q", out[8].Content)
+	}
+	// Non-snapshot tool result must be untouched.
+	if out[4].Content != "Clicked #next" {
+		t.Errorf("execute_action result mutated: %q", out[4].Content)
+	}
+}
+
+func TestSupersedeStaleSnapshots_SingleSnapshotUnchanged(t *testing.T) {
+	msgs := []providers.Message{
+		{Role: "user", Content: "x"},
+		asstToolCall("c1", "refresh_page_content"),
+		{Role: "tool", ToolCallID: "c1", Content: "ONLY SNAPSHOT"},
+	}
+	out, n := supersedeStaleSnapshots(msgs)
+	if n != 0 {
+		t.Fatalf("collapsed = %d, want 0 (lone snapshot must stay)", n)
+	}
+	if &out[0] != &msgs[0] {
+		// supersedeStaleSnapshots returns the original slice unchanged on no-op.
+		t.Error("expected original slice returned on no-op")
+	}
+}
+
+func TestSupersedeStaleSnapshots_IgnoresNonSnapshotTools(t *testing.T) {
+	msgs := []providers.Message{
+		asstToolCall("c1", "execute_action"),
+		{Role: "tool", ToolCallID: "c1", Content: "Clicked #a"},
+		asstToolCall("c2", "execute_action"),
+		{Role: "tool", ToolCallID: "c2", Content: "Clicked #b"},
+	}
+	_, n := supersedeStaleSnapshots(msgs)
+	if n != 0 {
+		t.Fatalf("collapsed = %d, want 0 (no snapshots present)", n)
+	}
+}

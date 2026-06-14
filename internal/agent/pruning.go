@@ -359,6 +359,54 @@ func pruneContextMessages(msgs []providers.Message, contextWindowTokens int, cfg
 	return output
 }
 
+// snapshotToolNames are client tools whose result is a full-page snapshot.
+// Only the most recent snapshot reflects current page state; older ones are
+// pure redundancy (the page has since changed or been re-read), so they are
+// collapsed to a stub to stop them re-inflating the context every iteration.
+var snapshotToolNames = map[string]bool{
+	"refresh_page_content": true,
+}
+
+// supersededSnapshotPlaceholder replaces the body of a stale page snapshot.
+const supersededSnapshotPlaceholder = "[Stale page snapshot superseded by a newer page read below.]"
+
+// supersedeStaleSnapshots collapses every page-snapshot tool result except the
+// most recent one to a short stub. A superseded DOM snapshot carries no
+// information the newer snapshot lacks, so this is always-on and independent of
+// the opt-in context-pruning config — it runs every iteration to keep browser
+// automation runs from accumulating tens of large, obsolete snapshots.
+//
+// Returns a new slice (and the number collapsed) when it changed anything,
+// otherwise the original slice and 0.
+func supersedeStaleSnapshots(msgs []providers.Message) ([]providers.Message, int) {
+	names := buildToolCallNameMap(msgs)
+
+	var snapIdx []int
+	for i, m := range msgs {
+		if m.Role != "tool" || m.Content == "" || m.Content == supersededSnapshotPlaceholder {
+			continue
+		}
+		if snapshotToolNames[names[m.ToolCallID]] {
+			snapIdx = append(snapIdx, i)
+		}
+	}
+	if len(snapIdx) <= 1 {
+		return msgs, 0 // nothing to supersede — keep the lone (latest) snapshot
+	}
+
+	out := make([]providers.Message, len(msgs))
+	copy(out, msgs)
+	// Keep the last snapshot full; stub all earlier ones.
+	for _, idx := range snapIdx[:len(snapIdx)-1] {
+		out[idx] = providers.Message{
+			Role:       out[idx].Role,
+			Content:    supersededSnapshotPlaceholder,
+			ToolCallID: out[idx].ToolCallID,
+		}
+	}
+	return out, len(snapIdx) - 1
+}
+
 // findAssistantCutoff returns the index of the Nth-from-last assistant message.
 // Messages at or after this index are protected from pruning.
 // Returns -1 if not enough assistant messages exist.

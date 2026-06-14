@@ -54,6 +54,7 @@ func (l *Loop) pipelineCallbacks(req *RunRequest, bridgeRS *runState) pipelineCa
 		buildFilteredTools: l.makeBuildFilteredTools(req),
 		callLLM:            l.makeCallLLM(req, emitRun),
 		pruneMessages:      l.makePruneMessages(),
+		collapseSnapshots:  supersedeStaleSnapshots,
 		sanitizeHistory:    sanitizeHistory,
 		compactMessages:    l.makeCompactMessages(req),
 		runMemoryFlush:     l.makeRunMemoryFlush(),
@@ -82,6 +83,7 @@ type pipelineCallbackSet struct {
 	buildFilteredTools func(state *pipeline.RunState) ([]providers.ToolDefinition, error)
 	callLLM            func(ctx context.Context, state *pipeline.RunState, req providers.ChatRequest) (*providers.ChatResponse, error)
 	pruneMessages      func(msgs []providers.Message, budget int) ([]providers.Message, pipeline.PruneStats)
+	collapseSnapshots  func(msgs []providers.Message) ([]providers.Message, int)
 	sanitizeHistory    func(msgs []providers.Message) ([]providers.Message, int)
 	compactMessages    func(ctx context.Context, msgs []providers.Message, model string) ([]providers.Message, error)
 	runMemoryFlush     func(ctx context.Context, state *pipeline.RunState) error

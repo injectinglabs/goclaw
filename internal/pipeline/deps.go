@@ -70,6 +70,11 @@ type PipelineDeps struct {
 	PruneMessages   func(msgs []providers.Message, budget int) ([]providers.Message, PruneStats)
 	SanitizeHistory func(msgs []providers.Message) ([]providers.Message, int)
 	CompactMessages func(ctx context.Context, msgs []providers.Message, model string) ([]providers.Message, error)
+	// CollapseSnapshots runs unconditionally every iteration (independent of the
+	// opt-in pruning config): it stubs all but the latest full-page snapshot so
+	// browser-automation runs don't re-send dozens of obsolete DOM snapshots.
+	// Returns the (possibly new) slice and the count collapsed. Optional (nil = skip).
+	CollapseSnapshots func(msgs []providers.Message) ([]providers.Message, int)
 
 	// Cache-TTL gate callbacks (Phase 06). All optional (nil = feature disabled).
 	GetProviderCaps  func() providers.ProviderCapabilities  // provider capabilities for cache detection

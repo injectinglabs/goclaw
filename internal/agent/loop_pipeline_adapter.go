@@ -113,9 +113,10 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 		},
 
 		// Prune callbacks
-		PruneMessages:   cb.pruneMessages,
-		SanitizeHistory: cb.sanitizeHistory,
-		CompactMessages: cb.compactMessages,
+		PruneMessages:     cb.pruneMessages,
+		CollapseSnapshots: cb.collapseSnapshots,
+		SanitizeHistory:   cb.sanitizeHistory,
+		CompactMessages:   cb.compactMessages,
 
 		// Cache-TTL gate callbacks (Phase 06)
 		GetProviderCaps: func() providers.ProviderCapabilities {
