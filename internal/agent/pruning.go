@@ -365,6 +365,10 @@ func pruneContextMessages(msgs []providers.Message, contextWindowTokens int, cfg
 // collapsed to a stub to stop them re-inflating the context every iteration.
 var snapshotToolNames = map[string]bool{
 	"refresh_page_content": true,
+	// execute_actions returns a fresh page snapshot appended to its result; once
+	// a newer snapshot exists the older batch result (old page state + stale
+	// action log) is obsolete, so it's collapsed alongside refresh_page_content.
+	"execute_actions": true,
 }
 
 // supersededSnapshotPlaceholder replaces the body of a stale page snapshot.

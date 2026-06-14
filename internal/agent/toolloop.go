@@ -49,6 +49,7 @@ var mutatingTools = map[string]bool{
 	"tts": true, "cron": true, "publish_skill": true,
 	"sessions_send": true,
 	"execute_action":   true, // browser-page mutation (fill/click/select/hover/keyboard)
+	"execute_actions":  true, // batched browser-page mutations
 	"scroll_into_view": true, // browser-page viewport change
 }
 

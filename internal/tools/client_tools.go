@@ -86,6 +86,53 @@ func NewExecuteActionTool() Tool {
 	}
 }
 
+// NewExecuteActionsTool returns the execute_actions batch client tool.
+// The extension runs a list of fill/click/select/etc. steps back-to-back in a
+// single round-trip, folds the network-idle wait, and (by default) returns a
+// fresh page snapshot. This collapses a whole form-fill into ONE turn instead
+// of refresh → fill → fill → … → click → wait → refresh.
+func NewExecuteActionsTool() Tool {
+	return &clientTool{
+		name: "execute_actions",
+		desc: "PREFERRED for multi-step page interaction (filling a form, a multi-field login, " +
+			"a wizard step). Runs a LIST of actions on the current page back-to-back in a single " +
+			"call — far faster than one execute_action per turn — then returns a fresh page snapshot " +
+			"so you can verify the result without a separate refresh_page_content. Each action is " +
+			"{selector, action, value} with the same actions as execute_action " +
+			"(fill/click/double_click/clear/select/press_enter/hover/keyboard/get_value). " +
+			"Call refresh_page_content first to discover selectors, then batch every step you can " +
+			"(all the field fills AND the final submit click) into one execute_actions call. " +
+			"By default it stops at the first failing step and reports which one failed.",
+		params: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"actions": map[string]any{
+					"type":        "array",
+					"description": "Ordered list of steps to perform. Run sequentially.",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"selector": map[string]any{"type": "string", "description": "CSS selector (supports ' >> ' for shadow/iframe)."},
+							"action":   map[string]any{"type": "string", "enum": []string{"fill", "click", "double_click", "clear", "select", "press_enter", "hover", "keyboard", "get_value"}},
+							"value":    map[string]any{"type": "string", "description": "Value for fill/select/keyboard. Omit for click/hover/press_enter/get_value."},
+						},
+						"required": []string{"selector", "action"},
+					},
+				},
+				"stop_on_error": map[string]any{
+					"type":        "boolean",
+					"description": "Stop at the first failing step (default true). Set false to attempt every step and report failures inline.",
+				},
+				"snapshot": map[string]any{
+					"type":        "boolean",
+					"description": "Return a fresh page snapshot after the batch (default true). Set false if you'll navigate away or don't need to read the result.",
+				},
+			},
+			"required": []string{"actions"},
+		},
+	}
+}
+
 // NewExecuteJSTool returns the execute_js escape-hatch client tool.
 // The extension runs arbitrary JavaScript in the page's MAIN world (full
 // access to page globals, React/Vue state, etc.) and returns a JSON-
@@ -300,6 +347,11 @@ func RegisterClientTools(r *Registry) {
 		IsClient:     true,
 	})
 	r.RegisterWithMetadata(NewExecuteActionTool(), ToolMetadata{
+		Group:        "browser",
+		Capabilities: []ToolCapability{CapMutating},
+		IsClient:     true,
+	})
+	r.RegisterWithMetadata(NewExecuteActionsTool(), ToolMetadata{
 		Group:        "browser",
 		Capabilities: []ToolCapability{CapMutating},
 		IsClient:     true,
