@@ -41,11 +41,29 @@ func (l *Loop) runViaPipeline(ctx context.Context, req RunRequest) (*RunResult, 
 }
 
 // buildPipelineDeps maps Loop fields + methods to PipelineDeps callbacks.
-func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.PipelineDeps {
+// browserMaxIterations is the think→act turn ceiling for browser-automation
+// (extension) runs. Multi-page forms / wizards legitimately need far more turns
+// than a chat reply; the loop detector + low per-turn thinking keep the extra
+// turns cheap and runaway-safe, so a full job application can finish in one run
+// instead of stopping at the default 30-turn cap.
+const browserMaxIterations = 100
+
+// effectiveMaxIterations resolves the per-run turn ceiling. Extension runs get a
+// raised floor so a full application doesn't stop mid-form. A per-request value
+// may only LOWER the result (never raise it).
+func (l *Loop) effectiveMaxIterations(req *RunRequest) int {
 	maxIter := l.maxIterations
-	if req.MaxIterations > 0 && req.MaxIterations < maxIter {
+	if req != nil && req.ClientKind == "extension" && maxIter < browserMaxIterations {
+		maxIter = browserMaxIterations
+	}
+	if req != nil && req.MaxIterations > 0 && req.MaxIterations < maxIter {
 		maxIter = req.MaxIterations
 	}
+	return maxIter
+}
+
+func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.PipelineDeps {
+	maxIter := l.effectiveMaxIterations(req)
 
 	cb := l.pipelineCallbacks(req, bridgeRS)
 

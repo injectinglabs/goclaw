@@ -46,3 +46,25 @@ func TestBrowserTurnEffort(t *testing.T) {
 		t.Errorf("low config should pass through, got %q", got)
 	}
 }
+
+func TestEffectiveMaxIterations(t *testing.T) {
+	l := &Loop{maxIterations: 30}
+	ext := &RunRequest{ClientKind: "extension"}
+	web := &RunRequest{ClientKind: "website"}
+
+	if got := l.effectiveMaxIterations(web); got != 30 {
+		t.Errorf("website run keeps agent default 30, got %d", got)
+	}
+	if got := l.effectiveMaxIterations(ext); got != browserMaxIterations {
+		t.Errorf("extension run raised to %d, got %d", browserMaxIterations, got)
+	}
+	// per-request value may only LOWER.
+	if got := l.effectiveMaxIterations(&RunRequest{ClientKind: "extension", MaxIterations: 50}); got != 50 {
+		t.Errorf("req override should lower to 50, got %d", got)
+	}
+	// agent already above the browser floor stays as-is.
+	l2 := &Loop{maxIterations: 200}
+	if got := l2.effectiveMaxIterations(ext); got != 200 {
+		t.Errorf("agent default 200 should be kept, got %d", got)
+	}
+}

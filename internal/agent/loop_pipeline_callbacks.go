@@ -231,10 +231,7 @@ func (l *Loop) makeBuildFilteredTools(req *RunRequest) func(state *pipeline.RunS
 		// connected per-request here with the actual user's credentials.
 		l.getUserMCPTools(state.Ctx, state.Input.UserID)
 
-		maxIter := l.maxIterations
-		if req.MaxIterations > 0 && req.MaxIterations < maxIter {
-			maxIter = req.MaxIterations
-		}
+		maxIter := l.effectiveMaxIterations(req)
 		allMsgs := state.Messages.All()
 		toolDefs, _, returnedMsgs := l.buildFilteredTools(req, state.Context.HadBootstrap,
 			state.Iteration, maxIter, allMsgs)
