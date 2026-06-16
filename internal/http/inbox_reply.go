@@ -48,16 +48,18 @@ func (h *InboxHandler) handleDraftReply(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	draft := h.draftReply(r.Context(), email, req.Instruction)
+	draft, status := h.draftReply(r.Context(), email, req.Instruction)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"from":      email.From,
 		"recipient": email.Recipient,
 		"subject":   email.Subject,
 		"body":      email.Body,
+		"bodyLen":   len(email.Body), // 0 → email body didn't parse from Composio
 		"threadId":  email.ThreadID,
 		"id":        email.ID,
 		"draft":     draft,
+		"status":    status, // "ok" | "no_provider" | "llm_error" — why draft may be empty
 	})
 }
 
@@ -141,13 +143,16 @@ func (e *inboxError) Error() string { return e.msg }
 
 // draftReply asks the tenant's background LLM to write a reply body. Returns ""
 // when no provider is wired (the UI then starts from an empty editor).
-func (h *InboxHandler) draftReply(ctx context.Context, email emailContent, instruction string) string {
+func (h *InboxHandler) draftReply(ctx context.Context, email emailContent, instruction string) (string, string) {
 	if h.registry == nil {
-		return ""
+		slog.Info("inbox.draft_no_registry")
+		return "", "no_provider"
 	}
-	provider, model := providerresolve.ResolveBackgroundProvider(ctx, store.TenantIDFromContext(ctx), h.registry, h.sysConfigs)
+	tenantID := store.TenantIDFromContext(ctx)
+	provider, model := providerresolve.ResolveBackgroundProvider(ctx, tenantID, h.registry, h.sysConfigs)
 	if provider == nil {
-		return ""
+		slog.Info("inbox.draft_no_provider", "tenant", tenantID.String())
+		return "", "no_provider"
 	}
 	sys := "You draft email replies on the user's behalf. Output ONLY the reply body — " +
 		"no subject line, no 'Subject:', no quoted original, no placeholder signature. " +
@@ -169,10 +174,10 @@ func (h *InboxHandler) draftReply(ctx context.Context, email emailContent, instr
 		},
 	})
 	if err != nil {
-		slog.Info("inbox.draft_failed", "err", err.Error())
-		return ""
+		slog.Info("inbox.draft_failed", "err", err.Error(), "model", model)
+		return "", "llm_error"
 	}
-	return strings.TrimSpace(resp.Content)
+	return strings.TrimSpace(resp.Content), "ok"
 }
 
 // parseGmailEmail pulls body/from/subject from a GMAIL_FETCH_MESSAGE_BY_THREAD_ID
