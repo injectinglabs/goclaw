@@ -32,6 +32,51 @@ func NewInboxHandler(composioURL string) *InboxHandler {
 // RegisterRoutes registers the inbox routes on the given mux.
 func (h *InboxHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/inbox/unread", requireAuth("", h.handleUnread))
+	mux.HandleFunc("POST /v1/inbox/mark-read", requireAuth("", h.handleMarkRead))
+}
+
+// handleMarkRead marks one message read in the user's mailbox.
+// Body: {"provider":"gmail"|"outlook","id":"<message id>"}.
+func (h *InboxHandler) handleMarkRead(w http.ResponseWriter, r *http.Request) {
+	userID := store.UserIDFromContext(r.Context())
+	if userID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "no user"})
+		return
+	}
+	var body struct {
+		Provider string `json:"provider"`
+		ID       string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider and id required"})
+		return
+	}
+
+	var tool string
+	var args map[string]any
+	switch body.Provider {
+	case "gmail":
+		// Removing the UNREAD label marks the message read.
+		tool, args = "GMAIL_ADD_LABEL_TO_EMAIL", map[string]any{
+			"message_id":       body.ID,
+			"remove_label_ids": []string{"UNREAD"},
+		}
+	case "outlook":
+		tool, args = "OUTLOOK_UPDATE_MESSAGE", map[string]any{
+			"message_id": body.ID,
+			"is_read":    true,
+		}
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown provider"})
+		return
+	}
+
+	if _, err := h.callComposio(r.Context(), userID, tool, args); err != nil {
+		slog.Info("inbox.mark_read_failed", "user", userID, "provider", body.Provider, "err", err.Error())
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "mark-read failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleUnread returns {"gmail": N, "total": N} for the authenticated user.
@@ -62,6 +107,8 @@ func (h *InboxHandler) handleUnread(w http.ResponseWriter, r *http.Request) {
 // unreadMessage is a compact description of one unread email for the UI list.
 type unreadMessage struct {
 	Provider string `json:"provider"`
+	ID       string `json:"id"`                  // message id — used to mark-read / reply
+	ThreadID string `json:"threadId,omitempty"`  // gmail thread id — used to reply
 	From     string `json:"from"`
 	Subject  string `json:"subject"`
 	Date     string `json:"date,omitempty"`
@@ -126,6 +173,7 @@ func extractOutlookMessages(text string) []unreadMessage {
 		}
 		out = append(out, unreadMessage{
 			Provider: "outlook",
+			ID:       strField(msg, "id", "messageId", "message_id"),
 			From:     outlookFrom(msg),
 			Subject:  strField(msg, "subject", "Subject"),
 			Date:     strField(msg, "receivedDateTime", "received_date_time", "sentDateTime"),
@@ -162,6 +210,8 @@ func extractGmailMessages(text string) []unreadMessage {
 		}
 		out = append(out, unreadMessage{
 			Provider: "gmail",
+			ID:       strField(msg, "messageId", "id", "message_id"),
+			ThreadID: strField(msg, "threadId", "thread_id"),
 			From:     from,
 			Subject:  subject,
 			Date:     strField(msg, "messageTimestamp", "date", "internalDate"),
