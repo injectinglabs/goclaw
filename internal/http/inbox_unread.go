@@ -77,18 +77,73 @@ func (h *InboxHandler) gmailUnread(ctx context.Context, userID string) int {
 // OUTLOOK_LIST_MESSAGES (Microsoft Graph: filter isRead eq false). Returns 0 on
 // any error. Same best-effort contract as gmailUnread.
 func (h *InboxHandler) outlookUnread(ctx context.Context, userID string) int {
+	// Don't rely on a server-side OData filter param (Composio's arg name for it
+	// is unreliable — passing it returned all messages). Fetch recent inbox
+	// messages and count unread client-side via each message's isRead field,
+	// which Microsoft Graph always returns. Capped at the page size (a large
+	// unread count just shows "99+" anyway).
 	text, err := h.callComposio(ctx, userID, "OUTLOOK_LIST_MESSAGES", map[string]any{
 		"folder": "inbox",
-		"filter": "isRead eq false",
-		"top":    25,
+		"top":    50,
 	})
 	if err != nil {
 		slog.Info("inbox.outlook_unread_failed", "user", userID, "err", err.Error())
 		return 0
 	}
-	n, ok := extractCount(text)
-	slog.Info("inbox.outlook_unread", "user", userID, "count", n, "parsed", ok, "shape", jsonShape(text))
+	n, ok := countUnreadOutlook(text)
+	slog.Info("inbox.outlook_unread", "user", userID, "count", n, "by_isread", ok, "shape", jsonShape(text))
 	return n
+}
+
+// countUnreadOutlook counts messages with isRead==false in an
+// OUTLOOK_LIST_MESSAGES result. Returns (count, sawIsRead); sawIsRead is false
+// when no item exposed an isRead field (so the caller can tell "0 unread" apart
+// from "couldn't parse" and avoid a bogus page-size count).
+func countUnreadOutlook(text string) (int, bool) {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(text), &m); err != nil {
+		return 0, false
+	}
+	arr := outlookMessageArray(m)
+	count, sawIsRead := 0, false
+	for _, it := range arr {
+		msg, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		// Microsoft Graph uses "isRead"; tolerate a snake_case passthrough too.
+		for _, key := range []string{"isRead", "is_read"} {
+			if v, ok := msg[key].(bool); ok {
+				sawIsRead = true
+				if !v {
+					count++
+				}
+				break
+			}
+		}
+	}
+	return count, sawIsRead
+}
+
+// outlookMessageArray finds the messages array in the envelope (top level or a
+// known wrapper).
+func outlookMessageArray(m map[string]any) []any {
+	keys := []string{"value", "messages", "items"}
+	for _, k := range keys {
+		if a, ok := m[k].([]any); ok {
+			return a
+		}
+	}
+	for _, w := range []string{"data", "response_data", "result"} {
+		if inner, ok := m[w].(map[string]any); ok {
+			for _, k := range keys {
+				if a, ok := inner[k].([]any); ok {
+					return a
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // callComposio invokes a composio-mcp tool for the given user and returns the
