@@ -150,10 +150,18 @@ func NewExecuteJSTool() Tool {
 			"etc. fall back to String). Use this as an ESCAPE HATCH when execute_action " +
 			"cannot reach the element — custom comboboxes (not native <select>), shadow DOM, " +
 			"reading computed styles, triggering multi-step widget interactions. For simple " +
-			"fill/click/select/press_enter prefer execute_action — it's more reliable.",
+			"fill/click/select/press_enter prefer execute_action — it's more reliable. " +
+			"By default this AUTO-WAITS for network idle and returns a fresh page snapshot " +
+			"after your code runs — so you do NOT need a separate wait_for_network or " +
+			"refresh_page_content afterward. Batch as much logic into one call as you can. " +
+			"Set snapshot:false for a pure read where you only need the return value.",
 		params: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
+				"snapshot": map[string]any{
+					"type":        "boolean",
+					"description": "Return a fresh page snapshot after the JS runs (default true). Set false for a pure read where only the return value matters.",
+				},
 				"code": map[string]any{
 					"type": "string",
 					"description": "JavaScript body to execute. Use `return X` to return a value. " +

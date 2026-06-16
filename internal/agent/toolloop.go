@@ -190,7 +190,11 @@ func (s *toolLoopState) recordMutation(toolName string, args map[string]any) {
 	// same-args/same-result streak detector which otherwise mislabels a second
 	// verification snapshot as "no progress".
 	// Neither reset nor increment the read-only streak.
-	if toolName == "exec" || toolName == "bash" || toolName == "refresh_page_content" || strings.HasPrefix(toolName, "mcp_") {
+	// execute_js: ambiguous like exec — on complex SPAs it's used to click/fill
+	// custom widgets (a page mutation), not just to read. Counting it as a
+	// read-only call wrongly trips the read-only streak and nags the model to
+	// write_file mid-task. Treat it as neutral (neither reset nor increment).
+	if toolName == "exec" || toolName == "bash" || toolName == "execute_js" || toolName == "refresh_page_content" || strings.HasPrefix(toolName, "mcp_") {
 		return
 	}
 	s.incrementReadOnly(toolName, args)

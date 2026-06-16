@@ -638,3 +638,52 @@ func TestSupersedeStaleSnapshots_IgnoresNonSnapshotTools(t *testing.T) {
 		t.Fatalf("collapsed = %d, want 0 (no snapshots present)", n)
 	}
 }
+
+func TestSupersedeStaleSnapshots_PreservesJSReturnValue(t *testing.T) {
+	msgs := []providers.Message{
+		asstToolCall("c1", "execute_js"),
+		{Role: "tool", ToolCallID: "c1", Content: "clicked combobox\n\n--- page after JS ---\nURL: x\nbig snapshot 1"},
+		asstToolCall("c2", "execute_js"),
+		{Role: "tool", ToolCallID: "c2", Content: "filled field\n\n--- page after JS ---\nURL: y\nbig snapshot 2 (latest)"},
+	}
+	out, n := supersedeStaleSnapshots(msgs)
+	if n != 1 {
+		t.Fatalf("collapsed = %d, want 1", n)
+	}
+	// Old execute_js: return value kept, snapshot stripped.
+	if !strings.Contains(out[1].Content, "clicked combobox") {
+		t.Errorf("JS return value lost: %q", out[1].Content)
+	}
+	if strings.Contains(out[1].Content, "big snapshot 1") {
+		t.Errorf("stale snapshot not stripped: %q", out[1].Content)
+	}
+	// Latest stays whole.
+	if !strings.Contains(out[3].Content, "big snapshot 2 (latest)") {
+		t.Errorf("latest snapshot mutated: %q", out[3].Content)
+	}
+}
+
+func TestSupersedeStaleSnapshots_PureReadJSNeverSuperseded(t *testing.T) {
+	// execute_js with snapshot:false (no marker) is a pure read — must be kept.
+	msgs := []providers.Message{
+		asstToolCall("c1", "execute_js"),
+		{Role: "tool", ToolCallID: "c1", Content: "user-token-ABC123"}, // pure read, no marker
+		asstToolCall("c2", "refresh_page_content"),
+		{Role: "tool", ToolCallID: "c2", Content: "URL: a\nsnapshot A"},
+		asstToolCall("c3", "refresh_page_content"),
+		{Role: "tool", ToolCallID: "c3", Content: "URL: b\nsnapshot B (latest)"},
+	}
+	out, n := supersedeStaleSnapshots(msgs)
+	if n != 1 { // only the older refresh collapses
+		t.Fatalf("collapsed = %d, want 1", n)
+	}
+	if out[1].Content != "user-token-ABC123" {
+		t.Errorf("pure-read JS value was mutated: %q", out[1].Content)
+	}
+	if out[3].Content != supersededSnapshotPlaceholder {
+		t.Errorf("older refresh should be superseded: %q", out[3].Content)
+	}
+	if !strings.Contains(out[5].Content, "snapshot B (latest)") {
+		t.Errorf("latest refresh must be kept: %q", out[5].Content)
+	}
+}

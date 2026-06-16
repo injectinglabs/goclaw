@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -338,9 +339,7 @@ var sandboxRelaxedDenyGroups = []string{
 // sandbox-routed; the host exec path keeps every group enabled.
 func relaxSandboxDenyGroups(overrides map[string]bool) map[string]bool {
 	relaxed := make(map[string]bool, len(overrides)+len(sandboxRelaxedDenyGroups))
-	for k, v := range overrides {
-		relaxed[k] = v
-	}
+	maps.Copy(relaxed, overrides)
 	for _, g := range sandboxRelaxedDenyGroups {
 		relaxed[g] = false
 	}
