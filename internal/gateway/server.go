@@ -557,6 +557,11 @@ func (s *Server) SetActivityHandler(h *httpapi.ActivityHandler) {
 	s.handlers = append(s.handlers, h)
 }
 
+// SetInboxHandler sets the inbox unread-count handler (extension badge polling).
+func (s *Server) SetInboxHandler(h *httpapi.InboxHandler) {
+	s.handlers = append(s.handlers, h)
+}
+
 // SetSystemConfigsHandler sets the system configs handler.
 func (s *Server) SetSystemConfigsHandler(h *httpapi.SystemConfigsHandler) {
 	s.handlers = append(s.handlers, h)

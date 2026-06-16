@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -43,8 +44,8 @@ type installOneSkillParams struct {
 // install we serialise `response` verbatim. For a bundle we accumulate
 // the responses and wrap them in an envelope.
 type installOneSkillResult struct {
-	response map[string]any
-	slug     string
+	response  map[string]any
+	slug      string
 	unchanged bool // true when content-hash matched — no DB write happened
 }
 
@@ -221,9 +222,7 @@ func (h *SkillsHandler) installOneSkillFromDir(p installOneSkillParams) (install
 			)
 			skillRow.Status = depState.status
 			skillRow.MissingDeps = depState.missing
-			for k, v := range depState.response {
-				response[k] = v
-			}
+			maps.Copy(response, depState.response)
 		}
 	}
 
