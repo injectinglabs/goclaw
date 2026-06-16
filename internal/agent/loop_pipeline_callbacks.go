@@ -288,7 +288,10 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 			l.reasoningConfig.Source,
 		)
 		if effort := reasoningDecision.RequestEffort(); effort != "" {
-			chatReq.Options[providers.OptThinkingLevel] = effort
+			// Fix A+B: for browser-automation runs, cap baseline thinking and drop
+			// to minimal on routine mechanical turns (full reasoning is kept on the
+			// planning turn and on recovery turns). Non-extension runs unchanged.
+			chatReq.Options[providers.OptThinkingLevel] = browserTurnEffort(req, state, effort)
 		}
 		if reasoningDecision.StripThinking {
 			chatReq.Options[providers.OptStripThinking] = true
@@ -361,6 +364,47 @@ func (l *Loop) makePruneMessages() func(msgs []providers.Message, budget int) ([
 		pruned := pruneContextMessages(msgs, budget, l.contextPruningCfg, l.tokenCounter, l.model, &stats)
 		return pruned, stats
 	}
+}
+
+// browserTurnEffort implements Fix A+B. For extension (browser) runs it caps
+// the per-turn thinking budget: routine mid-task fill/click turns get "low"
+// (Fix B), while the initial planning turn and recovery turns (after a tool
+// error or an injected loop warning) keep real reasoning but capped at "medium"
+// — 32k-token extended thinking is never needed to fill a web form (Fix A).
+// Non-browser runs keep the configured effort unchanged.
+func browserTurnEffort(req *RunRequest, state *pipeline.RunState, configured string) string {
+	if req == nil || req.ClientKind != "extension" {
+		return configured
+	}
+	if state.Iteration == 0 || recentTroubleSignal(state) {
+		return capEffort(configured, "medium")
+	}
+	return "low"
+}
+
+// capEffort lowers "high" to maxLevel; "low"/"medium"/"off" pass through.
+func capEffort(effort, maxLevel string) string {
+	if effort == "high" {
+		return maxLevel
+	}
+	return effort
+}
+
+// recentTroubleSignal reports whether the last few messages contain a tool
+// error or an injected loop warning/critical notice — i.e. the model is
+// recovering and should keep full reasoning this turn rather than be downgraded.
+func recentTroubleSignal(state *pipeline.RunState) bool {
+	msgs := state.Messages.All()
+	for i := len(msgs) - 1; i >= 0 && i >= len(msgs)-5; i-- {
+		m := msgs[i]
+		if m.Role == "tool" && m.IsError {
+			return true
+		}
+		if m.Role == "user" && (strings.Contains(m.Content, "[System: WARNING") || strings.Contains(m.Content, "CRITICAL")) {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *Loop) makeCompactMessages(req *RunRequest) func(ctx context.Context, msgs []providers.Message, model string) ([]providers.Message, error) {
