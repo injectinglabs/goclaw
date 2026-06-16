@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
@@ -19,13 +20,18 @@ import (
 type InboxHandler struct {
 	composioURL string // base URL of composio-mcp, e.g. http://composio-mcp:9300
 	httpClient  *http.Client
+	registry    *providers.Registry    // for the reply-draft LLM call (optional)
+	sysConfigs  store.SystemConfigStore // tenant background-provider resolution (optional)
 }
 
-// NewInboxHandler constructs the inbox unread-count handler.
-func NewInboxHandler(composioURL string) *InboxHandler {
+// NewInboxHandler constructs the inbox handler. registry+sysConfigs power the
+// reply-draft LLM call; pass nil to disable drafting (count/list/mark-read still work).
+func NewInboxHandler(composioURL string, registry *providers.Registry, sysConfigs store.SystemConfigStore) *InboxHandler {
 	return &InboxHandler{
 		composioURL: composioURL,
-		httpClient:  &http.Client{Timeout: 12 * time.Second},
+		httpClient:  &http.Client{Timeout: 20 * time.Second},
+		registry:    registry,
+		sysConfigs:  sysConfigs,
 	}
 }
 
@@ -33,6 +39,8 @@ func NewInboxHandler(composioURL string) *InboxHandler {
 func (h *InboxHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/inbox/unread", requireAuth("", h.handleUnread))
 	mux.HandleFunc("POST /v1/inbox/mark-read", requireAuth("", h.handleMarkRead))
+	mux.HandleFunc("POST /v1/inbox/draft-reply", requireAuth("", h.handleDraftReply))
+	mux.HandleFunc("POST /v1/inbox/send-reply", requireAuth("", h.handleSendReply))
 }
 
 // handleMarkRead marks one message read in the user's mailbox.

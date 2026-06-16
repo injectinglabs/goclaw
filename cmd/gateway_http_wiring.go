@@ -106,8 +106,8 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 		d.server.SetActivityHandler(httpapi.NewActivityHandler(d.pgStores.Activity))
 	}
 
-	// Inbox unread-count API (browser-extension badge, v0 interval polling).
-	d.server.SetInboxHandler(httpapi.NewInboxHandler("http://composio-mcp:9300"))
+	// Inbox API (extension badge + unread list + mark-read + reply drafting).
+	d.server.SetInboxHandler(httpapi.NewInboxHandler("http://composio-mcp:9300", d.providerRegistry, d.pgStores.SystemConfigs))
 
 	// System configs API
 	if d.pgStores.SystemConfigs != nil {
