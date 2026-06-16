@@ -149,7 +149,14 @@ func (h *InboxHandler) draftReply(ctx context.Context, email emailContent, instr
 		return "", "no_provider"
 	}
 	tenantID := store.TenantIDFromContext(ctx)
-	provider, model := providerresolve.ResolveBackgroundProvider(ctx, tenantID, h.registry, h.sysConfigs)
+	// Use the SAME provider+model as the default chat agent ("llm-service" /
+	// "default") so drafting works wherever chat works. Fall back to the
+	// background-provider resolver only if llm-service isn't registered.
+	model := "default"
+	provider, err := h.registry.GetForTenant(tenantID, "llm-service")
+	if err != nil || provider == nil {
+		provider, model = providerresolve.ResolveBackgroundProvider(ctx, tenantID, h.registry, h.sysConfigs)
+	}
 	if provider == nil {
 		slog.Info("inbox.draft_no_provider", "tenant", tenantID.String())
 		return "", "no_provider"
