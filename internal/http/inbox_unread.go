@@ -44,90 +44,175 @@ func (h *InboxHandler) handleUnread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gmail := h.gmailUnread(r.Context(), userID)
-	outlook := h.outlookUnread(r.Context(), userID)
+	gmailN, gmailMsgs := h.gmailUnread(r.Context(), userID)
+	outlookN, outlookMsgs := h.outlookUnread(r.Context(), userID)
 
+	messages := append(gmailMsgs, outlookMsgs...)
+	if messages == nil {
+		messages = []unreadMessage{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"gmail":   gmail,
-		"outlook": outlook,
-		"total":   gmail + outlook,
+		"gmail":    gmailN,
+		"outlook":  outlookN,
+		"total":    gmailN + outlookN,
+		"messages": messages, // sender/subject/date for the reminders UI list
 	})
 }
 
-// gmailUnread returns the user's unread INBOX count via composio GMAIL_FETCH_EMAILS.
-// Returns 0 on any error (not connected, auth expired, parse failure) — the
-// caller treats this as "nothing to show".
-func (h *InboxHandler) gmailUnread(ctx context.Context, userID string) int {
+// unreadMessage is a compact description of one unread email for the UI list.
+type unreadMessage struct {
+	Provider string `json:"provider"`
+	From     string `json:"from"`
+	Subject  string `json:"subject"`
+	Date     string `json:"date,omitempty"`
+}
+
+// gmailUnread returns the user's unread INBOX count + message previews via
+// composio GMAIL_FETCH_EMAILS. Returns (0, nil) on any error.
+func (h *InboxHandler) gmailUnread(ctx context.Context, userID string) (int, []unreadMessage) {
 	text, err := h.callComposio(ctx, userID, "GMAIL_FETCH_EMAILS", map[string]any{
 		"query":       "is:unread in:inbox",
 		"max_results": 25,
 	})
 	if err != nil {
 		slog.Info("inbox.gmail_unread_failed", "user", userID, "err", err.Error())
-		return 0
+		return 0, nil
 	}
+	msgs := extractGmailMessages(text)
 	n, ok := extractCount(text)
-	// Log the envelope SHAPE (top-level keys only, never email content) so the
-	// parser can be verified/fixed from logs without leaking PII.
-	slog.Info("inbox.gmail_unread", "user", userID, "count", n, "parsed", ok, "shape", jsonShape(text))
-	return n
+	if !ok {
+		n = len(msgs)
+	}
+	// Log the envelope SHAPE (top-level keys only, never email content).
+	slog.Info("inbox.gmail_unread", "user", userID, "count", n, "msgs", len(msgs), "shape", jsonShape(text))
+	return n, msgs
 }
 
-// outlookUnread returns the user's unread inbox count via composio
-// OUTLOOK_LIST_MESSAGES (Microsoft Graph: filter isRead eq false). Returns 0 on
-// any error. Same best-effort contract as gmailUnread.
-func (h *InboxHandler) outlookUnread(ctx context.Context, userID string) int {
-	// Don't rely on a server-side OData filter param (Composio's arg name for it
-	// is unreliable — passing it returned all messages). Fetch recent inbox
-	// messages and count unread client-side via each message's isRead field,
-	// which Microsoft Graph always returns. Capped at the page size (a large
-	// unread count just shows "99+" anyway).
+// outlookUnread returns the user's unread inbox count + message previews. Counts
+// unread client-side via each message's isRead field (Graph always returns it),
+// rather than relying on an unreliable server-side filter arg.
+func (h *InboxHandler) outlookUnread(ctx context.Context, userID string) (int, []unreadMessage) {
 	text, err := h.callComposio(ctx, userID, "OUTLOOK_LIST_MESSAGES", map[string]any{
 		"folder": "inbox",
 		"top":    50,
 	})
 	if err != nil {
 		slog.Info("inbox.outlook_unread_failed", "user", userID, "err", err.Error())
-		return 0
+		return 0, nil
 	}
-	n, ok := countUnreadOutlook(text)
-	slog.Info("inbox.outlook_unread", "user", userID, "count", n, "by_isread", ok, "shape", jsonShape(text))
-	return n
+	msgs := extractOutlookMessages(text)
+	slog.Info("inbox.outlook_unread", "user", userID, "count", len(msgs), "shape", jsonShape(text))
+	return len(msgs), msgs
 }
 
 // countUnreadOutlook counts messages with isRead==false in an
 // OUTLOOK_LIST_MESSAGES result. Returns (count, sawIsRead); sawIsRead is false
-// when no item exposed an isRead field (so the caller can tell "0 unread" apart
-// from "couldn't parse" and avoid a bogus page-size count).
-func countUnreadOutlook(text string) (int, bool) {
+// when no item exposed an isRead field.
+func extractOutlookMessages(text string) []unreadMessage {
 	var m map[string]any
 	if err := json.Unmarshal([]byte(text), &m); err != nil {
-		return 0, false
+		return nil
 	}
-	arr := outlookMessageArray(m)
-	count, sawIsRead := 0, false
-	for _, it := range arr {
+	var out []unreadMessage
+	for _, it := range messageArray(m) {
 		msg, ok := it.(map[string]any)
 		if !ok {
 			continue
 		}
-		// Microsoft Graph uses "isRead"; tolerate a snake_case passthrough too.
-		for _, key := range []string{"isRead", "is_read"} {
-			if v, ok := msg[key].(bool); ok {
-				sawIsRead = true
-				if !v {
-					count++
-				}
-				break
+		// Only include items known to be unread (Graph always returns isRead).
+		isRead, hasKey := boolField(msg, "isRead", "is_read")
+		if !hasKey || isRead {
+			continue
+		}
+		out = append(out, unreadMessage{
+			Provider: "outlook",
+			From:     outlookFrom(msg),
+			Subject:  strField(msg, "subject", "Subject"),
+			Date:     strField(msg, "receivedDateTime", "received_date_time", "sentDateTime"),
+		})
+	}
+	return out
+}
+
+// extractGmailMessages parses message previews from a GMAIL_FETCH_EMAILS result.
+// The query already filtered to unread, so every returned message counts. Field
+// names vary by Composio version, so it's tolerant (flat sender/subject, or raw
+// Gmail payload.headers).
+func extractGmailMessages(text string) []unreadMessage {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(text), &m); err != nil {
+		return nil
+	}
+	var out []unreadMessage
+	for _, it := range messageArray(m) {
+		msg, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		from := strField(msg, "sender", "from", "From")
+		subject := strField(msg, "subject", "Subject")
+		if from == "" || subject == "" {
+			hf, hs := gmailHeaders(msg)
+			if from == "" {
+				from = hf
+			}
+			if subject == "" {
+				subject = hs
+			}
+		}
+		out = append(out, unreadMessage{
+			Provider: "gmail",
+			From:     from,
+			Subject:  subject,
+			Date:     strField(msg, "messageTimestamp", "date", "internalDate"),
+		})
+	}
+	return out
+}
+
+// gmailHeaders pulls From/Subject out of a raw Gmail payload.headers array.
+func gmailHeaders(msg map[string]any) (from, subject string) {
+	payload, ok := msg["payload"].(map[string]any)
+	if !ok {
+		return "", ""
+	}
+	headers, ok := payload["headers"].([]any)
+	if !ok {
+		return "", ""
+	}
+	for _, h := range headers {
+		hm, ok := h.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch strField(hm, "name") {
+		case "From":
+			from = strField(hm, "value")
+		case "Subject":
+			subject = strField(hm, "value")
+		}
+	}
+	return from, subject
+}
+
+// outlookFrom extracts a display sender from a Graph message (from.emailAddress).
+func outlookFrom(msg map[string]any) string {
+	if from, ok := msg["from"].(map[string]any); ok {
+		if ea, ok := from["emailAddress"].(map[string]any); ok {
+			if n := strField(ea, "name"); n != "" {
+				return n
+			}
+			if a := strField(ea, "address"); a != "" {
+				return a
 			}
 		}
 	}
-	return count, sawIsRead
+	return strField(msg, "sender", "fromAddress")
 }
 
-// outlookMessageArray finds the messages array in the envelope (top level or a
+// messageArray finds the messages array in a Composio envelope (top level or a
 // known wrapper).
-func outlookMessageArray(m map[string]any) []any {
+func messageArray(m map[string]any) []any {
 	keys := []string{"value", "messages", "items"}
 	for _, k := range keys {
 		if a, ok := m[k].([]any); ok {
@@ -144,6 +229,26 @@ func outlookMessageArray(m map[string]any) []any {
 		}
 	}
 	return nil
+}
+
+// strField returns the first non-empty string value among the given keys.
+func strField(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if s, ok := m[k].(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// boolField returns the first bool value among the given keys, and whether one was found.
+func boolField(m map[string]any, keys ...string) (bool, bool) {
+	for _, k := range keys {
+		if b, ok := m[k].(bool); ok {
+			return b, true
+		}
+	}
+	return false, false
 }
 
 // callComposio invokes a composio-mcp tool for the given user and returns the

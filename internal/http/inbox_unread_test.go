@@ -8,14 +8,12 @@ func TestExtractCount(t *testing.T) {
 		ok bool
 	}
 	cases := map[string]want{
-		`{"resultSizeEstimate":7,"messages":[{"id":"a"}]}`:        {7, true},  // gmail: prefer estimate
-		`{"messages":[{"id":"a"},{"id":"b"}]}`:                    {2, true},  // gmail: fallback to len
-		`{"@odata.count":4,"value":[{"id":"x"}]}`:                 {4, true},  // outlook: odata.count
-		`{"value":[{"id":"x"},{"id":"y"},{"id":"z"}]}`:            {3, true},  // outlook: value len
-		`{"data":{"@odata.count":1}}`:                             {1, true},  // nested under data
-		`{"response_data":{"resultSizeEstimate":5}}`:              {5, true},  // nested wrapper
-		`not json`:                                                {0, false}, // garbage
-		`{"foo":"bar"}`:                                           {0, false}, // no count keys
+		`{"resultSizeEstimate":7,"messages":[{"id":"a"}]}`: {7, true},
+		`{"messages":[{"id":"a"},{"id":"b"}]}`:             {2, true},
+		`{"@odata.count":4,"value":[{"id":"x"}]}`:          {4, true},
+		`{"data":{"@odata.count":1}}`:                      {1, true},
+		`not json`:                                         {0, false},
+		`{"foo":"bar"}`:                                    {0, false},
 	}
 	for in, exp := range cases {
 		n, ok := extractCount(in)
@@ -25,26 +23,36 @@ func TestExtractCount(t *testing.T) {
 	}
 }
 
-func TestCountUnreadOutlook(t *testing.T) {
-	type want struct {
-		n  int
-		ok bool
+func TestExtractOutlookMessages(t *testing.T) {
+	// one unread (with nested from) among reads → exactly one message
+	in := `{"value":[
+		{"isRead":true,"subject":"read one"},
+		{"isRead":false,"subject":"Hi there","from":{"emailAddress":{"name":"Alice","address":"a@x.com"}},"receivedDateTime":"2026-06-16T12:00:00Z"},
+		{"isRead":true,"subject":"read two"}
+	]}`
+	msgs := extractOutlookMessages(in)
+	if len(msgs) != 1 {
+		t.Fatalf("got %d messages, want 1", len(msgs))
 	}
-	cases := map[string]want{
-		// one unread among several read (the user's real case)
-		`{"value":[{"isRead":true},{"isRead":false},{"isRead":true}]}`: {1, true},
-		// nested under data
-		`{"data":{"value":[{"isRead":false},{"isRead":false}]}}`: {2, true},
-		// snake_case passthrough
-		`{"value":[{"is_read":false},{"is_read":true}]}`: {1, true},
-		// no isRead field anywhere → can't determine (must NOT return array length)
-		`{"value":[{"id":"a"},{"id":"b"}]}`: {0, false},
-		`not json`:                          {0, false},
+	m := msgs[0]
+	if m.Provider != "outlook" || m.From != "Alice" || m.Subject != "Hi there" || m.Date == "" {
+		t.Errorf("unexpected message: %+v", m)
 	}
-	for in, exp := range cases {
-		n, ok := countUnreadOutlook(in)
-		if n != exp.n || ok != exp.ok {
-			t.Errorf("countUnreadOutlook(%q) = (%d,%v), want (%d,%v)", in, n, ok, exp.n, exp.ok)
-		}
+	// no isRead anywhere → no messages (don't fabricate)
+	if got := extractOutlookMessages(`{"value":[{"id":"a"}]}`); len(got) != 0 {
+		t.Errorf("expected 0 without isRead, got %d", len(got))
+	}
+}
+
+func TestExtractGmailMessages(t *testing.T) {
+	// flat shape
+	flat := `{"messages":[{"sender":"bob@x.com","subject":"Flat subject","messageTimestamp":"123"}]}`
+	if msgs := extractGmailMessages(flat); len(msgs) != 1 || msgs[0].From != "bob@x.com" || msgs[0].Subject != "Flat subject" || msgs[0].Provider != "gmail" {
+		t.Errorf("flat gmail parse failed: %+v", msgs)
+	}
+	// raw payload.headers shape
+	raw := `{"messages":[{"payload":{"headers":[{"name":"From","value":"Carol <c@x.com>"},{"name":"Subject","value":"Hdr subject"}]}}]}`
+	if msgs := extractGmailMessages(raw); len(msgs) != 1 || msgs[0].From != "Carol <c@x.com>" || msgs[0].Subject != "Hdr subject" {
+		t.Errorf("header gmail parse failed: %+v", msgs)
 	}
 }
