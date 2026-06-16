@@ -45,10 +45,12 @@ func (h *InboxHandler) handleUnread(w http.ResponseWriter, r *http.Request) {
 	}
 
 	gmail := h.gmailUnread(r.Context(), userID)
+	outlook := h.outlookUnread(r.Context(), userID)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"gmail": gmail,
-		"total": gmail,
+		"gmail":   gmail,
+		"outlook": outlook,
+		"total":   gmail + outlook,
 	})
 }
 
@@ -61,11 +63,31 @@ func (h *InboxHandler) gmailUnread(ctx context.Context, userID string) int {
 		"max_results": 25,
 	})
 	if err != nil {
-		slog.Debug("inbox.gmail_unread_failed", "user", userID, "err", err.Error())
+		slog.Info("inbox.gmail_unread_failed", "user", userID, "err", err.Error())
 		return 0
 	}
-	n := extractGmailCount(text)
-	slog.Debug("inbox.gmail_unread", "user", userID, "count", n)
+	n, ok := extractCount(text)
+	// Log the envelope SHAPE (top-level keys only, never email content) so the
+	// parser can be verified/fixed from logs without leaking PII.
+	slog.Info("inbox.gmail_unread", "user", userID, "count", n, "parsed", ok, "shape", jsonShape(text))
+	return n
+}
+
+// outlookUnread returns the user's unread inbox count via composio
+// OUTLOOK_LIST_MESSAGES (Microsoft Graph: filter isRead eq false). Returns 0 on
+// any error. Same best-effort contract as gmailUnread.
+func (h *InboxHandler) outlookUnread(ctx context.Context, userID string) int {
+	text, err := h.callComposio(ctx, userID, "OUTLOOK_LIST_MESSAGES", map[string]any{
+		"folder": "inbox",
+		"filter": "isRead eq false",
+		"top":    25,
+	})
+	if err != nil {
+		slog.Info("inbox.outlook_unread_failed", "user", userID, "err", err.Error())
+		return 0
+	}
+	n, ok := extractCount(text)
+	slog.Info("inbox.outlook_unread", "user", userID, "count", n, "parsed", ok, "shape", jsonShape(text))
 	return n
 }
 
@@ -133,33 +155,66 @@ func clip(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// extractGmailCount pulls the unread count out of a GMAIL_FETCH_EMAILS result.
-// GMAIL_FETCH_EMAILS wraps Gmail users.messages.list, which returns
-// resultSizeEstimate + a messages array. Composio may nest the payload under
-// "data", so we search both levels and fall back to counting messages. Defensive
-// by design — the exact envelope is verified on staging via the debug log above.
-func extractGmailCount(text string) int {
+// extractCount pulls an unread count out of a Composio email-list result,
+// covering both providers' shapes (and a possible "data"/"response_data"
+// wrapper):
+//   - Gmail (users.messages.list): resultSizeEstimate / messages[]
+//   - Outlook (Graph /messages): "@odata.count" / value[]
+//
+// Returns (count, true) when a recognized count key is found, else (0, false)
+// so callers can log a parse miss. Defensive by design — the exact envelope is
+// confirmed from the logged shape on staging.
+func extractCount(text string) (int, bool) {
 	var m map[string]any
 	if err := json.Unmarshal([]byte(text), &m); err != nil {
-		return 0
+		return 0, false
 	}
 	if n, ok := countFromMap(m); ok {
-		return n
+		return n, true
 	}
-	if data, ok := m["data"].(map[string]any); ok {
-		if n, ok := countFromMap(data); ok {
-			return n
+	// Composio sometimes nests the provider payload one level down.
+	for _, key := range []string{"data", "response_data", "result"} {
+		if inner, ok := m[key].(map[string]any); ok {
+			if n, ok := countFromMap(inner); ok {
+				return n, true
+			}
 		}
 	}
-	return 0
+	return 0, false
 }
 
 func countFromMap(m map[string]any) (int, bool) {
 	if v, ok := m["resultSizeEstimate"].(float64); ok {
 		return int(v), true
 	}
+	if v, ok := m["@odata.count"].(float64); ok {
+		return int(v), true
+	}
 	if msgs, ok := m["messages"].([]any); ok {
 		return len(msgs), true
 	}
+	if vals, ok := m["value"].([]any); ok {
+		return len(vals), true
+	}
 	return 0, false
+}
+
+// jsonShape returns the top-level keys of a JSON object (plus one nested level
+// for known wrappers) for safe diagnostic logging — keys only, never values, so
+// no email content is logged.
+func jsonShape(text string) string {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(text), &m); err != nil {
+		return "non-object(" + clip(text, 40) + ")"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+		if inner, ok := m[k].(map[string]any); ok && (k == "data" || k == "response_data" || k == "result") {
+			for ik := range inner {
+				keys = append(keys, k+"."+ik)
+			}
+		}
+	}
+	return fmt.Sprintf("%v", keys)
 }
