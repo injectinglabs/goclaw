@@ -48,7 +48,7 @@ func (h *InboxHandler) handleDraftReply(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	draft, status := h.draftReply(r.Context(), email, req.Instruction)
+	draft, status, detail := h.draftReply(r.Context(), userID, email, req.Instruction)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"from":      email.From,
@@ -59,7 +59,8 @@ func (h *InboxHandler) handleDraftReply(w http.ResponseWriter, r *http.Request) 
 		"threadId":  email.ThreadID,
 		"id":        email.ID,
 		"draft":     draft,
-		"status":    status, // "ok" | "no_provider" | "llm_error" — why draft may be empty
+		"status":    status, // "ok" | "no_provider" | "llm_error"
+		"detail":    detail, // error text when status != ok (for diagnosis)
 	})
 }
 
@@ -143,10 +144,10 @@ func (e *inboxError) Error() string { return e.msg }
 
 // draftReply asks the tenant's background LLM to write a reply body. Returns ""
 // when no provider is wired (the UI then starts from an empty editor).
-func (h *InboxHandler) draftReply(ctx context.Context, email emailContent, instruction string) (string, string) {
+func (h *InboxHandler) draftReply(ctx context.Context, userID string, email emailContent, instruction string) (string, string, string) {
 	if h.registry == nil {
 		slog.Info("inbox.draft_no_registry")
-		return "", "no_provider"
+		return "", "no_provider", "registry not wired"
 	}
 	tenantID := store.TenantIDFromContext(ctx)
 	// Use the SAME provider+model as the default chat agent ("llm-service" /
@@ -159,7 +160,7 @@ func (h *InboxHandler) draftReply(ctx context.Context, email emailContent, instr
 	}
 	if provider == nil {
 		slog.Info("inbox.draft_no_provider", "tenant", tenantID.String())
-		return "", "no_provider"
+		return "", "no_provider", "no provider resolved"
 	}
 	sys := "You draft email replies on the user's behalf. Output ONLY the reply body — " +
 		"no subject line, no 'Subject:', no quoted original, no placeholder signature. " +
@@ -178,13 +179,17 @@ func (h *InboxHandler) draftReply(ctx context.Context, email emailContent, instr
 			providers.OptMaxTokens:     800,
 			providers.OptTemperature:   0.4,
 			providers.OptThinkingLevel: "off",
+			// Attribution the llm-service expects (the agent pipeline sets these
+			// on every call). Without them a bare Chat can be rejected.
+			providers.OptUserID:   userID,
+			providers.OptTenantID: tenantID.String(),
 		},
 	})
 	if err != nil {
-		slog.Info("inbox.draft_failed", "err", err.Error(), "model", model)
-		return "", "llm_error"
+		slog.Info("inbox.draft_failed", "err", err.Error(), "model", model, "provider", provider.Name())
+		return "", "llm_error", clip(err.Error(), 240)
 	}
-	return strings.TrimSpace(resp.Content), "ok"
+	return strings.TrimSpace(resp.Content), "ok", ""
 }
 
 // parseGmailEmail pulls body/from/subject from a GMAIL_FETCH_MESSAGE_BY_THREAD_ID
