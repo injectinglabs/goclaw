@@ -36,6 +36,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/titanous/json5 v1.0.0
 	github.com/wailsapp/wails/v2 v2.11.0
+	github.com/xuri/excelize/v2 v2.10.1
 	github.com/zalando/go-keyring v0.2.8
 	go.mau.fi/whatsmeow v0.0.0-20260327181659-02ec817e7cf4
 	go.opentelemetry.io/otel v1.40.0
@@ -132,6 +133,8 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus-community/pro-bing v0.4.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/richardlehane/mscfb v1.0.6 // indirect
+	github.com/richardlehane/msoleps v1.0.6 // indirect
 	github.com/rs/zerolog v1.34.0 // indirect
 	github.com/safchain/ethtool v0.3.0 // indirect
 	github.com/samber/lo v1.49.1 // indirect
@@ -142,6 +145,7 @@ require (
 	github.com/tailscale/peercred v0.0.0-20250107143737-35a0c7bd7edc // indirect
 	github.com/tailscale/web-client-prebuilt v0.0.0-20250124233751-d4cd19a26976 // indirect
 	github.com/tailscale/wireguard-go v0.0.0-20250716170648-1d0488a3d7da // indirect
+	github.com/tiendc/go-deepcopy v1.7.2 // indirect
 	github.com/tkrajina/go-reflector v0.5.8 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/vektah/gqlparser/v2 v2.5.27 // indirect
@@ -150,6 +154,8 @@ require (
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+	github.com/xuri/efp v0.0.1 // indirect
+	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	go.mau.fi/libsignal v0.2.1 // indirect
 	go.mau.fi/util v0.9.6 // indirect
