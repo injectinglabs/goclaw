@@ -227,6 +227,10 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 	// instance). nil store falls back to the legacy local-only behavior.
 	d.server.SetFilesHandler(httpapi.NewFilesHandler(d.workspace, d.dataDir, mediaStore))
 
+	// sheet.preview WS RPC — parses a delivered .xlsx/.csv (same workspace/data
+	// bounds as the file server) into a JSON grid the chat UI renders inline.
+	methods.NewSheetPreviewMethods(d.workspace, d.dataDir).Register(d.server.Router())
+
 	// Storage file management — browse/delete files under the resolved workspace directory.
 	d.server.SetStorageHandler(httpapi.NewStorageHandler(d.workspace))
 

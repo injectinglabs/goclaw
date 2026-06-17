@@ -62,6 +62,12 @@ const (
 	// updates that arrived while the socket was down.
 	MethodWorkflowRunsSubscribe = "workflow.runsSubscribe"
 
+	// MethodSheetPreview parses a delivered spreadsheet file (.xlsx/.csv) in
+	// the user's workspace/data dir into a compact JSON grid {sheet, columns,
+	// rows} the chat UI renders as an interactive, editable table inline next
+	// to the download link. Read path for the interactive-spreadsheet feature.
+	MethodSheetPreview = "sheet.preview"
+
 	// Agents management
 	MethodAgentsList     = "agents.list"
 	MethodAgentsCreate   = "agents.create"
