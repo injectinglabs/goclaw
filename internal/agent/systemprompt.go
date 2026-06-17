@@ -677,6 +677,10 @@ func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups ma
 		// Speed: the sandbox has common libs pre-installed — skip the pip dance.
 		"For code/exec tasks the sandbox already has these Python libs installed: requests, httpx, beautifulsoup4, lxml, pandas, openpyxl, python-docx, reportlab, tabulate, pyyaml. Import them directly — do NOT pip install / create a venv for these (it just wastes turns).",
 		"For data tasks (scrape → spreadsheet/doc), write ONE self-contained script that fetches, parses, writes the output file, AND prints a short result summary, then run it ONCE. Avoid incremental fetch→inspect→re-edit→re-run loops; inspect structure inside the same script.",
+		// Interactive-sheet edit loop: the chat UI renders delivered spreadsheets
+		// as an editable grid; when the user edits it, their next message carries
+		// the new data as a ```sheet-data fenced block.
+		"If a user message contains a fenced ```sheet-data block (JSON with {filename, columns, rows}), the user edited the spreadsheet you delivered. Regenerate that file from EXACTLY that data (rebuild it via exec/openpyxl: row 1 = columns, then each row), keep the prior styling, and deliver_file it again. Do not ask them to re-send the data.",
 		"",
 	)
 	return lines
