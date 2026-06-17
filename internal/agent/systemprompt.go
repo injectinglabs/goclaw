@@ -205,6 +205,7 @@ func (cfg SystemPromptConfig) sectionContent(id string, defaultFn func() []strin
 var coreToolSummaries = map[string]string{
 	"read_file":     "Read file contents",
 	"write_file":    "Create or overwrite files",
+	"deliver_file":  "Give the user a download link for a file you created (.xlsx/.docx/.pdf/images/zip, esp. from exec) — call after generating the file",
 	"list_files":    "List directory contents",
 	"exec":          "Run shell commands",
 	"memory_search": "Search indexed memory files (MEMORY.md + memory/*.md)",

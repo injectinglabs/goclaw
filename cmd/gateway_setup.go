@@ -87,6 +87,10 @@ func setupToolRegistry(
 		toolsReg.Register(tools.NewEditTool(workspace, agentCfg.RestrictToWorkspace))
 		toolsReg.Register(tools.NewExecTool(workspace, agentCfg.RestrictToWorkspace))
 	}
+	// deliver_file surfaces an existing workspace file (e.g. an exec-generated
+	// .xlsx/.docx) to the user as a download link. No sandbox variant needed —
+	// it only stats/reads host workspace files (shared with the sandbox mount).
+	toolsReg.Register(tools.NewDeliverFileTool(workspace, agentCfg.RestrictToWorkspace))
 
 	// Memory tools — PG-backed; always registered (PG memory is always available)
 	toolsReg.Register(tools.NewMemorySearchTool())
@@ -269,6 +273,11 @@ func setupToolRegistry(
 	}
 	if wf, ok := toolsReg.Get("write_file"); ok {
 		if t, ok := wf.(*tools.WriteFileTool); ok {
+			t.DenyPaths(internalDenyPaths...)
+		}
+	}
+	if df, ok := toolsReg.Get("deliver_file"); ok {
+		if t, ok := df.(*tools.DeliverFileTool); ok {
 			t.DenyPaths(internalDenyPaths...)
 		}
 	}
