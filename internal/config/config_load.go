@@ -114,6 +114,12 @@ func (c *Config) applyEnvOverrides() {
 	envStr("GOCLAW_OLLAMA_CLOUD_API_KEY", &c.Providers.OllamaCloud.APIKey)
 	envStr("GOCLAW_OLLAMA_CLOUD_API_BASE", &c.Providers.OllamaCloud.APIBase)
 	envStr("GOCLAW_GATEWAY_TOKEN", &c.Gateway.Token)
+	envStr("GOCLAW_WORKFLOWS_SHEETS_MCP_URL", &c.Workflows.SheetsMCPURL)
+	envStr("GOCLAW_WORKFLOWS_PROVIDER_NAME", &c.Workflows.ProviderName)
+	// Token name matches the sidecar's own env so the same Secrets
+	// Manager value can fan out via .env templating without a
+	// goclaw-specific alias.
+	envStr("SHEETS_MCP_SERVICE_TOKEN", &c.Workflows.ServiceToken)
 	envStr("GOCLAW_TELEGRAM_TOKEN", &c.Channels.Telegram.Token)
 	envStr("GOCLAW_DISCORD_TOKEN", &c.Channels.Discord.Token)
 	envStr("GOCLAW_ZALO_TOKEN", &c.Channels.Zalo.Token)
@@ -125,6 +131,26 @@ func (c *Config) applyEnvOverrides() {
 	envStr("GOCLAW_SLACK_BOT_TOKEN", &c.Channels.Slack.BotToken)
 	envStr("GOCLAW_SLACK_APP_TOKEN", &c.Channels.Slack.AppToken)
 	envStr("GOCLAW_SLACK_USER_TOKEN", &c.Channels.Slack.UserToken)
+
+	// Web-search provider keys. DuckDuckGo (the free fallback) is blocked
+	// from our AWS egress IPs, so a paid provider key is required for
+	// web_search to return anything on stage/prod. Keys are secrets →
+	// injected via Secrets Manager .env, never committed to the json5
+	// config. Presence of a key auto-enables that provider (mirrors the
+	// channel-token pattern below); the default provider_order already
+	// puts paid providers ahead of DuckDuckGo.
+	envStr("GOCLAW_TAVILY_API_KEY", &c.Tools.Web.Tavily.APIKey)
+	envStr("GOCLAW_BRAVE_API_KEY", &c.Tools.Web.Brave.APIKey)
+	envStr("GOCLAW_EXA_API_KEY", &c.Tools.Web.Exa.APIKey)
+	if c.Tools.Web.Tavily.APIKey != "" {
+		c.Tools.Web.Tavily.Enabled = true
+	}
+	if c.Tools.Web.Brave.APIKey != "" {
+		c.Tools.Web.Brave.Enabled = true
+	}
+	if c.Tools.Web.Exa.APIKey != "" {
+		c.Tools.Web.Exa.Enabled = true
+	}
 
 	// TTS secrets
 	envStr("GOCLAW_TTS_OPENAI_API_KEY", &c.Tts.OpenAI.APIKey)

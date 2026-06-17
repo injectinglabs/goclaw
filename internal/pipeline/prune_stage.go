@@ -50,6 +50,18 @@ func parseTTL(s string) time.Duration {
 func (s *PruneStage) Execute(ctx context.Context, state *RunState) error {
 	s.result = Continue
 
+	// Always-on (independent of the opt-in pruning config): collapse stale
+	// page snapshots before any budget math. Only the latest snapshot reflects
+	// current page state; older ones are pure redundancy that would otherwise
+	// re-inflate the context every iteration during browser automation.
+	if s.deps.CollapseSnapshots != nil {
+		if collapsed, n := s.deps.CollapseSnapshots(state.Messages.History()); n > 0 {
+			state.Messages.SetHistory(collapsed)
+			slog.Debug("context.snapshots_superseded",
+				"session_key", state.Input.SessionKey, "collapsed", n)
+		}
+	}
+
 	// Compute budget using the effective context window for this run's model.
 	// ContextStage resolves EffectiveContextWindow once per run via ModelRegistry;
 	// if zero (unknown model, registry not wired) fall back to the pipeline-wide

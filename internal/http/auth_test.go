@@ -90,6 +90,9 @@ func (m *mockTenantStore) GetTenantBySlug(_ context.Context, slug string) (*stor
 	}
 	return nil, fmt.Errorf("not found")
 }
+func (m *mockTenantStore) GetTenantByExternalOrgID(context.Context, string) (*store.TenantData, error) {
+	return nil, nil
+}
 func (m *mockTenantStore) ListTenants(context.Context) ([]store.TenantData, error) { return nil, nil }
 func (m *mockTenantStore) UpdateTenant(context.Context, uuid.UUID, map[string]any) error {
 	return nil

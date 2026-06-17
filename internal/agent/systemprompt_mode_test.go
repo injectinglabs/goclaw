@@ -111,6 +111,64 @@ func TestTaskModeSafetySlim(t *testing.T) {
 	}
 }
 
+func TestSafetyAllowsAuthorizedBugBountyResearch(t *testing.T) {
+	fullPrompt := BuildSystemPrompt(fullTestConfig())
+	for _, want := range []string{
+		"Security research and bug-bounty assistance is allowed",
+		"Do not refuse merely because the target is real",
+		"do not give a blanket refusal",
+		"passive OSINT and local code/repository analysis",
+		"Refuse requests to attack out-of-scope systems",
+	} {
+		if !strings.Contains(fullPrompt, want) {
+			t.Errorf("full safety prompt missing %q", want)
+		}
+	}
+
+	taskCfg := fullTestConfig()
+	taskCfg.Mode = PromptTask
+	taskPrompt := BuildSystemPrompt(taskCfg)
+	for _, want := range []string{
+		"Security research and bug-bounty help is allowed",
+		"connect to these bug bounties and scan them one by one",
+		"verify scope before live testing or scanning",
+	} {
+		if !strings.Contains(taskPrompt, want) {
+			t.Errorf("task safety prompt missing %q", want)
+		}
+	}
+
+	noneCfg := fullTestConfig()
+	noneCfg.Mode = PromptNone
+	nonePrompt := BuildSystemPrompt(noneCfg)
+	for _, want := range []string{
+		"Security research and bug-bounty help is allowed",
+		"connect to these bug bounties and scan them one by one",
+		"passive OSINT or local repository analysis",
+	} {
+		if !strings.Contains(nonePrompt, want) {
+			t.Errorf("none safety prompt missing %q", want)
+		}
+	}
+}
+
+func TestLockedPreambleAllowsAuthorizedBugBountyResearch(t *testing.T) {
+	cfg := fullTestConfig()
+	cfg.IsLocked = true
+	prompt := BuildSystemPrompt(cfg)
+	for _, want := range []string{
+		"# Security research and bug bounties",
+		"Do not blanket-refuse just because the target is real",
+		"connect to these bug bounties and scan them one by",
+		"passive OSINT and local code/repository analysis",
+		"correct course and apply this scoped workflow",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("locked preamble missing %q", want)
+		}
+	}
+}
+
 func TestTaskModeMemorySlim(t *testing.T) {
 	cfg := fullTestConfig()
 	cfg.Mode = PromptTask
@@ -151,8 +209,8 @@ func TestNoneModeSections(t *testing.T) {
 			t.Errorf("none mode should not have: %s", dropped)
 		}
 	}
-	// Size check: should be under 3000 chars (~750 tokens)
-	if len(prompt) > 3000 {
+	// Size check: should stay compact (~800 tokens) even with safety guidance.
+	if len(prompt) > 3200 {
 		t.Errorf("none mode too large: %d chars", len(prompt))
 	}
 }

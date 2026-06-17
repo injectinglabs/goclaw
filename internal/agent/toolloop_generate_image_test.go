@@ -15,7 +15,7 @@ func TestGenerateImageBoundedBySameResultBreaker(t *testing.T) {
 	rh := hashResult(result)
 
 	// Calls 1..2 with DIFFERENT args, identical result → warning, not yet critical.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		h := s.record(tool, map[string]any{"prompt": "green elephant", "variant": i})
 		s.recordResult(h, result)
 	}
@@ -39,7 +39,7 @@ func TestRefreshPageContentStaysExempt(t *testing.T) {
 	const result = "<html>unchanged</html>"
 
 	var s toolLoopState
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		h := s.record(tool, map[string]any{"selector": i})
 		s.recordResult(h, result)
 	}

@@ -87,6 +87,31 @@ func (p *AnthropicProvider) buildRawBlock(blockType string, result *ChatResponse
 	return nil
 }
 
+// addLastMessageCacheBreakpoint attaches an ephemeral cache_control marker to
+// the last content block of the last message so the conversation prefix is
+// cached (incremental prompt caching). Converts string content to a text block
+// when needed. No-op for empty lists and for raw ([]json.RawMessage) assistant
+// content — the last message in the tool loop is virtually always a user
+// message or tool_result, which this handles. Stays within Anthropic's 4
+// cache_control breakpoint limit (system + tools + this = 3).
+func addLastMessageCacheBreakpoint(messages []map[string]any) {
+	if len(messages) == 0 {
+		return
+	}
+	last := messages[len(messages)-1]
+	ephemeral := map[string]any{"type": "ephemeral"}
+	switch content := last["content"].(type) {
+	case string:
+		last["content"] = []map[string]any{
+			{"type": "text", "text": content, "cache_control": ephemeral},
+		}
+	case []map[string]any:
+		if len(content) > 0 {
+			content[len(content)-1]["cache_control"] = ephemeral
+		}
+	}
+}
+
 func (p *AnthropicProvider) buildRequestBody(model string, req ChatRequest, stream bool) map[string]any {
 	// Separate system messages and build conversation messages
 	var systemBlocks []map[string]any
@@ -174,6 +199,14 @@ func (p *AnthropicProvider) buildRequestBody(model string, req ChatRequest, stre
 			})
 		}
 	}
+
+	// Fix C: cache the conversation prefix incrementally. A cache_control
+	// breakpoint on the last message caches everything up to it, so the next
+	// turn re-processes only its new messages (and whatever tail the
+	// snapshot-supersede just stubbed) instead of the entire growing history.
+	// Biggest TTFT win on long browser-automation runs, where each turn would
+	// otherwise re-read all prior (large) page snapshots from scratch.
+	addLastMessageCacheBreakpoint(messages)
 
 	body := map[string]any{
 		"model":      model,

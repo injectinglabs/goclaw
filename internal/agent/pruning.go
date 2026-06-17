@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/nextlevelbuilder/goclaw/internal/config"
@@ -357,6 +358,81 @@ func pruneContextMessages(msgs []providers.Message, contextWindowTokens int, cfg
 	}
 
 	return output
+}
+
+// snapshotToolNames are client tools whose result is a full-page snapshot.
+// Only the most recent snapshot reflects current page state; older ones are
+// pure redundancy (the page has since changed or been re-read), so they are
+// collapsed to a stub to stop them re-inflating the context every iteration.
+var snapshotToolNames = map[string]bool{
+	"refresh_page_content": true,
+	// execute_actions returns a fresh page snapshot appended to its result; once
+	// a newer snapshot exists the older batch result (old page state + stale
+	// action log) is obsolete, so it's collapsed alongside refresh_page_content.
+	"execute_actions": true,
+	// execute_js also appends a post-JS snapshot by default — same rationale.
+	"execute_js": true,
+}
+
+// supersededSnapshotPlaceholder replaces the body of a stale page snapshot.
+const supersededSnapshotPlaceholder = "[Stale page snapshot superseded by a newer page read below.]"
+
+// snapshotMarker is the common prefix the extension prepends to a piggybacked
+// snapshot in execute_js ("--- page after JS ---") and execute_actions
+// ("--- page after actions ---") results. Content before it (a JS return value
+// or step log) is preserved when superseding; everything from it on is dropped.
+const snapshotMarker = "--- page after "
+
+// supersedeStaleSnapshots collapses every page-snapshot tool result except the
+// most recent one to a short stub. A superseded DOM snapshot carries no
+// information the newer snapshot lacks, so this is always-on and independent of
+// the opt-in context-pruning config — it runs every iteration to keep browser
+// automation runs from accumulating tens of large, obsolete snapshots.
+//
+// Returns a new slice (and the number collapsed) when it changed anything,
+// otherwise the original slice and 0.
+func supersedeStaleSnapshots(msgs []providers.Message) ([]providers.Message, int) {
+	names := buildToolCallNameMap(msgs)
+
+	// hasSnapshot reports whether a tool result actually carries page state.
+	// refresh_page_content IS the snapshot. execute_js / execute_actions append
+	// one after a marker — but only when snapshot wasn't suppressed (a pure-read
+	// execute_js has no marker and must be preserved verbatim).
+	hasSnapshot := func(name, content string) bool {
+		switch name {
+		case "refresh_page_content":
+			return content != supersededSnapshotPlaceholder
+		case "execute_js", "execute_actions":
+			return strings.Contains(content, snapshotMarker)
+		}
+		return false
+	}
+
+	var snapIdx []int
+	for i, m := range msgs {
+		if m.Role == "tool" && m.Content != "" && hasSnapshot(names[m.ToolCallID], m.Content) {
+			snapIdx = append(snapIdx, i)
+		}
+	}
+	if len(snapIdx) <= 1 {
+		return msgs, 0 // nothing to supersede — keep the lone (latest) snapshot
+	}
+
+	out := make([]providers.Message, len(msgs))
+	copy(out, msgs)
+	// Keep the last snapshot full; on the earlier ones strip ONLY the stale
+	// snapshot, preserving any execute_js return value / execute_actions step log
+	// that precedes the marker.
+	for _, idx := range snapIdx[:len(snapIdx)-1] {
+		body := out[idx].Content
+		if mi := strings.Index(body, snapshotMarker); mi >= 0 {
+			body = strings.TrimRight(body[:mi], "\n ") + "\n" + supersededSnapshotPlaceholder
+		} else {
+			body = supersededSnapshotPlaceholder
+		}
+		out[idx] = providers.Message{Role: out[idx].Role, Content: body, ToolCallID: out[idx].ToolCallID}
+	}
+	return out, len(snapIdx) - 1
 }
 
 // findAssistantCutoff returns the index of the Nth-from-last assistant message.
