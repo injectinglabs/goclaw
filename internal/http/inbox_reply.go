@@ -34,6 +34,7 @@ func (h *InboxHandler) handleDraftReply(w http.ResponseWriter, r *http.Request) 
 		Provider    string `json:"provider"`
 		ID          string `json:"id"`
 		ThreadID    string `json:"threadId"`
+		AccountID   string `json:"accountId"`
 		Instruction string `json:"instruction"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Provider == "" {
@@ -41,7 +42,7 @@ func (h *InboxHandler) handleDraftReply(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	email, err := h.fetchEmail(r.Context(), userID, req.Provider, req.ID, req.ThreadID)
+	email, err := h.fetchEmail(r.Context(), userID, req.AccountID, req.Provider, req.ID, req.ThreadID)
 	if err != nil {
 		slog.Info("inbox.fetch_email_failed", "user", userID, "provider", req.Provider, "err", err.Error())
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "could not fetch email"})
@@ -76,6 +77,7 @@ func (h *InboxHandler) handleSendReply(w http.ResponseWriter, r *http.Request) {
 		Provider  string `json:"provider"`
 		ID        string `json:"id"`
 		ThreadID  string `json:"threadId"`
+		AccountID string `json:"accountId"`
 		Recipient string `json:"recipient"`
 		Body      string `json:"body"`
 	}
@@ -103,7 +105,7 @@ func (h *InboxHandler) handleSendReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.callComposio(r.Context(), userID, tool, args); err != nil {
+	if _, err := h.callComposio(r.Context(), userID, req.AccountID, tool, args); err != nil {
 		slog.Info("inbox.send_reply_failed", "user", userID, "provider", req.Provider, "err", err.Error())
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "send failed"})
 		return
@@ -112,10 +114,10 @@ func (h *InboxHandler) handleSendReply(w http.ResponseWriter, r *http.Request) {
 }
 
 // fetchEmail retrieves the email body + sender/subject for drafting a reply.
-func (h *InboxHandler) fetchEmail(ctx context.Context, userID, provider, id, threadID string) (emailContent, error) {
+func (h *InboxHandler) fetchEmail(ctx context.Context, userID, accountID, provider, id, threadID string) (emailContent, error) {
 	switch provider {
 	case "gmail":
-		text, err := h.callComposio(ctx, userID, "GMAIL_FETCH_MESSAGE_BY_THREAD_ID", map[string]any{
+		text, err := h.callComposio(ctx, userID, accountID, "GMAIL_FETCH_MESSAGE_BY_THREAD_ID", map[string]any{
 			"thread_id": threadID,
 		})
 		if err != nil {
@@ -124,7 +126,7 @@ func (h *InboxHandler) fetchEmail(ctx context.Context, userID, provider, id, thr
 		slog.Info("inbox.gmail_fetch_message", "user", userID, "shape", jsonShape(text))
 		return parseGmailEmail(text, id, threadID), nil
 	case "outlook":
-		text, err := h.callComposio(ctx, userID, "OUTLOOK_GET_MESSAGE", map[string]any{
+		text, err := h.callComposio(ctx, userID, accountID, "OUTLOOK_GET_MESSAGE", map[string]any{
 			"message_id": id,
 		})
 		if err != nil {

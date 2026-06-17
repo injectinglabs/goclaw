@@ -52,8 +52,9 @@ func (h *InboxHandler) handleMarkRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Provider string `json:"provider"`
-		ID       string `json:"id"`
+		Provider  string `json:"provider"`
+		ID        string `json:"id"`
+		AccountID string `json:"accountId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider and id required"})
@@ -79,7 +80,7 @@ func (h *InboxHandler) handleMarkRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.callComposio(r.Context(), userID, tool, args); err != nil {
+	if _, err := h.callComposio(r.Context(), userID, body.AccountID, tool, args); err != nil {
 		slog.Info("inbox.mark_read_failed", "user", userID, "provider", body.Provider, "err", err.Error())
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "mark-read failed"})
 		return
@@ -114,50 +115,156 @@ func (h *InboxHandler) handleUnread(w http.ResponseWriter, r *http.Request) {
 
 // unreadMessage is a compact description of one unread email for the UI list.
 type unreadMessage struct {
-	Provider string `json:"provider"`
-	ID       string `json:"id"`                  // message id — used to mark-read / reply
-	ThreadID string `json:"threadId,omitempty"`  // gmail thread id — used to reply
-	From     string `json:"from"`
-	Subject  string `json:"subject"`
-	Date     string `json:"date,omitempty"`
+	Provider  string `json:"provider"`
+	Account   string `json:"account,omitempty"`   // which mailbox (email/alias) for multi-account
+	AccountID string `json:"accountId,omitempty"` // connectedAccountId — for mark-read/reply targeting
+	ID        string `json:"id"`                  // message id — used to mark-read / reply
+	ThreadID  string `json:"threadId,omitempty"`  // gmail thread id — used to reply
+	From      string `json:"from"`
+	Subject   string `json:"subject"`
+	Date      string `json:"date,omitempty"`
+}
+
+// inboxAccount is one connected mailbox returned by composio-mcp /accounts.
+type inboxAccount struct {
+	ID    string `json:"id"`
+	Alias string `json:"alias"`
+}
+
+// listAccounts returns the user's connected accounts for a toolkit via the
+// composio-mcp /accounts endpoint. Returns nil on error/none.
+func (h *InboxHandler) listAccounts(ctx context.Context, userID, toolkit string) []inboxAccount {
+	body, _ := json.Marshal(map[string]any{"toolkit": toolkit})
+	req, err := http.NewRequestWithContext(ctx, "POST", h.composioURL+"/accounts", bytes.NewReader(body))
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Proxy-User", userID)
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil
+	}
+	var out struct {
+		Accounts []inboxAccount `json:"accounts"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&out) != nil {
+		return nil
+	}
+	return out.Accounts
+}
+
+// accountLabel resolves a human label for an account: its alias, else the
+// mailbox email via *_GET_PROFILE (best-effort), else "".
+func (h *InboxHandler) accountLabel(ctx context.Context, userID, toolkit string, a inboxAccount) string {
+	if a.Alias != "" {
+		return a.Alias
+	}
+	if a.ID == "" {
+		return ""
+	}
+	var tool string
+	switch toolkit {
+	case "gmail":
+		tool = "GMAIL_GET_PROFILE"
+	case "outlook":
+		tool = "OUTLOOK_GET_PROFILE"
+	default:
+		return ""
+	}
+	text, err := h.callComposio(ctx, userID, a.ID, tool, map[string]any{})
+	if err != nil {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(text), &m) != nil {
+		return ""
+	}
+	if e := strField(m, "emailAddress", "email", "mail", "userPrincipalName"); e != "" {
+		return e
+	}
+	for _, w := range []string{"data", "response_data", "result"} {
+		if inner, ok := m[w].(map[string]any); ok {
+			if e := strField(inner, "emailAddress", "email", "mail", "userPrincipalName"); e != "" {
+				return e
+			}
+		}
+	}
+	return ""
 }
 
 // gmailUnread returns the user's unread INBOX count + message previews via
 // composio GMAIL_FETCH_EMAILS. Returns (0, nil) on any error.
 func (h *InboxHandler) gmailUnread(ctx context.Context, userID string) (int, []unreadMessage) {
-	text, err := h.callComposio(ctx, userID, "GMAIL_FETCH_EMAILS", map[string]any{
-		"query":       "is:unread in:inbox",
-		"max_results": 25,
-	})
-	if err != nil {
-		slog.Info("inbox.gmail_unread_failed", "user", userID, "err", err.Error())
-		return 0, nil
+	total := 0
+	var all []unreadMessage
+	for _, a := range h.accountsOrDefault(ctx, userID, "gmail") {
+		text, err := h.callComposio(ctx, userID, a.ID, "GMAIL_FETCH_EMAILS", map[string]any{
+			"query":       "is:unread in:inbox",
+			"max_results": 25,
+		})
+		if err != nil {
+			slog.Info("inbox.gmail_unread_failed", "user", userID, "acct", a.ID, "err", err.Error())
+			continue
+		}
+		msgs := extractGmailMessages(text)
+		label := h.accountLabel(ctx, userID, "gmail", a)
+		for i := range msgs {
+			msgs[i].Account = label
+			msgs[i].AccountID = a.ID
+		}
+		n, ok := extractCount(text)
+		if !ok {
+			n = len(msgs)
+		}
+		total += n
+		all = append(all, msgs...)
+		slog.Info("inbox.gmail_unread", "user", userID, "acct", a.ID, "count", n, "shape", jsonShape(text))
 	}
-	msgs := extractGmailMessages(text)
-	n, ok := extractCount(text)
-	if !ok {
-		n = len(msgs)
+	return total, all
+}
+
+// accountsOrDefault returns the user's connected accounts for a toolkit, or a
+// single empty-id account (= the user's default connection) when none are
+// listed — preserving single-account behavior.
+func (h *InboxHandler) accountsOrDefault(ctx context.Context, userID, toolkit string) []inboxAccount {
+	accts := h.listAccounts(ctx, userID, toolkit)
+	if len(accts) == 0 {
+		return []inboxAccount{{}}
 	}
-	// Log the envelope SHAPE (top-level keys only, never email content).
-	slog.Info("inbox.gmail_unread", "user", userID, "count", n, "msgs", len(msgs), "shape", jsonShape(text))
-	return n, msgs
+	return accts
 }
 
 // outlookUnread returns the user's unread inbox count + message previews. Counts
 // unread client-side via each message's isRead field (Graph always returns it),
 // rather than relying on an unreliable server-side filter arg.
 func (h *InboxHandler) outlookUnread(ctx context.Context, userID string) (int, []unreadMessage) {
-	text, err := h.callComposio(ctx, userID, "OUTLOOK_LIST_MESSAGES", map[string]any{
-		"folder": "inbox",
-		"top":    50,
-	})
-	if err != nil {
-		slog.Info("inbox.outlook_unread_failed", "user", userID, "err", err.Error())
-		return 0, nil
+	total := 0
+	var all []unreadMessage
+	for _, a := range h.accountsOrDefault(ctx, userID, "outlook") {
+		text, err := h.callComposio(ctx, userID, a.ID, "OUTLOOK_LIST_MESSAGES", map[string]any{
+			"folder": "inbox",
+			"top":    50,
+		})
+		if err != nil {
+			slog.Info("inbox.outlook_unread_failed", "user", userID, "acct", a.ID, "err", err.Error())
+			continue
+		}
+		msgs := extractOutlookMessages(text)
+		label := h.accountLabel(ctx, userID, "outlook", a)
+		for i := range msgs {
+			msgs[i].Account = label
+			msgs[i].AccountID = a.ID
+		}
+		total += len(msgs)
+		all = append(all, msgs...)
+		slog.Info("inbox.outlook_unread", "user", userID, "acct", a.ID, "count", len(msgs), "shape", jsonShape(text))
 	}
-	msgs := extractOutlookMessages(text)
-	slog.Info("inbox.outlook_unread", "user", userID, "count", len(msgs), "shape", jsonShape(text))
-	return len(msgs), msgs
+	return total, all
 }
 
 // countUnreadOutlook counts messages with isRead==false in an
@@ -309,10 +416,10 @@ func boolField(m map[string]any, keys ...string) (bool, bool) {
 	return false, false
 }
 
-// callComposio invokes a composio-mcp tool for the given user and returns the
-// first text content block. Mirrors the JSON-RPC tools/call shape used by the
-// sheet writer; composio-mcp resolves the connected account from X-Proxy-User.
-func (h *InboxHandler) callComposio(ctx context.Context, userID, tool string, args map[string]any) (string, error) {
+// callComposio invokes a composio-mcp tool. connectedAccountID (optional) targets
+// a specific connected account via X-Connected-Account-Id; empty = the user's
+// default connection (single-account behavior).
+func (h *InboxHandler) callComposio(ctx context.Context, userID, connectedAccountID, tool string, args map[string]any) (string, error) {
 	payload := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
@@ -329,6 +436,9 @@ func (h *InboxHandler) callComposio(ctx context.Context, userID, tool string, ar
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Proxy-User", userID)
+	if connectedAccountID != "" {
+		req.Header.Set("X-Connected-Account-Id", connectedAccountID)
+	}
 
 	resp, err := h.httpClient.Do(req)
 	if err != nil {
