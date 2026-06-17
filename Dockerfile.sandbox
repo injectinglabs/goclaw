@@ -14,6 +14,24 @@ RUN apt-get update \
     ripgrep \
   && rm -rf /var/lib/apt/lists/*
 
+# Pre-install the libraries agents reach for on data/office tasks so they don't
+# have to bootstrap them at runtime (the slow pip/venv/ensurepip dance Debian's
+# PEP-668 guard forces). System-wide (root, --break-system-packages) so the
+# sandbox user can import them. Covers: HTTP + scraping (requests/httpx/
+# beautifulsoup4/lxml), data (pandas/numpy via pandas), spreadsheets (openpyxl),
+# documents (python-docx, reportlab for PDF), and table formatting (tabulate).
+RUN pip3 install --break-system-packages --no-cache-dir \
+    requests \
+    httpx \
+    beautifulsoup4 \
+    lxml \
+    pandas \
+    openpyxl \
+    python-docx \
+    reportlab \
+    tabulate \
+    pyyaml
+
 RUN useradd --create-home --shell /bin/bash sandbox
 USER sandbox
 WORKDIR /home/sandbox
