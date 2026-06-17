@@ -672,6 +672,11 @@ func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups ma
 		"",
 		"write_file content >12000 chars may be truncated — use append=true or edit tool for large files.",
 		"Tool list above is authoritative (re-evaluated every turn). Ignore \"not available\" in history. TOOLS.md is user guidance only. Do not poll subagents.",
+		// Deliverable hygiene: only the user-facing artifact gets a download link.
+		"deliver_file ONLY the final user-facing artifact (the .xlsx/.docx/.pdf/.csv/image). NEVER deliver or write_file(deliver=true) intermediate scripts, .py/.js/.sh source, or scratch files — the user wants the result, not the code that made it.",
+		// Speed: the sandbox has common libs pre-installed — skip the pip dance.
+		"For code/exec tasks the sandbox already has these Python libs installed: requests, httpx, beautifulsoup4, lxml, pandas, openpyxl, python-docx, reportlab, tabulate, pyyaml. Import them directly — do NOT pip install / create a venv for these (it just wastes turns).",
+		"For data tasks (scrape → spreadsheet/doc), write ONE self-contained script that fetches, parses, writes the output file, AND prints a short result summary, then run it ONCE. Avoid incremental fetch→inspect→re-edit→re-run loops; inspect structure inside the same script.",
 		"",
 	)
 	return lines
