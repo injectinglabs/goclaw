@@ -34,6 +34,47 @@ func TestDeliverFile_AttachesExistingFile(t *testing.T) {
 	}
 }
 
+// TestDeliverFile_SandboxAbsolutePathRewrite reproduces the staging failure:
+// exec wrote the file at the container path /workspace/report.xlsx (bind-mounted
+// to the host workspace), and the model handed deliver_file that absolute path.
+// It must rewrite /workspace/... to workspace-relative and deliver, not reject.
+func TestDeliverFile_SandboxAbsolutePathRewrite(t *testing.T) {
+	ws := t.TempDir() // host workspace (does not start with /workspace)
+	if err := os.WriteFile(filepath.Join(ws, "report.xlsx"), []byte("PK fake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tool := NewDeliverFileTool(ws, true)
+	res := tool.Execute(context.Background(), map[string]any{"path": "/workspace/report.xlsx"})
+	if res.IsError {
+		t.Fatalf("expected delivery after rewriting sandbox path, got error: %s", res.ForLLM)
+	}
+	if len(res.Media) != 1 || res.Media[0].Filename != "report.xlsx" {
+		t.Fatalf("expected report.xlsx attached, got %+v", res.Media)
+	}
+}
+
+// TestDeliverFile_BasenameFallback verifies the workspace search fallback: a
+// path that doesn't resolve exactly still delivers if the basename exists.
+func TestDeliverFile_BasenameFallback(t *testing.T) {
+	ws := t.TempDir()
+	sub := filepath.Join(ws, "out")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "data.xlsx"), []byte("PK"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tool := NewDeliverFileTool(ws, true)
+	// Wrong dir, right name → fallback finds out/data.xlsx.
+	res := tool.Execute(context.Background(), map[string]any{"path": "data.xlsx"})
+	if res.IsError {
+		t.Fatalf("expected basename-fallback delivery, got error: %s", res.ForLLM)
+	}
+	if len(res.Media) != 1 {
+		t.Fatalf("expected 1 attachment, got %d", len(res.Media))
+	}
+}
+
 // TestDeliverFile_MissingFile verifies a clear error (not a silent attach) when
 // the path doesn't exist — guides the model to create it first.
 func TestDeliverFile_MissingFile(t *testing.T) {

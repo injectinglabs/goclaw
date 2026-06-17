@@ -3,10 +3,13 @@ package tools
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/sandbox"
 )
 
 // DeliverFileTool surfaces an EXISTING workspace file to the user as a chat
@@ -77,21 +80,41 @@ func (t *DeliverFileTool) Execute(ctx context.Context, args map[string]any) *Res
 	if workspace == "" {
 		workspace = t.workspace
 	}
+
+	// Sandbox path rewrite: code run via `exec` writes inside the sandbox at the
+	// container workdir (/workspace), which is bind-mounted to the HOST
+	// workspace — so the file really is on the host, just under a different
+	// absolute path. The model often hands deliver_file that container-absolute
+	// path (/workspace/foo.xlsx); rewrite it to workspace-relative so host-side
+	// resolution finds it instead of rejecting it as out-of-bounds.
+	cw := sandbox.DefaultContainerWorkdir
+	if workspace != "" && !strings.HasPrefix(workspace, cw) && (path == cw || strings.HasPrefix(path, cw+"/")) {
+		if rel := strings.TrimPrefix(strings.TrimPrefix(path, cw), "/"); rel != "" {
+			path = rel
+		}
+	}
+
 	allowed := allowedWithTeamWorkspace(ctx, t.allowedPrefixes)
 	resolved, err := resolvePathWithAllowed(path, workspace, effectiveRestrict(ctx, t.restrict), allowed)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
+
+	fi, statErr := os.Stat(resolved)
+	if statErr != nil {
+		// Fallback: exact path missing — search the workspace for a file with
+		// the same name (covers minor path drift, e.g. a sandbox path that
+		// didn't map cleanly). Only accept a unique match.
+		if found := findInWorkspace(workspace, filepath.Base(path)); found != "" {
+			resolved = found
+			fi, statErr = os.Stat(resolved)
+		}
+		if statErr != nil {
+			return ErrorResult(fmt.Sprintf("file not found: %s — create it inside the workspace first (use a relative path, the file lands under the workspace), then deliver_file it", path))
+		}
+	}
 	if err := checkDeniedPath(resolved, t.workspace, t.deniedPrefixes); err != nil {
 		return ErrorResult(err.Error())
-	}
-
-	fi, err := os.Stat(resolved)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return ErrorResult(fmt.Sprintf("file does not exist: %s — create it first (e.g. via exec), then deliver_file it", path))
-		}
-		return ErrorResult(fmt.Sprintf("cannot access file: %v", err))
 	}
 	if fi.IsDir() {
 		return ErrorResult(fmt.Sprintf("%s is a directory, not a file", path))
@@ -116,4 +139,32 @@ func (t *DeliverFileTool) Execute(ctx context.Context, args map[string]any) *Res
 		dm.Mark(deliveredPath)
 	}
 	return result
+}
+
+// findInWorkspace returns the first file named `name` anywhere under root, or ""
+// if none. Bounded fallback for deliver_file when the exact path doesn't resolve
+// (e.g. a sandbox-absolute path that didn't map). Skips hidden/internal dirs.
+func findInWorkspace(root, name string) string {
+	if root == "" || name == "" {
+		return ""
+	}
+	var match string
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			// Don't descend into internal/dot dirs (.media, .goclaw, memory, etc.).
+			if p != root && strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() == name {
+			match = p
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return match
 }
