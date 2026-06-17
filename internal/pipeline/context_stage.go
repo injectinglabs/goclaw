@@ -90,6 +90,20 @@ func (s *ContextStage) Execute(ctx context.Context, state *RunState) error {
 		}
 	}
 
+	// Resolve the model's real output ceiling once per run (same pattern as the
+	// context window above). ThinkStage requests this as max_tokens so long
+	// answers aren't truncated at the small pipeline default. Zero leaves the
+	// field unset and ThinkStage falls back to Config.MaxTokens.
+	if s.deps.ResolveMaxOutputTokens != nil && state.Model != "" {
+		providerID := ""
+		if state.Provider != nil {
+			providerID = state.Provider.Name()
+		}
+		if mo := s.deps.ResolveMaxOutputTokens(providerID, state.Model); mo > 0 {
+			state.Context.EffectiveMaxOutputTokens = mo
+		}
+	}
+
 	// 1. Resolve workspace
 	if s.deps.ResolveWorkspace != nil {
 		ws, err := s.deps.ResolveWorkspace(ctx, state.Input)

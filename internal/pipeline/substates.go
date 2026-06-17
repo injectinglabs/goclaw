@@ -25,6 +25,14 @@ type ContextState struct {
 	// Resolved once per run (not per iteration) to avoid budget skew — if the
 	// model somehow changes mid-run a mismatch causes silent truncation loops.
 	EffectiveContextWindow int
+
+	// EffectiveMaxOutputTokens is the model's real per-response output ceiling
+	// (e.g. 32k for Opus, 16k for Sonnet) resolved per-run from the
+	// provider/model via ModelRegistry. ThinkStage requests this as max_tokens
+	// instead of the small pipeline default so long answers (big tables, full
+	// docs) aren't truncated mid-output. Zero means "unknown model" → ThinkStage
+	// falls back to PipelineConfig.MaxTokens.
+	EffectiveMaxOutputTokens int
 }
 
 // ThinkState: owned by ThinkStage.
@@ -44,6 +52,15 @@ type ThinkState struct {
 	LastPromptTokens int
 	TruncRetries     int  // consecutive truncation retries (max 3)
 	StreamingActive  bool // true during active stream
+
+	// ContinuationBuffer + TextContinuations implement length-truncation
+	// auto-continue for TEXT answers (no tool calls). When a response stops with
+	// FinishReason=="length", ThinkStage appends the chunk to ContinuationBuffer
+	// and re-prompts the model to continue. The buffer is fed back as EPHEMERAL
+	// request context (never persisted to history), and ObserveStage stitches it
+	// onto the final chunk so the persisted message is a single, complete answer.
+	ContinuationBuffer string
+	TextContinuations  int // consecutive length-truncation continuations (bounded)
 }
 
 // PruneState: owned by PruneStage.

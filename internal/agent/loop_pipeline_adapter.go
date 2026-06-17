@@ -93,6 +93,20 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 			}
 			return spec.ContextWindow
 		},
+		// Resolve the model's real output ceiling (MaxTokens) the same way, so
+		// ThinkStage can request the model's full output capacity instead of the
+		// small pipeline default. Forward-compat resolver maps new versions
+		// (e.g. claude-opus-4-8 → claude-opus-4-6's 32k) so current models work.
+		ResolveMaxOutputTokens: func(provider, model string) int {
+			if l.modelRegistry == nil || model == "" {
+				return 0
+			}
+			spec := l.modelRegistry.Resolve(provider, model)
+			if spec == nil {
+				return 0
+			}
+			return spec.MaxTokens
+		},
 		EmitEvent: func(event any) {
 			if ae, ok := event.(AgentEvent); ok {
 				l.emit(ae)

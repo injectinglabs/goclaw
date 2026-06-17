@@ -35,6 +35,13 @@ type PipelineDeps struct {
 	// Invoked ONCE per run by ContextStage and stored in RunState.Context.EffectiveContextWindow.
 	ResolveContextWindow func(provider, model string) int
 
+	// ResolveMaxOutputTokens returns the model's real per-response output ceiling
+	// (in tokens) for a provider/model pair. Nil or 0 = fall back to
+	// Config.MaxTokens. Invoked ONCE per run by ContextStage and stored in
+	// RunState.Context.EffectiveMaxOutputTokens; ThinkStage uses it as max_tokens
+	// so long answers aren't capped at the small pipeline default.
+	ResolveMaxOutputTokens func(provider, model string) int
+
 	// Callbacks from agent.Loop — Phase 8 adapter wires these.
 	EmitEvent func(event any)
 

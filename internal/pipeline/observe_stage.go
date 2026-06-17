@@ -39,9 +39,12 @@ func (s *ObserveStage) Execute(_ context.Context, state *RunState) error {
 		state.Observe.LastBlockReply = resp.Content
 	}
 
-	// 3. Accumulate final content when no tool calls (final answer)
+	// 3. Accumulate final content when no tool calls (final answer).
+	// Stitch any length-truncation continuation buffer (Fix B) onto this chunk so
+	// the persisted/delivered answer is the complete text. ContinuationBuffer is
+	// empty in the normal (untruncated) case, so this is a no-op then.
 	if len(resp.ToolCalls) == 0 {
-		state.Observe.FinalContent = resp.Content
+		state.Observe.FinalContent = state.Think.ContinuationBuffer + resp.Content
 		state.Observe.FinalThinking = resp.Thinking
 	}
 
