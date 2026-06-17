@@ -162,6 +162,16 @@ func (h *InboxHandler) draftReply(ctx context.Context, userID string, email emai
 		slog.Info("inbox.draft_no_provider", "tenant", tenantID.String())
 		return "", "no_provider", "no provider resolved"
 	}
+
+	// Attach actor identity to the context — the OpenAI-compat/llm-service
+	// provider reads X-Actor-User-ID / X-Actor-Org-ID from here (NOT from Chat
+	// options). Without them the service-token receiver 400s. Mirrors the agent
+	// loop's ActorContext: org = tenant slug from context (the rollout fallback).
+	actor := map[string]string{"X-Actor-User-ID": userID}
+	if slug := store.TenantSlugFromContext(ctx); slug != "" {
+		actor["X-Actor-Org-ID"] = slug
+	}
+	ctx = providers.WithActorHeaders(ctx, actor)
 	sys := "You draft email replies on the user's behalf. Output ONLY the reply body — " +
 		"no subject line, no 'Subject:', no quoted original, no placeholder signature. " +
 		"Be concise, clear, and professional, matching the tone of the original."
