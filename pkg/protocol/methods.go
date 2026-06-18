@@ -68,6 +68,16 @@ const (
 	// to the download link. Read path for the interactive-spreadsheet feature.
 	MethodSheetPreview = "sheet.preview"
 
+	// MethodSheetSave rewrites the spreadsheet file in place from an edited grid
+	// (cell edits / rename / delete-column / add-row) with no LLM — so simple
+	// edits update the same document instead of starting a new chat turn.
+	MethodSheetSave = "sheet.save"
+
+	// MethodSheetEnrich fills newly-added empty columns (e.g. "Year Founded")
+	// for every row via one LLM call, writes the file in place, and returns the
+	// enriched grid so the same inline view updates — no new chat message.
+	MethodSheetEnrich = "sheet.enrich"
+
 	// Agents management
 	MethodAgentsList     = "agents.list"
 	MethodAgentsCreate   = "agents.create"

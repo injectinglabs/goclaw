@@ -229,7 +229,7 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 
 	// sheet.preview WS RPC — parses a delivered .xlsx/.csv (same workspace/data
 	// bounds as the file server) into a JSON grid the chat UI renders inline.
-	methods.NewSheetPreviewMethods(d.workspace, d.dataDir).Register(d.server.Router())
+	methods.NewSheetPreviewMethods(d.workspace, d.dataDir, d.providerRegistry, d.pgStores.SystemConfigs).Register(d.server.Router())
 
 	// Storage file management — browse/delete files under the resolved workspace directory.
 	d.server.SetStorageHandler(httpapi.NewStorageHandler(d.workspace))
