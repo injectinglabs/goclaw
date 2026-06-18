@@ -32,6 +32,17 @@ type InboxHandler struct {
 	tenants       store.TenantStore  // user→tenant for event scoping
 	internalToken string             // optional shared token for the internal forward
 	provisioned   sync.Map           // dedup trigger enable (key: user|toolkit|acct)
+
+	// pushSender, when set, delivers a Web Push notification to the user's
+	// subscribed browsers on each new-mail event (best-effort). Wired via
+	// SetPushSender.
+	pushSender func(ctx context.Context, userID string, payload []byte)
+}
+
+// SetPushSender wires a Web Push delivery callback invoked from pushInboxUpdated
+// on each new-mail event. Best-effort; nil disables Web Push delivery.
+func (h *InboxHandler) SetPushSender(fn func(ctx context.Context, userID string, payload []byte)) {
+	h.pushSender = fn
 }
 
 // NewInboxHandler constructs the inbox handler. registry+sysConfigs power the

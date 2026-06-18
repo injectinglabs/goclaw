@@ -116,6 +116,14 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 	if pe := os.Getenv("INBOX_PUSH_ENABLED"); (pe == "1" || pe == "true") && d.pgStores.Tenants != nil {
 		inboxH.EnablePush(d.msgBus, d.pgStores.Tenants, os.Getenv("INBOX_PUSH_TOKEN"))
 	}
+
+	// Web Push: register subscriptions + serve VAPID public key, and let the
+	// inbox new-mail path deliver a browser push (best-effort) on each event.
+	if d.pgStores != nil && d.pgStores.SystemConfigs != nil && d.pgStores.PushSubscriptions != nil {
+		pushH := httpapi.NewPushHandler(d.pgStores.SystemConfigs, d.pgStores.PushSubscriptions)
+		d.server.SetPushHandler(pushH)
+		inboxH.SetPushSender(pushH.SendToUser)
+	}
 	d.server.SetInboxHandler(inboxH)
 
 	// System configs API
