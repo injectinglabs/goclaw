@@ -15,34 +15,36 @@ func mkState(iter int, msgs ...providers.Message) *pipeline.RunState {
 	return s
 }
 
-func TestBrowserTurnEffort(t *testing.T) {
+func TestTurnEffort(t *testing.T) {
 	ext := &RunRequest{ClientKind: "extension"}
 	web := &RunRequest{ClientKind: "website"}
 
-	// Non-extension run: unchanged.
-	if got := browserTurnEffort(web, mkState(5), "high"); got != "high" {
-		t.Errorf("website run should keep high, got %q", got)
+	// Routine mid-task turn drops to "low" for ALL runs (web and extension).
+	if got := turnEffort(web, mkState(5), "high"); got != "low" {
+		t.Errorf("web routine turn: want low, got %q", got)
 	}
-	// Extension, planning turn (iter 0): full reasoning but capped at medium.
-	if got := browserTurnEffort(ext, mkState(0), "high"); got != "medium" {
-		t.Errorf("planning turn: want medium (capped), got %q", got)
+	if got := turnEffort(ext, mkState(7), "high"); got != "low" {
+		t.Errorf("extension routine turn: want low, got %q", got)
 	}
-	// Extension, routine mid-task turn: minimal.
-	if got := browserTurnEffort(ext, mkState(7), "high"); got != "low" {
-		t.Errorf("mechanical turn: want low, got %q", got)
+	// Planning turn (iter 0): full reasoning but capped at medium — both kinds.
+	if got := turnEffort(web, mkState(0), "high"); got != "medium" {
+		t.Errorf("web planning turn: want medium (capped), got %q", got)
 	}
-	// Extension, recovery after a tool error: keep reasoning (capped medium).
+	if got := turnEffort(ext, mkState(0), "high"); got != "medium" {
+		t.Errorf("extension planning turn: want medium (capped), got %q", got)
+	}
+	// Recovery after a tool error: keep reasoning (capped medium).
 	errTurn := mkState(7, providers.Message{Role: "tool", IsError: true, Content: "boom"})
-	if got := browserTurnEffort(ext, errTurn, "high"); got != "medium" {
+	if got := turnEffort(web, errTurn, "high"); got != "medium" {
 		t.Errorf("recovery (error): want medium, got %q", got)
 	}
-	// Extension, recovery after a loop warning.
+	// Recovery after a loop warning.
 	warnTurn := mkState(9, providers.Message{Role: "user", Content: "[System: WARNING — execute_action repeated]"})
-	if got := browserTurnEffort(ext, warnTurn, "high"); got != "medium" {
+	if got := turnEffort(web, warnTurn, "high"); got != "medium" {
 		t.Errorf("recovery (warning): want medium, got %q", got)
 	}
-	// Configured already low: stays low even on planning turn.
-	if got := browserTurnEffort(ext, mkState(0), "low"); got != "low" {
+	// Configured already low: stays low even on planning turn (never raised).
+	if got := turnEffort(web, mkState(0), "low"); got != "low" {
 		t.Errorf("low config should pass through, got %q", got)
 	}
 }

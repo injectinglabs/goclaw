@@ -681,7 +681,7 @@ func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups ma
 		"deliver_file ONLY the final user-facing artifact (the .xlsx/.docx/.pdf/.csv/image). NEVER deliver or write_file(deliver=true) intermediate scripts, .py/.js/.sh source, or scratch files — the user wants the result, not the code that made it.",
 		// Speed: the sandbox has common libs pre-installed — skip the pip dance.
 		"For code/exec tasks the sandbox already has these Python libs installed: requests, httpx, beautifulsoup4, lxml, pandas, openpyxl, python-docx, reportlab, tabulate, pyyaml. Import them directly — do NOT pip install / create a venv for these (it just wastes turns).",
-		"For data tasks (scrape → spreadsheet/doc), write ONE self-contained script that fetches, parses, writes the output file, AND prints a short result summary, then run it ONCE. Avoid incremental fetch→inspect→re-edit→re-run loops; inspect structure inside the same script.",
+		"For data tasks (scrape → spreadsheet/doc), write ONE self-contained script that fetches, parses, writes the output file, AND prints a short result summary, then run it ONCE — then deliver_file. Do NOT run throwaway probe commands first (curl/echo/fetch to 'check' the page, or a script that only prints the structure): handle uncertainty INSIDE the one script — try multiple selectors/fallbacks, validate the row count, and print diagnostics in the same run. Each extra exec/observe turn adds seconds of model latency, so collapse the work into a single script+run whenever possible.",
 		// Interactive-sheet edit loop: the chat UI renders delivered spreadsheets
 		// as an editable grid; when the user edits it, their next message carries
 		// the new data as a ```sheet-data fenced block.
