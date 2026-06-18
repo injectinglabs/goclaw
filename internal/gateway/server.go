@@ -562,6 +562,11 @@ func (s *Server) SetInboxHandler(h *httpapi.InboxHandler) {
 	s.handlers = append(s.handlers, h)
 }
 
+// SetPushHandler sets the Web Push registration handler.
+func (s *Server) SetPushHandler(h *httpapi.PushHandler) {
+	s.handlers = append(s.handlers, h)
+}
+
 // SetSystemConfigsHandler sets the system configs handler.
 func (s *Server) SetSystemConfigsHandler(h *httpapi.SystemConfigsHandler) {
 	s.handlers = append(s.handlers, h)

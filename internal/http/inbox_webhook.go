@@ -87,6 +87,21 @@ func (h *InboxHandler) pushInboxUpdated(ctx context.Context, userID, provider, a
 		"account_id": accountID,
 	})
 	slog.Info("inbox.pushed", "user", userID, "provider", provider)
+
+	// Best-effort Web Push to the user's subscribed browsers. Scope the ctx to
+	// the resolved tenant so VAPID key lookup resolves correctly. Never blocks.
+	if h.pushSender != nil {
+		payload, err := json.Marshal(map[string]string{
+			"title":    "New email",
+			"body":     provider,
+			"provider": provider,
+		})
+		if err != nil {
+			slog.Info("inbox.push_payload_marshal_failed", "user", userID, "err", err.Error())
+			return
+		}
+		h.pushSender(store.WithTenantID(ctx, tenantID), userID, payload)
+	}
 }
 
 // ── Trigger provisioning ──────────────────────────────────────────────────
