@@ -148,7 +148,15 @@ func (s *ThinkStage) Execute(ctx context.Context, state *RunState) error {
 		// is delivered instead of stopping mid-output. Accumulate this chunk into
 		// the continuation buffer (re-fed as ephemeral context on the next call);
 		// ObserveStage stitches buffer + final chunk into one persisted message.
-		if resp.FinishReason == "length" && state.Think.TextContinuations < maxTextContinuations {
+		//
+		// Guard: only continue when there's ACTUAL partial text to extend. A
+		// length-truncation with EMPTY content means the turn was all reasoning
+		// and the output budget was exhausted before any answer text (common on
+		// thinking models) — re-prompting "continue" just loops on nothing and
+		// ends in an empty reply. Fall through to BreakLoop → the empty-reply
+		// rescue instead.
+		if resp.FinishReason == "length" && resp.Content != "" &&
+			state.Think.TextContinuations < maxTextContinuations {
 			state.Think.TextContinuations++
 			state.Think.ContinuationBuffer += resp.Content
 			s.result = Continue

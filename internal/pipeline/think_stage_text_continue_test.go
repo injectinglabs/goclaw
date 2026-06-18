@@ -44,6 +44,32 @@ func TestThinkStage_TextTruncationAutoContinues(t *testing.T) {
 	}
 }
 
+// TestThinkStage_EmptyLengthTruncationDoesNotLoop guards the regression: a
+// length-truncated turn with EMPTY content (all-thinking, no answer text) must
+// NOT auto-continue (which loops on nothing → empty reply). It BreakLoops so the
+// empty-reply rescue runs instead.
+func TestThinkStage_EmptyLengthTruncationDoesNotLoop(t *testing.T) {
+	t.Parallel()
+	deps := &PipelineDeps{
+		Config: PipelineConfig{MaxIterations: 10, MaxTokens: 1000},
+		CallLLM: func(_ context.Context, _ *RunState, _ providers.ChatRequest) (*providers.ChatResponse, error) {
+			return &providers.ChatResponse{Content: "", FinishReason: "length"}, nil
+		},
+	}
+	stage := NewThinkStage(deps)
+	state := defaultState()
+
+	if err := stage.Execute(context.Background(), state); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if stage.Result() != BreakLoop {
+		t.Errorf("Result() = %v, want BreakLoop (don't loop on empty)", stage.Result())
+	}
+	if state.Think.TextContinuations != 0 {
+		t.Errorf("TextContinuations = %d, want 0 (no continuation on empty)", state.Think.TextContinuations)
+	}
+}
+
 // TestThinkStage_TextTruncationThenCleanFinishStitches verifies the second leg:
 // after a length-truncation continuation, a clean finish BreakLoops and the
 // ObserveStage stitches buffer + final chunk into one complete FinalContent.
