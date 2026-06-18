@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
@@ -201,10 +202,16 @@ func (m *SheetPreviewMethods) handleEnrich(ctx context.Context, client *gateway.
 	client.SendResponse(protocol.NewOKResponse(req.ID, grid))
 }
 
-// fillColumns fills each requested column for every row with ONE LLM call per
-// column. A per-column JSON ARRAY OF STRINGS is far more compact (and far less
-// likely to truncate) than one giant array-of-objects across all columns, and
-// each call gets a generous max_tokens so 100s of rows fit.
+const (
+	enrichBatchSize   = 40 // rows per LLM call — small enough to be fast + parse cleanly
+	enrichConcurrency = 6  // parallel batches (bounded so we don't trip provider rate limits)
+)
+
+// fillColumns fills each requested column for every row. Rows are split into
+// batches run CONCURRENTLY (bounded) so a 250-row fill takes ~one batch's
+// latency instead of one giant serial call — and each small batch parses
+// reliably. Partial success is kept (blank cells for any failed batch); only an
+// all-batches-failed result errors out.
 func (m *SheetPreviewMethods) fillColumns(ctx context.Context, provider providers.Provider, model string, grid *sheetgrid.Grid, cols []string, userID string, tenantID uuid.UUID) error {
 	// Ensure every requested column exists + rows are padded to width.
 	colIdx := map[string]int{}
@@ -226,9 +233,9 @@ func (m *SheetPreviewMethods) fillColumns(ctx context.Context, provider provider
 		}
 	}
 
-	// One compact context line per row, built from the EXISTING (non-enrich)
-	// columns so the model can identify each entity.
-	var ctxLines strings.Builder
+	// Compact context line per row from the EXISTING (non-enrich) columns so the
+	// model can identify each entity.
+	ctxLine := make([]string, len(grid.Rows))
 	for ri, row := range grid.Rows {
 		var parts []string
 		for ci, cn := range grid.Columns {
@@ -239,40 +246,94 @@ func (m *SheetPreviewMethods) fillColumns(ctx context.Context, provider provider
 				parts = append(parts, cn+"="+row[ci])
 			}
 		}
-		fmt.Fprintf(&ctxLines, "%d) %s\n", ri+1, strings.Join(parts, " | "))
+		ctxLine[ri] = strings.Join(parts, " | ")
 	}
 
 	for _, col := range cols {
-		sys := "You fill ONE spreadsheet column using your knowledge. Return ONLY a JSON array of strings — exactly one value per row, in the SAME ORDER as the rows given. Use \"\" when genuinely unknown. No prose, no markdown fences, no keys — just [\"v1\",\"v2\",...]."
-		user := fmt.Sprintf("There are %d rows. For each, give the value of the column %q.\n\nRows:\n%s\nReturn a JSON array of exactly %d strings now.",
-			len(grid.Rows), col, ctxLines.String(), len(grid.Rows))
-
-		resp, err := provider.Chat(ctx, providers.ChatRequest{
-			Messages: []providers.Message{{Role: "system", Content: sys}, {Role: "user", Content: user}},
-			Model:    model,
-			Options: map[string]any{
-				providers.OptThinkingLevel: "off",
-				providers.OptMaxTokens:     16000, // room for hundreds of short values
-				providers.OptUserID:        userID,
-				providers.OptTenantID:      tenantID.String(),
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("llm fill %q: %w", col, err)
-		}
-		var vals []string
-		if err := json.Unmarshal([]byte(stripFences(resp.Content)), &vals); err != nil {
-			slog.Warn("sheet.enrich parse failed", "col", col, "finish", resp.FinishReason, "preview", clipStr(resp.Content, 200))
-			return fmt.Errorf("parse fill for %q (finish=%s): %w", col, resp.FinishReason, err)
-		}
 		ci := colIdx[col]
-		for ri := range grid.Rows {
-			if ri < len(vals) {
-				grid.Rows[ri][ci] = vals[ri]
+		type batch struct{ start, end int }
+		var batches []batch
+		for s := 0; s < len(grid.Rows); s += enrichBatchSize {
+			e := s + enrichBatchSize
+			if e > len(grid.Rows) {
+				e = len(grid.Rows)
 			}
+			batches = append(batches, batch{s, e})
+		}
+
+		errs := make([]error, len(batches))
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, enrichConcurrency)
+		for bi, b := range batches {
+			wg.Add(1)
+			go func(bi int, b batch) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				vals, err := m.fillBatch(ctx, provider, model, col, ctxLine[b.start:b.end], userID, tenantID)
+				if err != nil {
+					errs[bi] = err
+					return
+				}
+				for j := 0; j < b.end-b.start; j++ {
+					if j < len(vals) {
+						grid.Rows[b.start+j][ci] = vals[j]
+					}
+				}
+			}(bi, b)
+		}
+		wg.Wait()
+
+		failed := 0
+		var firstErr error
+		for _, e := range errs {
+			if e != nil {
+				failed++
+				if firstErr == nil {
+					firstErr = e
+				}
+			}
+		}
+		if failed == len(batches) && firstErr != nil {
+			return fmt.Errorf("fill %q: %w", col, firstErr)
+		}
+		if failed > 0 {
+			slog.Warn("sheet.enrich partial", "col", col, "failed_batches", failed, "of", len(batches))
 		}
 	}
 	return nil
+}
+
+// fillBatch asks the model for one column's value across a slice of rows and
+// returns a JSON array of strings (one per row, in order).
+func (m *SheetPreviewMethods) fillBatch(ctx context.Context, provider providers.Provider, model, col string, lines []string, userID string, tenantID uuid.UUID) ([]string, error) {
+	var b strings.Builder
+	for i, l := range lines {
+		fmt.Fprintf(&b, "%d) %s\n", i+1, l)
+	}
+	sys := "You fill ONE spreadsheet column using your knowledge. Return ONLY a JSON array of strings — exactly one value per row, in the SAME ORDER as the rows given. Use \"\" when genuinely unknown. No prose, no markdown fences, no keys — just [\"v1\",\"v2\",...]."
+	user := fmt.Sprintf("There are %d rows. For each, give the value of the column %q.\n\nRows:\n%s\nReturn a JSON array of exactly %d strings now.",
+		len(lines), col, b.String(), len(lines))
+
+	resp, err := provider.Chat(ctx, providers.ChatRequest{
+		Messages: []providers.Message{{Role: "system", Content: sys}, {Role: "user", Content: user}},
+		Model:    model,
+		Options: map[string]any{
+			providers.OptThinkingLevel: "off",
+			providers.OptMaxTokens:     4096,
+			providers.OptUserID:        userID,
+			providers.OptTenantID:      tenantID.String(),
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var vals []string
+	if err := json.Unmarshal([]byte(stripFences(resp.Content)), &vals); err != nil {
+		slog.Warn("sheet.enrich batch parse failed", "col", col, "finish", resp.FinishReason, "preview", clipStr(resp.Content, 160))
+		return nil, fmt.Errorf("parse (finish=%s): %w", resp.FinishReason, err)
+	}
+	return vals, nil
 }
 
 func clipStr(s string, n int) string {
