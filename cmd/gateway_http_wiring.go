@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -107,7 +108,14 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 	}
 
 	// Inbox API (extension badge + unread list + mark-read + reply drafting).
-	d.server.SetInboxHandler(httpapi.NewInboxHandler("http://composio-mcp:9300", d.providerRegistry, d.pgStores.SystemConfigs))
+	inboxH := httpapi.NewInboxHandler("http://composio-mcp:9300", d.providerRegistry, d.pgStores.SystemConfigs)
+	// Push half: Composio email triggers → /v1/webhooks/composio → WS event.
+	// Enabled only when the signing secret is present (set COMPOSIO_WEBHOOK_SECRET
+	// + the project webhook URL in the Composio dashboard); otherwise polling-only.
+	if secret := os.Getenv("COMPOSIO_WEBHOOK_SECRET"); secret != "" && d.pgStores.Tenants != nil {
+		inboxH.EnablePush(secret, d.msgBus, d.pgStores.Tenants)
+	}
+	d.server.SetInboxHandler(inboxH)
 
 	// System configs API
 	if d.pgStores.SystemConfigs != nil {

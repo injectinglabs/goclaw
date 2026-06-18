@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -20,8 +22,14 @@ import (
 type InboxHandler struct {
 	composioURL string // base URL of composio-mcp, e.g. http://composio-mcp:9300
 	httpClient  *http.Client
-	registry    *providers.Registry    // for the reply-draft LLM call (optional)
+	registry    *providers.Registry     // for the reply-draft LLM call (optional)
 	sysConfigs  store.SystemConfigStore // tenant background-provider resolution (optional)
+
+	// Push half (Composio triggers → webhook → WS), wired via EnablePush.
+	webhookSecret string             // Composio webhook signing secret (Svix)
+	pub           bus.EventPublisher // broadcasts inbox.updated
+	tenants       store.TenantStore  // user→tenant for event scoping
+	provisioned   sync.Map           // dedup trigger subscribe (key: user|toolkit|acct)
 }
 
 // NewInboxHandler constructs the inbox handler. registry+sysConfigs power the
@@ -41,6 +49,8 @@ func (h *InboxHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/inbox/mark-read", requireAuth("", h.handleMarkRead))
 	mux.HandleFunc("POST /v1/inbox/draft-reply", requireAuth("", h.handleDraftReply))
 	mux.HandleFunc("POST /v1/inbox/send-reply", requireAuth("", h.handleSendReply))
+	// Inbound Composio trigger deliveries — signature-verified, no auth middleware.
+	mux.HandleFunc("POST /v1/webhooks/composio", h.handleComposioWebhook)
 }
 
 // handleMarkRead marks one message read in the user's mailbox.
@@ -96,6 +106,12 @@ func (h *InboxHandler) handleUnread(w http.ResponseWriter, r *http.Request) {
 	if userID == "" {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "no user"})
 		return
+	}
+
+	// Lazily ensure Composio email triggers exist for this user's mailboxes so
+	// future new mail pushes over WS. Deduped + async — doesn't slow the poll.
+	if h.webhookSecret != "" {
+		go h.ProvisionTriggers(context.Background(), userID)
 	}
 
 	gmailN, gmailMsgs := h.gmailUnread(r.Context(), userID)
