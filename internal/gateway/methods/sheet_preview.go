@@ -162,7 +162,14 @@ func (m *SheetPreviewMethods) handleEnrich(ctx context.Context, client *gateway.
 	}
 
 	tenantID := store.TenantIDFromContext(ctx)
-	provider, model := providerresolve.ResolveBackgroundProvider(ctx, tenantID, m.registry, m.sysConfigs)
+	// Use the SAME provider+model as the chat agent ("llm-service"/"default"),
+	// which is known to work wherever chat works; fall back to the background
+	// resolver only if that isn't registered. Mirrors the draft-reply path.
+	model := "default"
+	provider, perr := m.registry.GetForTenant(tenantID, "llm-service")
+	if perr != nil || provider == nil {
+		provider, model = providerresolve.ResolveBackgroundProvider(ctx, tenantID, m.registry, m.sysConfigs)
+	}
 	if provider == nil {
 		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "no model available to fill columns"))
 		return
