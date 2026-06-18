@@ -672,6 +672,9 @@ func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups ma
 		"",
 		"write_file content >12000 chars may be truncated — use append=true or edit tool for large files.",
 		"Tool list above is authoritative (re-evaluated every turn). Ignore \"not available\" in history. TOOLS.md is user guidance only. Do not poll subagents.",
+		// Parallel tool calls: the runtime executes multiple tool calls from ONE
+		// turn concurrently, so batching independent work is a big speedup.
+		"When you need several INDEPENDENT lookups whose inputs don't depend on each other's results (e.g. several web_search or web_fetch or read_file calls), emit them ALL in a SINGLE turn (multiple tool calls at once) — they run in parallel. Don't do one-per-turn; that's much slower and costs more tokens. Only sequence calls when a later one genuinely needs an earlier one's output.",
 		// Deliverable hygiene: only the user-facing artifact gets a download link.
 		"deliver_file ONLY the final user-facing artifact (the .xlsx/.docx/.pdf/.csv/image). NEVER deliver or write_file(deliver=true) intermediate scripts, .py/.js/.sh source, or scratch files — the user wants the result, not the code that made it.",
 		// Speed: the sandbox has common libs pre-installed — skip the pip dance.
