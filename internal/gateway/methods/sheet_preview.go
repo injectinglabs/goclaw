@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
@@ -203,8 +204,9 @@ func (m *SheetPreviewMethods) handleEnrich(ctx context.Context, client *gateway.
 }
 
 const (
-	enrichBatchSize   = 40 // rows per LLM call — small enough to be fast + parse cleanly
+	enrichBatchSize   = 25 // rows per LLM call — small enough to fit + parse cleanly
 	enrichConcurrency = 6  // parallel batches (bounded so we don't trip provider rate limits)
+	enrichBatchRetry  = 3  // attempts per batch before giving up (transient errors / rate limits)
 )
 
 // fillColumns fills each requested column for every row. Rows are split into
@@ -305,7 +307,10 @@ func (m *SheetPreviewMethods) fillColumns(ctx context.Context, provider provider
 }
 
 // fillBatch asks the model for one column's value across a slice of rows and
-// returns a JSON array of strings (one per row, in order).
+// returns a JSON array of strings (one per row, in order). It retries on
+// transient errors / rate limits and tolerates a truncated reply by salvaging
+// the values that did parse — so a single bad response degrades gracefully
+// (some rows blank) instead of dropping the whole batch.
 func (m *SheetPreviewMethods) fillBatch(ctx context.Context, provider providers.Provider, model, col string, lines []string, userID string, tenantID uuid.UUID) ([]string, error) {
 	var b strings.Builder
 	for i, l := range lines {
@@ -315,23 +320,84 @@ func (m *SheetPreviewMethods) fillBatch(ctx context.Context, provider providers.
 	user := fmt.Sprintf("There are %d rows. For each, give the value of the column %q.\n\nRows:\n%s\nReturn a JSON array of exactly %d strings now.",
 		len(lines), col, b.String(), len(lines))
 
-	resp, err := provider.Chat(ctx, providers.ChatRequest{
-		Messages: []providers.Message{{Role: "system", Content: sys}, {Role: "user", Content: user}},
-		Model:    model,
-		Options: map[string]any{
-			providers.OptThinkingLevel: "off",
-			providers.OptMaxTokens:     4096,
-			providers.OptUserID:        userID,
-			providers.OptTenantID:      tenantID.String(),
-		},
-	})
-	if err != nil {
-		return nil, err
+	// Budget output tokens to the batch size (≈160 tok/value) so values don't
+	// truncate, clamped to a sane window.
+	maxTok := 160 * len(lines)
+	if maxTok < 2048 {
+		maxTok = 2048
 	}
+	if maxTok > 16000 {
+		maxTok = 16000
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < enrichBatchRetry; attempt++ {
+		if attempt > 0 {
+			// Brief backoff before retrying (rate limits / transient 5xx).
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * 400 * time.Millisecond):
+			}
+		}
+		resp, err := provider.Chat(ctx, providers.ChatRequest{
+			Messages: []providers.Message{{Role: "system", Content: sys}, {Role: "user", Content: user}},
+			Model:    model,
+			Options: map[string]any{
+				providers.OptThinkingLevel: "off",
+				providers.OptMaxTokens:     maxTok,
+				providers.OptUserID:        userID,
+				providers.OptTenantID:      tenantID.String(),
+			},
+		})
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		vals, perr := parseStringArrayLenient(resp.Content)
+		if perr != nil {
+			slog.Warn("sheet.enrich batch parse failed", "col", col, "attempt", attempt, "finish", resp.FinishReason, "preview", clipStr(resp.Content, 160))
+			lastErr = fmt.Errorf("parse (finish=%s): %w", resp.FinishReason, perr)
+			continue
+		}
+		// A truncated reply (finish=length) may yield fewer values than rows —
+		// keep what we got; the caller leaves the rest blank rather than retrying
+		// the whole batch forever.
+		return vals, nil
+	}
+	return nil, lastErr
+}
+
+// parseStringArrayLenient parses a JSON array of strings, salvaging as many
+// leading elements as possible when the array is truncated (e.g. the model hit
+// the token limit mid-array). Returns an error only when nothing usable parses.
+func parseStringArrayLenient(raw string) ([]string, error) {
+	s := stripFences(raw)
 	var vals []string
-	if err := json.Unmarshal([]byte(stripFences(resp.Content)), &vals); err != nil {
-		slog.Warn("sheet.enrich batch parse failed", "col", col, "finish", resp.FinishReason, "preview", clipStr(resp.Content, 160))
-		return nil, fmt.Errorf("parse (finish=%s): %w", resp.FinishReason, err)
+	if err := json.Unmarshal([]byte(s), &vals); err == nil {
+		return vals, nil
+	}
+	// Stream-decode element by element; stop at the first broken/incomplete one.
+	dec := json.NewDecoder(strings.NewReader(s))
+	// Advance to the opening '['.
+	for {
+		t, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("no JSON array found: %w", err)
+		}
+		if d, ok := t.(json.Delim); ok && d == '[' {
+			break
+		}
+	}
+	for dec.More() {
+		var v string
+		if err := dec.Decode(&v); err != nil {
+			break // truncated mid-element — keep what we have
+		}
+		vals = append(vals, v)
+	}
+	if len(vals) == 0 {
+		return nil, fmt.Errorf("no values parsed")
 	}
 	return vals, nil
 }
