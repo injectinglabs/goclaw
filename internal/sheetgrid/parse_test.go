@@ -92,6 +92,25 @@ func TestRaggedRowsNormalized(t *testing.T) {
 	}
 }
 
+// TestSkipsTitleBlock verifies a styled export with a title + subtitle above the
+// real header parses to the actual data table (the bug: title became the header).
+func TestSkipsTitleBlock(t *testing.T) {
+	raw := [][]string{
+		{"Top 100 World Companies by Market Capitalization"}, // merged title (1 cell)
+		{"Data sourced from CompaniesMarketCap.com"},          // subtitle (1 cell)
+		{"Rank", "Company", "Market Cap"},                     // the real header
+		{"1", "NVIDIA", "$4.96T"},
+		{"2", "Apple", "$4.35T"},
+	}
+	g := gridFromRows("S", raw)
+	if len(g.Columns) != 3 || g.Columns[0] != "Rank" || g.Columns[1] != "Company" {
+		t.Errorf("columns = %v, want [Rank Company Market Cap]", g.Columns)
+	}
+	if g.TotalRows != 2 || g.Rows[0][1] != "NVIDIA" {
+		t.Errorf("rows = %v, want 2 data rows starting NVIDIA", g.Rows)
+	}
+}
+
 // TestUnsupportedType rejects non-spreadsheet extensions.
 func TestUnsupportedType(t *testing.T) {
 	if _, err := Parse("foo.pdf"); err == nil {

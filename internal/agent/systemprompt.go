@@ -681,6 +681,9 @@ func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups ma
 		// as an editable grid; when the user edits it, their next message carries
 		// the new data as a ```sheet-data fenced block.
 		"If a user message contains a fenced ```sheet-data block (JSON with {filename, columns, rows}), the user edited the spreadsheet you delivered. Regenerate that file from EXACTLY that data (rebuild it via exec/openpyxl: row 1 = columns, then each row), keep the prior styling, and deliver_file it again. Do not ask them to re-send the data.",
+		// Spreadsheets render as an interactive editable grid in chat, so keep the
+		// data clean and the reply short.
+		"When you generate a spreadsheet (.xlsx/.csv) to deliver: put the COLUMN HEADERS in the FIRST row and data immediately below — do NOT add title/banner/subtitle rows or merged cells above the header (they break the inline table view and aren't real data). After deliver_file, the file renders as an interactive table for the user, so DO NOT paste the data again as a markdown table or a long row-by-row preview in your reply — a one or two sentence summary (what it contains, row count) is enough.",
 		"",
 	)
 	return lines

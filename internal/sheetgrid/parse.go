@@ -81,13 +81,17 @@ func parseCSV(path string) (*Grid, error) {
 }
 
 // gridFromRows turns a raw [][]string (header + data) into a bounded Grid,
-// normalizing ragged rows to the header width.
+// normalizing ragged rows to the header width. Leading decorative rows (a title
+// banner / subtitle / blank rows that styled exports put above the table) are
+// skipped so the real column-header row is used — otherwise the grid renders
+// with the title as its only column and the data shifted.
 func gridFromRows(sheet string, raw [][]string) *Grid {
 	g := &Grid{Sheet: sheet, Columns: []string{}, Rows: [][]string{}}
 	if len(raw) == 0 {
 		return g
 	}
 
+	raw = raw[headerRowIndex(raw):]
 	header := raw[0]
 	if len(header) > MaxCols {
 		header = header[:MaxCols]
@@ -112,6 +116,33 @@ func gridFromRows(sheet string, raw [][]string) *Grid {
 		g.Rows = append(g.Rows, row)
 	}
 	return g
+}
+
+// headerRowIndex finds the first row that looks like a real column header — the
+// first row (within the first 10) that has at least 2 non-empty cells. Rows
+// before it are decorative (single-cell title/subtitle, blanks). Falls back to
+// row 0 if no such row exists (e.g. a genuine single-column sheet).
+func headerRowIndex(raw [][]string) int {
+	limit := len(raw)
+	if limit > 10 {
+		limit = 10
+	}
+	for i := 0; i < limit; i++ {
+		if nonEmptyCount(raw[i]) >= 2 {
+			return i
+		}
+	}
+	return 0
+}
+
+func nonEmptyCount(row []string) int {
+	n := 0
+	for _, c := range row {
+		if strings.TrimSpace(c) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // Write serializes a (possibly edited) Grid back to a spreadsheet file, chosen
