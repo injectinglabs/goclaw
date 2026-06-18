@@ -161,7 +161,11 @@ func (m *SheetPreviewMethods) handleEnrich(ctx context.Context, client *gateway.
 		return
 	}
 
-	tenantID := store.TenantIDFromContext(ctx)
+	// Identity comes from the WS client, NOT the request context: the router
+	// scopes per-request ctx with TenantID/TenantSlug but does NOT propagate the
+	// user id, so store.UserIDFromContext is empty here. Use client.* instead.
+	tenantID := client.TenantID()
+	userID := client.UserID()
 	// Use the SAME provider+model as the chat agent ("llm-service"/"default"),
 	// which is known to work wherever chat works; fall back to the background
 	// resolver only if that isn't registered. Mirrors the draft-reply path.
@@ -174,15 +178,17 @@ func (m *SheetPreviewMethods) handleEnrich(ctx context.Context, client *gateway.
 		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "no model available to fill columns"))
 		return
 	}
-	// Service-token attribution (same as the agent loop / draft-reply path).
-	actor := map[string]string{"X-Actor-User-ID": store.UserIDFromContext(ctx)}
-	if slug := store.TenantSlugFromContext(ctx); slug != "" {
-		actor["X-Actor-Org-ID"] = slug
+	// Service-token attribution (X-Actor-User-ID/Org-ID) — llm-service 400s
+	// without both. Same as the agent loop / draft-reply path.
+	org := client.TenantSlug()
+	if org == "" {
+		org = tenantID.String()
 	}
+	actor := map[string]string{"X-Actor-User-ID": userID, "X-Actor-Org-ID": org}
 	ctx = providers.WithActorHeaders(ctx, actor)
 
 	grid := p.grid()
-	if err := m.fillColumns(ctx, provider, model, grid, p.EnrichColumns, store.UserIDFromContext(ctx), tenantID); err != nil {
+	if err := m.fillColumns(ctx, provider, model, grid, p.EnrichColumns, userID, tenantID); err != nil {
 		slog.Warn("sheet.enrich failed", "err", err)
 		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "could not fill columns: "+err.Error()))
 		return
