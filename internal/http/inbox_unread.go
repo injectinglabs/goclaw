@@ -25,11 +25,13 @@ type InboxHandler struct {
 	registry    *providers.Registry     // for the reply-draft LLM call (optional)
 	sysConfigs  store.SystemConfigStore // tenant background-provider resolution (optional)
 
-	// Push half (Composio triggers → webhook → WS), wired via EnablePush.
-	webhookSecret string             // Composio webhook signing secret (Svix)
+	// Push half (Composio triggers → composio-mcp socket → internal forward →
+	// WS), wired via EnablePush.
+	pushEnabled   bool               // gate provisioning + internal endpoint
 	pub           bus.EventPublisher // broadcasts inbox.updated
 	tenants       store.TenantStore  // user→tenant for event scoping
-	provisioned   sync.Map           // dedup trigger subscribe (key: user|toolkit|acct)
+	internalToken string             // optional shared token for the internal forward
+	provisioned   sync.Map           // dedup trigger enable (key: user|toolkit|acct)
 }
 
 // NewInboxHandler constructs the inbox handler. registry+sysConfigs power the
@@ -49,8 +51,9 @@ func (h *InboxHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/inbox/mark-read", requireAuth("", h.handleMarkRead))
 	mux.HandleFunc("POST /v1/inbox/draft-reply", requireAuth("", h.handleDraftReply))
 	mux.HandleFunc("POST /v1/inbox/send-reply", requireAuth("", h.handleSendReply))
-	// Inbound Composio trigger deliveries — signature-verified, no auth middleware.
-	mux.HandleFunc("POST /v1/webhooks/composio", h.handleComposioWebhook)
+	// Internal forward from composio-mcp's trigger subscription — token-guarded,
+	// internal network only (no user-auth middleware).
+	mux.HandleFunc("POST /v1/internal/inbox-event", h.handleInternalInboxEvent)
 }
 
 // handleMarkRead marks one message read in the user's mailbox.
@@ -110,7 +113,7 @@ func (h *InboxHandler) handleUnread(w http.ResponseWriter, r *http.Request) {
 
 	// Lazily ensure Composio email triggers exist for this user's mailboxes so
 	// future new mail pushes over WS. Deduped + async — doesn't slow the poll.
-	if h.webhookSecret != "" {
+	if h.pushEnabled {
 		go h.ProvisionTriggers(context.Background(), userID)
 	}
 
