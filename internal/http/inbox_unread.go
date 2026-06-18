@@ -66,6 +66,33 @@ func (h *InboxHandler) RegisterRoutes(mux *http.ServeMux) {
 	// Internal forward from composio-mcp's trigger subscription — token-guarded,
 	// internal network only (no user-auth middleware).
 	mux.HandleFunc("POST /v1/internal/inbox-event", h.handleInternalInboxEvent)
+	// Public, non-sensitive backbone status for confirming the push pipeline
+	// (no auth, no user data) — reports whether inbox push is enabled and proxies
+	// composio-mcp's subscription health.
+	mux.HandleFunc("GET /v1/push/health", h.handlePushHealth)
+}
+
+// handlePushHealth reports the email-push backbone status without auth or user
+// data: whether goclaw has push enabled, plus composio-mcp's subscription state
+// (is the triggers.subscribe socket up, how many active triggers, events seen).
+func (h *InboxHandler) handlePushHealth(w http.ResponseWriter, r *http.Request) {
+	out := map[string]any{"inbox_push_enabled": h.pushEnabled}
+	req, err := http.NewRequestWithContext(r.Context(), "GET", h.composioURL+"/triggers/health", nil)
+	if err == nil {
+		resp, derr := h.httpClient.Do(req)
+		if derr == nil {
+			defer resp.Body.Close()
+			var c map[string]any
+			if json.NewDecoder(resp.Body).Decode(&c) == nil {
+				out["composio"] = c
+			} else {
+				out["composio_error"] = "decode failed"
+			}
+		} else {
+			out["composio_error"] = derr.Error()
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleMarkRead marks one message read in the user's mailbox.
