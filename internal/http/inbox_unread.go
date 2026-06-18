@@ -49,6 +49,7 @@ func NewInboxHandler(composioURL string, registry *providers.Registry, sysConfig
 func (h *InboxHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/inbox/unread", requireAuth("", h.handleUnread))
 	mux.HandleFunc("POST /v1/inbox/mark-read", requireAuth("", h.handleMarkRead))
+	mux.HandleFunc("POST /v1/inbox/delete", requireAuth("", h.handleDelete))
 	mux.HandleFunc("POST /v1/inbox/draft-reply", requireAuth("", h.handleDraftReply))
 	mux.HandleFunc("POST /v1/inbox/send-reply", requireAuth("", h.handleSendReply))
 	// Internal forward from composio-mcp's trigger subscription — token-guarded,
@@ -96,6 +97,44 @@ func (h *InboxHandler) handleMarkRead(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.callComposio(r.Context(), userID, body.AccountID, tool, args); err != nil {
 		slog.Info("inbox.mark_read_failed", "user", userID, "provider", body.Provider, "err", err.Error())
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "mark-read failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleDelete removes one message from the user's mailbox: Gmail → move to
+// trash (reversible), Outlook → delete (moves to Deleted Items).
+// Body: {"provider":"gmail"|"outlook","id":"<message id>","accountId":"<acct>"}.
+func (h *InboxHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
+	userID := store.UserIDFromContext(r.Context())
+	if userID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "no user"})
+		return
+	}
+	var body struct {
+		Provider  string `json:"provider"`
+		ID        string `json:"id"`
+		AccountID string `json:"accountId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider and id required"})
+		return
+	}
+
+	var tool string
+	switch body.Provider {
+	case "gmail":
+		tool = "GMAIL_MOVE_TO_TRASH"
+	case "outlook":
+		tool = "OUTLOOK_DELETE_MESSAGE"
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown provider"})
+		return
+	}
+
+	if _, err := h.callComposio(r.Context(), userID, body.AccountID, tool, map[string]any{"message_id": body.ID}); err != nil {
+		slog.Info("inbox.delete_failed", "user", userID, "provider", body.Provider, "err", err.Error())
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "delete failed"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
