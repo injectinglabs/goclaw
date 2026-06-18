@@ -177,7 +177,7 @@ func (m *SheetPreviewMethods) handleEnrich(ctx context.Context, client *gateway.
 	grid := p.grid()
 	if err := m.fillColumns(ctx, provider, model, grid, p.EnrichColumns, store.UserIDFromContext(ctx), tenantID); err != nil {
 		slog.Warn("sheet.enrich failed", "err", err)
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "could not fill columns"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "could not fill columns: "+err.Error()))
 		return
 	}
 	if err := sheetgrid.Write(abs, grid); err != nil {
@@ -188,40 +188,19 @@ func (m *SheetPreviewMethods) handleEnrich(ctx context.Context, client *gateway.
 	client.SendResponse(protocol.NewOKResponse(req.ID, grid))
 }
 
-// fillColumns asks the model to fill the requested columns for every row and
-// merges the answer into the grid in place.
+// fillColumns fills each requested column for every row with ONE LLM call per
+// column. A per-column JSON ARRAY OF STRINGS is far more compact (and far less
+// likely to truncate) than one giant array-of-objects across all columns, and
+// each call gets a generous max_tokens so 100s of rows fit.
 func (m *SheetPreviewMethods) fillColumns(ctx context.Context, provider providers.Provider, model string, grid *sheetgrid.Grid, cols []string, userID string, tenantID uuid.UUID) error {
-	// Compact the grid for the prompt: send headers + rows as JSON.
-	gridJSON, _ := json.Marshal(map[string]any{"columns": grid.Columns, "rows": grid.Rows})
-	sys := "You fill in missing spreadsheet columns using your knowledge. " +
-		"Return ONLY a JSON array with one object per row, in the SAME ORDER as the input rows. " +
-		"Each object's keys are EXACTLY the requested empty column names; values are your best-known value as a string " +
-		"(use \"\" if genuinely unknown). No prose, no markdown fences."
-	user := fmt.Sprintf("Columns: %s\nEmpty columns to fill: %s\nRows (as a JSON {columns, rows}):\n%s\n\nReturn the JSON array now.",
-		strings.Join(grid.Columns, ", "), strings.Join(cols, ", "), string(gridJSON))
-
-	resp, err := provider.Chat(ctx, providers.ChatRequest{
-		Messages: []providers.Message{{Role: "system", Content: sys}, {Role: "user", Content: user}},
-		Model:    model,
-		Options: map[string]any{
-			providers.OptThinkingLevel: "off",
-			providers.OptUserID:        userID,
-			providers.OptTenantID:      tenantID.String(),
-		},
-	})
-	if err != nil {
-		return err
-	}
-	var filled []map[string]string
-	if err := json.Unmarshal([]byte(stripFences(resp.Content)), &filled); err != nil {
-		return fmt.Errorf("parse fill response: %w", err)
-	}
-	// Map column name → index, appending any requested column not already present.
+	// Ensure every requested column exists + rows are padded to width.
 	colIdx := map[string]int{}
 	for i, c := range grid.Columns {
 		colIdx[c] = i
 	}
+	enrichSet := map[string]bool{}
 	for _, c := range cols {
+		enrichSet[c] = true
 		if _, ok := colIdx[c]; !ok {
 			colIdx[c] = len(grid.Columns)
 			grid.Columns = append(grid.Columns, c)
@@ -229,20 +208,65 @@ func (m *SheetPreviewMethods) fillColumns(ctx context.Context, provider provider
 	}
 	width := len(grid.Columns)
 	for ri := range grid.Rows {
-		// Normalize row width to the (possibly grown) column count.
 		for len(grid.Rows[ri]) < width {
 			grid.Rows[ri] = append(grid.Rows[ri], "")
 		}
-		if ri >= len(filled) {
-			continue
+	}
+
+	// One compact context line per row, built from the EXISTING (non-enrich)
+	// columns so the model can identify each entity.
+	var ctxLines strings.Builder
+	for ri, row := range grid.Rows {
+		var parts []string
+		for ci, cn := range grid.Columns {
+			if enrichSet[cn] {
+				continue
+			}
+			if ci < len(row) && strings.TrimSpace(row[ci]) != "" {
+				parts = append(parts, cn+"="+row[ci])
+			}
 		}
-		for _, c := range cols {
-			if v, ok := filled[ri][c]; ok {
-				grid.Rows[ri][colIdx[c]] = v
+		fmt.Fprintf(&ctxLines, "%d) %s\n", ri+1, strings.Join(parts, " | "))
+	}
+
+	for _, col := range cols {
+		sys := "You fill ONE spreadsheet column using your knowledge. Return ONLY a JSON array of strings — exactly one value per row, in the SAME ORDER as the rows given. Use \"\" when genuinely unknown. No prose, no markdown fences, no keys — just [\"v1\",\"v2\",...]."
+		user := fmt.Sprintf("There are %d rows. For each, give the value of the column %q.\n\nRows:\n%s\nReturn a JSON array of exactly %d strings now.",
+			len(grid.Rows), col, ctxLines.String(), len(grid.Rows))
+
+		resp, err := provider.Chat(ctx, providers.ChatRequest{
+			Messages: []providers.Message{{Role: "system", Content: sys}, {Role: "user", Content: user}},
+			Model:    model,
+			Options: map[string]any{
+				providers.OptThinkingLevel: "off",
+				providers.OptMaxTokens:     16000, // room for hundreds of short values
+				providers.OptUserID:        userID,
+				providers.OptTenantID:      tenantID.String(),
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("llm fill %q: %w", col, err)
+		}
+		var vals []string
+		if err := json.Unmarshal([]byte(stripFences(resp.Content)), &vals); err != nil {
+			slog.Warn("sheet.enrich parse failed", "col", col, "finish", resp.FinishReason, "preview", clipStr(resp.Content, 200))
+			return fmt.Errorf("parse fill for %q (finish=%s): %w", col, resp.FinishReason, err)
+		}
+		ci := colIdx[col]
+		for ri := range grid.Rows {
+			if ri < len(vals) {
+				grid.Rows[ri][ci] = vals[ri]
 			}
 		}
 	}
 	return nil
+}
+
+func clipStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 // stripFences removes a leading ```json / ``` fence and trailing ``` if the

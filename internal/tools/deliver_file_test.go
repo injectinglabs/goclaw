@@ -75,6 +75,23 @@ func TestDeliverFile_BasenameFallback(t *testing.T) {
 	}
 }
 
+// TestDeliverFile_RejectsScriptFile verifies code/scripts are never attached —
+// the user wants the output, not the generator.
+func TestDeliverFile_RejectsScriptFile(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "generate_sheet.py"), []byte("import pandas"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tool := NewDeliverFileTool(ws, true)
+	res := tool.Execute(context.Background(), map[string]any{"path": "generate_sheet.py"})
+	if len(res.Media) != 0 {
+		t.Errorf("script file must NOT attach media, got %+v", res.Media)
+	}
+	if res.IsError {
+		t.Errorf("should be a soft skip, not an error")
+	}
+}
+
 // TestDeliverFile_MissingFile verifies a clear error (not a silent attach) when
 // the path doesn't exist — guides the model to create it first.
 func TestDeliverFile_MissingFile(t *testing.T) {

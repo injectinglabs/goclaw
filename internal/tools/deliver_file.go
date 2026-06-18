@@ -119,6 +119,14 @@ func (t *DeliverFileTool) Execute(ctx context.Context, args map[string]any) *Res
 	if fi.IsDir() {
 		return ErrorResult(fmt.Sprintf("%s is a directory, not a file", path))
 	}
+	// Never surface code/scripts to the user — they want the result, not the
+	// code that produced it. (Hard guard; the prompt nudge alone wasn't enough.)
+	if isScriptFile(resolved) {
+		return SilentResult(fmt.Sprintf(
+			"Not delivered: %s is a script/code file. Only deliver the final user-facing output (the .xlsx/.docx/.pdf/.csv/image), never the code that generated it.",
+			filepath.Base(resolved),
+		))
+	}
 
 	// Mirror to the durable media store when wired, so the attachment survives
 	// the workspace cleanup cron; otherwise deliver the local path directly.
@@ -139,6 +147,18 @@ func (t *DeliverFileTool) Execute(ctx context.Context, args map[string]any) *Res
 		dm.Mark(deliveredPath)
 	}
 	return result
+}
+
+// scriptExts are code/script file types we never attach to the chat as a
+// user-facing deliverable (the user wants the output, not the generator).
+var scriptExts = map[string]bool{
+	".py": true, ".js": true, ".mjs": true, ".cjs": true, ".ts": true, ".tsx": true,
+	".jsx": true, ".sh": true, ".bash": true, ".zsh": true, ".rb": true, ".pl": true,
+	".php": true, ".ps1": true, ".lua": true, ".ipynb": true,
+}
+
+func isScriptFile(name string) bool {
+	return scriptExts[strings.ToLower(filepath.Ext(name))]
 }
 
 // findInWorkspace returns the first file named `name` anywhere under root, or ""
