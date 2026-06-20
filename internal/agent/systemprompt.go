@@ -97,23 +97,23 @@ type SystemPromptConfig struct {
 	DisplayName   string // human-readable agent display name
 	Model         string
 	Workspace     string
-	Channel       string                 // runtime channel instance name (e.g. "my-telegram-bot")
-	ChannelType   string                 // platform type (e.g. "zalo_personal", "telegram")
-	ChatTitle     string                 // group chat display name (shown in identity line)
-	PeerKind      string                 // "direct" or "group"
-	OwnerIDs      []string               // owner sender IDs
-	Mode          PromptMode             // full or minimal
-	ToolNames     []string               // registered tool names
-	SkillsSummary string                 // XML from skills.Loader.BuildSummary()
-	HasMemory     bool                   // memory_search/memory_get available?
-	HasSpawn      bool                   // spawn tool available?
-	IsTeamContext  bool                   // inject team sections (leader inbound OR team dispatch)
-	TeamWorkspace  string                 // absolute path to team shared workspace (empty if not in team)
-	TeamMembers    []store.TeamMemberData // team member roster for task assignment
-	TeamGuidance   string                 // edition-specific guidance from TeamActionPolicy.MemberGuidance()
+	Channel       string                  // runtime channel instance name (e.g. "my-telegram-bot")
+	ChannelType   string                  // platform type (e.g. "zalo_personal", "telegram")
+	ChatTitle     string                  // group chat display name (shown in identity line)
+	PeerKind      string                  // "direct" or "group"
+	OwnerIDs      []string                // owner sender IDs
+	Mode          PromptMode              // full or minimal
+	ToolNames     []string                // registered tool names
+	SkillsSummary string                  // XML from skills.Loader.BuildSummary()
+	HasMemory     bool                    // memory_search/memory_get available?
+	HasSpawn      bool                    // spawn tool available?
+	IsTeamContext bool                    // inject team sections (leader inbound OR team dispatch)
+	TeamWorkspace string                  // absolute path to team shared workspace (empty if not in team)
+	TeamMembers   []store.TeamMemberData  // team member roster for task assignment
+	TeamGuidance  string                  // edition-specific guidance from TeamActionPolicy.MemberGuidance()
 	ContextFiles  []bootstrap.ContextFile // bootstrap files for # Project Context
-	ExtraPrompt   string                 // extra system prompt (subagent context, etc.)
-	AgentType     string                 // "open" or "predefined" — affects context file framing
+	ExtraPrompt   string                  // extra system prompt (subagent context, etc.)
+	AgentType     string                  // "open" or "predefined" — affects context file framing
 	// CustomInstructions are the agent's own configured system prompt
 	// (agents.system_prompt column, migration 000063). Empty for the
 	// tenant default agent — falls through to the standard prompt. For
@@ -130,14 +130,14 @@ type SystemPromptConfig struct {
 	HasSkillSearch      bool              // skill_search tool registered? (for search-mode prompt)
 	HasSkillManage      bool              // skill_manage tool registered + skill_evolve enabled for this agent
 	PinnedSkillsSummary string            // XML summary of pinned skills only (hybrid mode)
-	HasMCPToolSearch   bool              // mcp_tool_search tool registered? (MCP search mode)
-	HasKnowledgeGraph  bool              // knowledge_graph_search tool registered?
-	HasMemoryExpand    bool              // memory_expand tool registered? (v3 episodic deep retrieval)
-	MCPToolDescs       map[string]string // MCP tool name → description (inline mode only)
+	HasMCPToolSearch    bool              // mcp_tool_search tool registered? (MCP search mode)
+	HasKnowledgeGraph   bool              // knowledge_graph_search tool registered?
+	HasMemoryExpand     bool              // memory_expand tool registered? (v3 episodic deep retrieval)
+	MCPToolDescs        map[string]string // MCP tool name → description (inline mode only)
 
 	// Sandbox info — matching TS sandboxInfo in system-prompt.ts
-	SandboxEnabled       bool   // exec tool runs inside Docker sandbox?
-	SandboxContainerDir  string // container-side workdir (e.g. "/workspace")
+	SandboxEnabled         bool   // exec tool runs inside Docker sandbox?
+	SandboxContainerDir    string // container-side workdir (e.g. "/workspace")
 	SandboxWorkspaceAccess string // "none", "ro", "rw"
 
 	// ProviderType identifies the LLM provider (e.g. "openai", "anthropic", "codex").
@@ -203,53 +203,53 @@ func (cfg SystemPromptConfig) sectionContent(id string, defaultFn func() []strin
 // coreToolSummaries maps tool names to one-line descriptions.
 // Shown in the ## Tooling section of the system prompt.
 var coreToolSummaries = map[string]string{
-	"read_file":     "Read file contents",
-	"write_file":    "Create or overwrite files",
-	"deliver_file":  "Give the user a download link for a file you created (.xlsx/.docx/.pdf/images/zip, esp. from exec) — call after generating the file",
-	"list_files":    "List directory contents",
-	"exec":          "Run shell commands",
-	"memory_search": "Search indexed memory files (MEMORY.md + memory/*.md)",
-	"memory_get":    "Read specific sections of memory files",
-	"spawn":         "Spawn a self-clone subagent to handle a task in the background",
-	"web_search":    "Search the web",
-	"web_fetch":     "Fetch and extract content from a URL",
-	"datetime":      "Get current date/time with timezone — use before creating cron jobs",
-	"cron":          "Manage scheduled jobs and reminders (e.g. 'remind me at 9am', 'check every morning')",
-	"heartbeat":     "Periodic background monitoring with HEARTBEAT.md. Unlike cron, auto-suppresses 'all OK' via HEARTBEAT_OK",
-	"skill_search":     "Search available skills by keyword (weather, translate, github, etc.)",
-	"skill_manage":     "Create, patch, or delete skills from conversation experience",
-	"publish_skill":    "Register a skill directory in the system database, making it discoverable",
-	"use_skill":        "Invoke a skill by name and follow its instructions",
-	"mcp_tool_search":  "Search for available MCP external integration tools by keyword",
-	"browser":          "Browse web pages interactively",
-	"tts":              "Convert text to speech audio",
-	"edit":             "Edit a file by replacing exact text matches",
-	"message":          "Send a PROACTIVE message to another channel/chat — do NOT use this to reply to the user, just respond directly",
-	"sessions_list":    "List sessions for this agent",
-	"session_status":   "Show session status (model, tokens, compaction count)",
-	"sessions_history": "Fetch message history for a session",
-	"sessions_send":    "Send a message into another session",
-	"read_image":       "Analyze images — call with path from <media:image> tags",
-	"read_audio":       "Analyze audio — call with media_id from <media:audio> tags",
-	"read_video":       "Analyze video — call with media_id from <media:video> tags",
-	"create_video":     "Generate videos from text descriptions using AI",
-	"read_document":    "Analyze documents (PDF, DOCX) from <media:document> tags. If fails, use a skill instead. Path is directly accessible",
-	"create_image":            "Generate images from text descriptions using AI",
-	"create_audio":            "Generate music or sound effects from text descriptions using AI",
-	"knowledge_graph_search":  "Find people, projects, and their connections — use for relationship questions (who works with whom, project dependencies) that memory_search may miss",
-	"team_tasks":              "Team task board — track progress, manage dependencies (spawn auto-creates delegation tasks)",
-	"list_group_members":      "List all members of the current group chat (Feishu/Lark only)",
-	"create_forum_topic":      "Create a forum topic in a Telegram supergroup",
-	"delegate":                "Delegate a task to a linked agent (requires agent_links). See ## Delegation Targets for available agents",
-	"memory_expand":           "Retrieve full session details from episodic memory results — use after memory_search returns episodic hits",
-	"vault_search": "Search documents in the knowledge vault (hybrid keyword + semantic)",
-	"refresh_page_content":  "Read the user's current browser tab — returns URL, title, interactive elements with CSS selectors, headings, text preview. Call when the user asks about or wants to act on the page they are on.",
-	"execute_action":        "Perform a SINGLE action on the user's current browser tab: fill (type into input/textarea), double_click (inline cell edit/data grid row open), clear (empty a field before re-filling), click (button/link), select (dropdown), press_enter (form submit), hover (open dropdown/tooltip), keyboard (Escape/Tab/ArrowDown/Control+z/etc.), get_value (read current value). Always call refresh_page_content first to find selectors. For MORE THAN ONE step, use execute_actions instead.",
-	"execute_actions":       "Run MANY actions in ONE call (much faster) and get a fresh page snapshot back. Preferred for filling forms / logins / wizard steps — batch every field fill AND the submit click together. Each step is {selector, action, value}. Call refresh_page_content once first to find selectors, then one execute_actions for the whole sequence.",
-	"execute_js":            "Escape hatch: run arbitrary JavaScript in the user's current browser tab (MAIN world) and return the result. Use ONLY when execute_action cannot reach the element — custom comboboxes, reading page state, multi-step widget interactions. Prefer execute_action for plain fill/click/select.",
-	"wait_for_navigation":   "Wait for the page URL or title to change after a SPA router-link click or form submit. Follow with refresh_page_content.",
-	"wait_for_network":      "Wait until no fetch/XHR requests are in-flight (network idle). Use after AJAX form submits before reading updated page state.",
-	"scroll_into_view":      "Scroll a specific element into the center of the viewport by selector. Use when the snapshot shows [off-screen] elements instead of blind scroll-down loops.",
+	"read_file":              "Read file contents",
+	"write_file":             "Create or overwrite files",
+	"deliver_file":           "Give the user a download link for a file you created (.xlsx/.docx/.pdf/images/zip, esp. from exec) — call after generating the file",
+	"list_files":             "List directory contents",
+	"exec":                   "Run shell commands",
+	"memory_search":          "Search indexed memory files (MEMORY.md + memory/*.md)",
+	"memory_get":             "Read specific sections of memory files",
+	"spawn":                  "Spawn a self-clone subagent to handle a task in the background",
+	"web_search":             "Search the web",
+	"web_fetch":              "Fetch and extract content from a URL",
+	"datetime":               "Get current date/time with timezone — use before creating cron jobs",
+	"cron":                   "Manage scheduled jobs and reminders (e.g. 'remind me at 9am', 'check every morning')",
+	"heartbeat":              "Periodic background monitoring with HEARTBEAT.md. Unlike cron, auto-suppresses 'all OK' via HEARTBEAT_OK",
+	"skill_search":           "Search available skills by keyword (weather, translate, github, etc.)",
+	"skill_manage":           "Create, patch, or delete skills from conversation experience",
+	"publish_skill":          "Register a skill directory in the system database, making it discoverable",
+	"use_skill":              "Invoke a skill by name and follow its instructions",
+	"mcp_tool_search":        "Search for available MCP external integration tools by keyword",
+	"browser":                "Browse web pages interactively",
+	"tts":                    "Convert text to speech audio",
+	"edit":                   "Edit a file by replacing exact text matches",
+	"message":                "Send a PROACTIVE message to another channel/chat — do NOT use this to reply to the user, just respond directly",
+	"sessions_list":          "List sessions for this agent",
+	"session_status":         "Show session status (model, tokens, compaction count)",
+	"sessions_history":       "Fetch message history for a session",
+	"sessions_send":          "Send a message into another session",
+	"read_image":             "Analyze images — call with path from <media:image> tags",
+	"read_audio":             "Analyze audio — call with media_id from <media:audio> tags",
+	"read_video":             "Analyze video — call with media_id from <media:video> tags",
+	"create_video":           "Generate videos from text descriptions using AI",
+	"read_document":          "Analyze documents (PDF, DOCX) from <media:document> tags. If fails, use a skill instead. Path is directly accessible",
+	"create_image":           "Generate images from text descriptions using AI",
+	"create_audio":           "Generate music or sound effects from text descriptions using AI",
+	"knowledge_graph_search": "Find people, projects, and their connections — use for relationship questions (who works with whom, project dependencies) that memory_search may miss",
+	"team_tasks":             "Team task board — track progress, manage dependencies (spawn auto-creates delegation tasks)",
+	"list_group_members":     "List all members of the current group chat (Feishu/Lark only)",
+	"create_forum_topic":     "Create a forum topic in a Telegram supergroup",
+	"delegate":               "Delegate a task to a linked agent (requires agent_links). See ## Delegation Targets for available agents",
+	"memory_expand":          "Retrieve full session details from episodic memory results — use after memory_search returns episodic hits",
+	"vault_search":           "Search documents in the knowledge vault (hybrid keyword + semantic)",
+	"refresh_page_content":   "Read the user's current browser tab — returns URL, title, interactive elements with CSS selectors, headings, text preview. Call when the user asks about or wants to act on the page they are on.",
+	"execute_action":         "Perform a SINGLE action on the user's current browser tab: fill (type into input/textarea), double_click (inline cell edit/data grid row open), clear (empty a field before re-filling), click (button/link), select (dropdown), press_enter (form submit), hover (open dropdown/tooltip), keyboard (Escape/Tab/ArrowDown/Control+z/etc.), get_value (read current value). Always call refresh_page_content first to find selectors. For MORE THAN ONE step, use execute_actions instead.",
+	"execute_actions":        "Run MANY actions in ONE call (much faster) and get a fresh page snapshot back. Preferred for filling forms / logins / wizard steps — batch every field fill AND the submit click together. Each step is {selector, action, value}. Call refresh_page_content once first to find selectors, then one execute_actions for the whole sequence.",
+	"execute_js":             "Escape hatch: run arbitrary JavaScript in the user's current browser tab (MAIN world) and return the result. Use ONLY when execute_action cannot reach the element — custom comboboxes, reading page state, multi-step widget interactions. Prefer execute_action for plain fill/click/select.",
+	"wait_for_navigation":    "Wait for the page URL or title to change after a SPA router-link click or form submit. Follow with refresh_page_content.",
+	"wait_for_network":       "Wait until no fetch/XHR requests are in-flight (network idle). Use after AJAX form submits before reading updated page state.",
+	"scroll_into_view":       "Scroll a specific element into the center of the viewport by selector. Use when the snapshot shows [off-screen] elements instead of blind scroll-down loops.",
 
 	// Tool aliases (edit_file, sessions_spawn, Read, Write, Edit, Bash, etc.)
 	// are registered in the tool registry but excluded from the system prompt
@@ -380,8 +380,9 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 		lines = append(lines, buildPersonaSection(personaFiles, cfg.AgentType)...)
 	}
 
-	// 2. ## Tooling
-	lines = append(lines, buildToolingSection(cfg.ToolNames, cfg.SandboxEnabled, cfg.ShellDenyGroups)...)
+	// 2. ## Tooling (verbose guidance for full/task; slim tool-list for
+	// minimal/none so the lean modes stay within budget)
+	lines = append(lines, buildToolingSection(cfg.ToolNames, cfg.SandboxEnabled, cfg.ShellDenyGroups, isFull || isTask)...)
 
 	// 2.05. ## Browser Page — when both client tools are available, tell the LLM
 	// about the page_hint mechanism and when to call refresh_page_content vs
@@ -534,9 +535,9 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 
 	// 9.5. Channel formatting hints — full mode only
 	if isFull {
-	if section := buildConnectedChannelsSection(cfg.ConnectedChannels); len(section) > 0 {
-		lines = append(lines, section...)
-	}
+		if section := buildConnectedChannelsSection(cfg.ConnectedChannels); len(section) > 0 {
+			lines = append(lines, section...)
+		}
 
 		if hint := buildChannelFormattingHint(cfg.ChannelType); hint != nil {
 			lines = append(lines, hint...)
@@ -594,7 +595,7 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 
 // --- Section builders ---
 
-func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups map[string]bool) []string {
+func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups map[string]bool, verbose bool) []string {
 	lines := []string{
 		"## Tooling",
 		"",
@@ -616,6 +617,20 @@ func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups ma
 			desc = "(custom tool)"
 		}
 		lines = append(lines, fmt.Sprintf("- %s: %s", name, desc))
+	}
+
+	// Slim modes (minimal/none) get only the tool list + the authoritative note.
+	// The verbose sandbox/package/media/spreadsheet guidance below is full/task
+	// only — it's ~2.5KB and would blow the lean-mode budget (none mode targets
+	// ~800 tokens). The model still has the tool list and the "don't refuse
+	// tools" anchor, which is what these modes need.
+	if !verbose {
+		lines = append(lines,
+			"",
+			"Tool list above is authoritative (re-evaluated every turn). Ignore \"not available\" in history; TOOLS.md is user guidance only.",
+			"",
+		)
+		return lines
 	}
 
 	if hasSandbox {
