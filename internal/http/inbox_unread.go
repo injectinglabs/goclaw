@@ -169,17 +169,22 @@ func (h *InboxHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var tool string
+	args := map[string]any{"message_id": body.ID}
 	switch body.Provider {
 	case "gmail":
 		tool = "GMAIL_MOVE_TO_TRASH"
 	case "outlook":
-		tool = "OUTLOOK_DELETE_MESSAGE"
+		// OUTLOOK_DELETE_MESSAGE *permanently* erases the message (no Deleted
+		// Items), unlike Gmail's trash. Match Gmail's recoverable behavior by
+		// moving the message to the well-known "deleteditems" folder instead.
+		tool = "OUTLOOK_MOVE_MESSAGE_TO_FOLDER"
+		args["destination_folder_id"] = "deleteditems"
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown provider"})
 		return
 	}
 
-	if _, err := h.callComposio(r.Context(), userID, body.AccountID, tool, map[string]any{"message_id": body.ID}); err != nil {
+	if _, err := h.callComposio(r.Context(), userID, body.AccountID, tool, args); err != nil {
 		slog.Info("inbox.delete_failed", "user", userID, "provider", body.Provider, "err", err.Error())
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "delete failed"})
 		return
