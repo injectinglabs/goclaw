@@ -79,6 +79,17 @@ func clientCanReceiveEvent(c *Client, event bus.Event) bool {
 		return false
 	}
 
+	// Inbox push (Composio email trigger fired): scope to the mailbox owner so
+	// other team-org members don't get another user's new-mail ping. Same
+	// pattern as cron.delivered — checked BEFORE the admin-bypass so admins in
+	// the same team don't see it either.
+	if event.Name == protocol.EventInboxUpdated {
+		if uid := extractMapField(event.Payload, "user_id"); uid != "" {
+			return uid == c.userID
+		}
+		return false // fail-closed
+	}
+
 	// Admin sees everything (when not tenant-scoped, handled above).
 	if permissions.HasMinRole(c.role, permissions.RoleAdmin) {
 		return true

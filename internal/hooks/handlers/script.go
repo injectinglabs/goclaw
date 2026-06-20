@@ -146,22 +146,20 @@ func (h *ScriptHandler) Execute(ctx context.Context, cfg hooks.HookConfig, ev ho
 		return hooks.DecisionError, sanitizeError(err)
 	}
 
-	// Watchdog: interrupt the runtime on ctx cancellation. done closes on normal
-	// exit so the goroutine always returns.
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			rt.Interrupt("context cancelled")
-		case <-done:
-		}
-	}()
-
+	// Run the script in its own goroutine and enforce a HARD wall-clock deadline.
+	// goja's Interrupt only fires BETWEEN VM instructions, so a single
+	// non-interruptible native call (e.g. `"x".repeat(1e9)`) keeps running until
+	// it finishes regardless of the interrupt. We both interrupt AND stop waiting
+	// when ctx expires: the goroutine is abandoned (it exits once the native op
+	// returns, or when the process/test binary exits). Without this a hostile
+	// script could block the Execute call — and any caller — past the deadline.
 	var (
 		result  goja.Value
 		execErr error
 	)
-	func() {
+	evalDone := make(chan struct{})
+	go func() {
+		defer close(evalDone)
 		defer func() {
 			if r := recover(); r != nil {
 				execErr = fmt.Errorf("script panic: %v", r)
@@ -178,7 +176,16 @@ func (h *ScriptHandler) Execute(ctx context.Context, cfg hooks.HookConfig, ev ho
 		}
 		result, execErr = handleFn(goja.Undefined(), rt.Get("event"))
 	}()
-	close(done)
+
+	select {
+	case <-evalDone:
+		// Normal completion (or goja returned after an interrupt for
+		// interruptible work like loops). Safe to read result/execErr — the
+		// goroutine wrote them before closing evalDone.
+	case <-ctx.Done():
+		rt.Interrupt("context deadline exceeded") // stop interruptible work; native ops unwind on their own
+		return hooks.DecisionTimeout, ctx.Err()
+	}
 
 	if execErr != nil {
 		if ctx.Err() != nil {

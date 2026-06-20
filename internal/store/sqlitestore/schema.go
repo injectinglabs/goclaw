@@ -16,7 +16,7 @@ var schemaSQL string
 
 // SchemaVersion is the current SQLite schema version.
 // Bump this when adding new migration steps below.
-const SchemaVersion = 25
+const SchemaVersion = 26
 
 // migrations maps version → SQL to apply when upgrading FROM that version.
 // schema.sql always represents the LATEST full schema (for fresh DBs).
@@ -508,6 +508,18 @@ CREATE TRIGGER IF NOT EXISTS trg_vault_docs_scope_consistency_upd
   BEGIN
     SELECT RAISE(ABORT, 'vault_documents_scope_consistency violation');
   END;`,
+
+	// Version 25 → 26: push_subscriptions table (mirrors PG migration 000078).
+	25: `CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id         TEXT NOT NULL PRIMARY KEY,
+    tenant_id  TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    endpoint   TEXT NOT NULL UNIQUE,
+    p256dh     TEXT NOT NULL,
+    auth       TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id);`,
 }
 
 // addHooksTables is the SQLite incremental migration for schema v19 → v20.

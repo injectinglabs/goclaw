@@ -409,6 +409,15 @@ func wireExtras(
 			}
 		}
 	}
+	// deliver_file gets the same durable media-store hook so delivered files
+	// (e.g. exec-generated spreadsheets) survive the workspace cleanup cron.
+	if mediaStore != nil {
+		if dt, ok := toolsReg.Get("deliver_file"); ok {
+			if df, ok := dt.(*tools.DeliverFileTool); ok {
+				df.SetMediaUploadFunc(mediaStore.SaveFile)
+			}
+		}
+	}
 	if editTool, ok := toolsReg.Get("edit"); ok {
 		if ia, ok := editTool.(tools.InterceptorAware); ok {
 			if contextFileInterceptor != nil {

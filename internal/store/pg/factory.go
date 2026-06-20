@@ -61,5 +61,6 @@ func NewPGStores(cfg store.StoreConfig) (*store.Stores, error) {
 		EvolutionSuggestions:  NewPGEvolutionSuggestionStore(db),
 		Hooks:                 NewPGHookStore(db),
 		Reminders:             NewPGReminderStore(db),
+		PushSubscriptions:     NewPGPushSubscriptionStore(db),
 	}, nil
 }

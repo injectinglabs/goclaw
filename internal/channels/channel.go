@@ -76,10 +76,11 @@ const (
 	TypeFeishu       = "feishu"
 	TypePancake      = "pancake"
 	TypeSlack        = "slack"
-	TypeTelegram     = "telegram"
-	TypeWhatsApp     = "whatsapp"
-	TypeZaloOA       = "zalo_oa"
-	TypeZaloPersonal = "zalo_personal"
+	TypeTelegram      = "telegram"
+	TypeWhatsApp      = "whatsapp"
+	TypeWhatsAppCloud = "whatsapp_cloud" // official Meta Cloud API (vs whatsmeow)
+	TypeZaloOA        = "zalo_oa"
+	TypeZaloPersonal  = "zalo_personal"
 )
 
 // Channel defines the interface that all channel implementations must satisfy.

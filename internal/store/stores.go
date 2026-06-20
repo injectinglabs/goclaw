@@ -44,4 +44,5 @@ type Stores struct {
 	// Callers: type-assert to hooks.HookStore before use.
 	Hooks any
 	Reminders ReminderStore
+	PushSubscriptions PushSubscriptionStore
 }

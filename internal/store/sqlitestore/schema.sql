@@ -1390,6 +1390,22 @@ CREATE TABLE IF NOT EXISTS system_configs (
 CREATE INDEX IF NOT EXISTS idx_system_configs_tenant ON system_configs(tenant_id);
 
 -- ============================================================
+-- Table: push_subscriptions
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id         TEXT NOT NULL PRIMARY KEY,
+    tenant_id  TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    endpoint   TEXT NOT NULL UNIQUE,
+    p256dh     TEXT NOT NULL,
+    auth       TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id);
+
+-- ============================================================
 -- Table: subagent_tasks
 -- ============================================================
 

@@ -27,6 +27,7 @@ import (
 	slackchannel "github.com/nextlevelbuilder/goclaw/internal/channels/slack"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/telegram"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/whatsapp"
+	whatsappcloud "github.com/nextlevelbuilder/goclaw/internal/channels/whatsapp_cloud"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/zalo"
 	zalopersonal "github.com/nextlevelbuilder/goclaw/internal/channels/zalo/personal"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
@@ -473,6 +474,9 @@ func runGateway() {
 	// register a webhook instead of falling back to polling. The HTTP route is
 	// mounted later in StartGateway (gated on WebhookConfigured()).
 	telegram.ConfigureWebhook(cfg.Gateway.PublicWebhookBase, cfg.Gateway.Token)
+	// WhatsApp Cloud (official Meta API) uses the same public base to build the
+	// callback URL we surface to the user; the route is mounted in StartGateway.
+	whatsappcloud.ConfigureWebhook(cfg.Gateway.PublicWebhookBase)
 
 	// Load channel instances from DB.
 	var instanceLoader *channels.InstanceLoader
@@ -487,6 +491,7 @@ func runGateway() {
 		instanceLoader.RegisterFactory(channels.TypeZaloOA, zalo.Factory)
 		instanceLoader.RegisterFactory(channels.TypeZaloPersonal, zalopersonal.FactoryWithPendingStore(pgStores.PendingMessages))
 		instanceLoader.RegisterFactory(channels.TypeWhatsApp, whatsapp.FactoryWithDBAudio(pgStores.DB, pgStores.PendingMessages, "pgx", audioMgr, pgStores.BuiltinTools))
+		instanceLoader.RegisterFactory(channels.TypeWhatsAppCloud, whatsappcloud.Factory)
 		instanceLoader.RegisterFactory(channels.TypeSlack, slackchannel.FactoryWithPendingStore(pgStores.PendingMessages))
 		instanceLoader.RegisterFactory(channels.TypeFacebook, facebook.Factory)
 		instanceLoader.RegisterFactory(channels.TypePancake, pancake.Factory)

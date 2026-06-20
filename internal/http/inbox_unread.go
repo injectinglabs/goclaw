@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -20,8 +22,32 @@ import (
 type InboxHandler struct {
 	composioURL string // base URL of composio-mcp, e.g. http://composio-mcp:9300
 	httpClient  *http.Client
-	registry    *providers.Registry    // for the reply-draft LLM call (optional)
+	registry    *providers.Registry     // for the reply-draft LLM call (optional)
 	sysConfigs  store.SystemConfigStore // tenant background-provider resolution (optional)
+
+	// Push half (Composio triggers → composio-mcp socket → internal forward →
+	// WS), wired via EnablePush.
+	pushEnabled   bool               // gate provisioning + internal endpoint
+	pub           bus.EventPublisher // broadcasts inbox.updated
+	tenants       store.TenantStore  // user→tenant for event scoping
+	internalToken string             // optional shared token for the internal forward
+	provisioned   sync.Map           // dedup trigger enable (key: user|toolkit|acct)
+
+	// reminders, when set, lets /v1/inbox/unread also return the user's unread
+	// reminder count so the toolbar badge matches the in-panel bell (which sums
+	// unread emails + reminders). Wired via SetReminders.
+	reminders store.ReminderStore
+
+	// pushSender, when set, delivers a Web Push notification to the user's
+	// subscribed browsers on each new-mail event (best-effort). Wired via
+	// SetPushSender.
+	pushSender func(ctx context.Context, userID string, payload []byte)
+}
+
+// SetPushSender wires a Web Push delivery callback invoked from pushInboxUpdated
+// on each new-mail event. Best-effort; nil disables Web Push delivery.
+func (h *InboxHandler) SetPushSender(fn func(ctx context.Context, userID string, payload []byte)) {
+	h.pushSender = fn
 }
 
 // NewInboxHandler constructs the inbox handler. registry+sysConfigs power the
@@ -35,12 +61,48 @@ func NewInboxHandler(composioURL string, registry *providers.Registry, sysConfig
 	}
 }
 
+// SetReminders wires the reminder store so /v1/inbox/unread can include the
+// user's unread reminder count (for the unified toolbar badge). Optional.
+func (h *InboxHandler) SetReminders(rs store.ReminderStore) { h.reminders = rs }
+
 // RegisterRoutes registers the inbox routes on the given mux.
 func (h *InboxHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/inbox/unread", requireAuth("", h.handleUnread))
 	mux.HandleFunc("POST /v1/inbox/mark-read", requireAuth("", h.handleMarkRead))
+	mux.HandleFunc("POST /v1/inbox/delete", requireAuth("", h.handleDelete))
+	mux.HandleFunc("POST /v1/inbox/email", requireAuth("", h.handleFetchEmail))
 	mux.HandleFunc("POST /v1/inbox/draft-reply", requireAuth("", h.handleDraftReply))
 	mux.HandleFunc("POST /v1/inbox/send-reply", requireAuth("", h.handleSendReply))
+	// Internal forward from composio-mcp's trigger subscription — token-guarded,
+	// internal network only (no user-auth middleware).
+	mux.HandleFunc("POST /v1/internal/inbox-event", h.handleInternalInboxEvent)
+	// Public, non-sensitive backbone status for confirming the push pipeline
+	// (no auth, no user data) — reports whether inbox push is enabled and proxies
+	// composio-mcp's subscription health.
+	mux.HandleFunc("GET /v1/push/health", h.handlePushHealth)
+}
+
+// handlePushHealth reports the email-push backbone status without auth or user
+// data: whether goclaw has push enabled, plus composio-mcp's subscription state
+// (is the triggers.subscribe socket up, how many active triggers, events seen).
+func (h *InboxHandler) handlePushHealth(w http.ResponseWriter, r *http.Request) {
+	out := map[string]any{"inbox_push_enabled": h.pushEnabled}
+	req, err := http.NewRequestWithContext(r.Context(), "GET", h.composioURL+"/triggers/health", nil)
+	if err == nil {
+		resp, derr := h.httpClient.Do(req)
+		if derr == nil {
+			defer resp.Body.Close()
+			var c map[string]any
+			if json.NewDecoder(resp.Body).Decode(&c) == nil {
+				out["composio"] = c
+			} else {
+				out["composio_error"] = "decode failed"
+			}
+		} else {
+			out["composio_error"] = derr.Error()
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleMarkRead marks one message read in the user's mailbox.
@@ -71,9 +133,15 @@ func (h *InboxHandler) handleMarkRead(w http.ResponseWriter, r *http.Request) {
 			"remove_label_ids": []string{"UNREAD"},
 		}
 	case "outlook":
-		tool, args = "OUTLOOK_UPDATE_MESSAGE", map[string]any{
-			"message_id": body.ID,
-			"is_read":    true,
+		// No plain OUTLOOK_UPDATE_MESSAGE exists in the catalog; the message
+		// update is folder-scoped. Verified params: user_id + mail_folder_id +
+		// message_id (required) and isRead (camelCase). The unread list is read
+		// from the inbox, so the message lives in the "inbox" well-known folder.
+		tool, args = "OUTLOOK_UPDATE_USER_MAIL_FOLDER_MESSAGE", map[string]any{
+			"user_id":        "me",
+			"mail_folder_id": "inbox",
+			"message_id":     body.ID,
+			"isRead":         true,
 		}
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown provider"})
@@ -83,6 +151,54 @@ func (h *InboxHandler) handleMarkRead(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.callComposio(r.Context(), userID, body.AccountID, tool, args); err != nil {
 		slog.Info("inbox.mark_read_failed", "user", userID, "provider", body.Provider, "err", err.Error())
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "mark-read failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleDelete removes one message from the user's mailbox: Gmail → move to
+// trash (reversible), Outlook → delete (moves to Deleted Items).
+// Body: {"provider":"gmail"|"outlook","id":"<message id>","accountId":"<acct>"}.
+func (h *InboxHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
+	userID := store.UserIDFromContext(r.Context())
+	if userID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "no user"})
+		return
+	}
+	var body struct {
+		Provider  string `json:"provider"`
+		ID        string `json:"id"`
+		AccountID string `json:"accountId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider and id required"})
+		return
+	}
+
+	var tool string
+	args := map[string]any{"message_id": body.ID}
+	switch body.Provider {
+	case "gmail":
+		tool = "GMAIL_MOVE_TO_TRASH"
+	case "outlook":
+		// OUTLOOK_DELETE_MESSAGE *permanently* erases the message (no Deleted
+		// Items), unlike Gmail's trash. Match Gmail's recoverable behavior by
+		// moving the message to the well-known "deleteditems" folder instead.
+		// Slug + params verified against the live catalog: OUTLOOK_MOVE_MESSAGE
+		// takes message_id + destination_id (accepts well-known folder names).
+		tool = "OUTLOOK_MOVE_MESSAGE"
+		args["destination_id"] = "deleteditems"
+		args["user_id"] = "me" // Graph move targets /users/{id}/messages; default to the connected mailbox
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown provider"})
+		return
+	}
+
+	if _, err := h.callComposio(r.Context(), userID, body.AccountID, tool, args); err != nil {
+		slog.Info("inbox.delete_failed", "user", userID, "provider", body.Provider, "err", err.Error())
+		// Surface the upstream detail so a wrong param / unresolved tool version
+		// is diagnosable from the client (it's the user's own mailbox).
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "delete failed", "detail": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -98,6 +214,12 @@ func (h *InboxHandler) handleUnread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Lazily ensure Composio email triggers exist for this user's mailboxes so
+	// future new mail pushes over WS. Deduped + async — doesn't slow the poll.
+	if h.pushEnabled {
+		go h.ProvisionTriggers(context.Background(), userID)
+	}
+
 	gmailN, gmailMsgs := h.gmailUnread(r.Context(), userID)
 	outlookN, outlookMsgs := h.outlookUnread(r.Context(), userID)
 
@@ -105,11 +227,27 @@ func (h *InboxHandler) handleUnread(w http.ResponseWriter, r *http.Request) {
 	if messages == nil {
 		messages = []unreadMessage{}
 	}
+
+	// Unread reminders for this user — so the extension's toolbar badge (set by
+	// the service worker when the panel is closed) can match the in-panel bell,
+	// which counts unread emails + unread reminders.
+	remindersN := 0
+	if h.reminders != nil {
+		if rows, err := h.reminders.List(r.Context(), store.ReminderListOpts{UserID: userID, Limit: 100}); err == nil {
+			for i := range rows {
+				if rows[i].ReadAt == nil {
+					remindersN++
+				}
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"gmail":    gmailN,
-		"outlook":  outlookN,
-		"total":    gmailN + outlookN,
-		"messages": messages, // sender/subject/date for the reminders UI list
+		"gmail":     gmailN,
+		"outlook":   outlookN,
+		"total":     gmailN + outlookN,
+		"reminders": remindersN, // unread reminders — badge = total + reminders
+		"messages":  messages,   // sender/subject/date for the reminders UI list
 	})
 }
 

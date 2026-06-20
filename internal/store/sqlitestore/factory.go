@@ -72,5 +72,6 @@ func NewSQLiteStores(cfg store.StoreConfig) (*store.Stores, error) {
 		Vault:                NewSQLiteVaultStore(db),
 		Hooks:                NewSQLiteHookStore(db),
 		Reminders:            NewSQLiteReminderStore(db),
+		PushSubscriptions:    NewSQLitePushSubscriptionStore(db),
 	}, nil
 }

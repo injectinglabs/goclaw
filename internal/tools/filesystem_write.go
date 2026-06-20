@@ -245,6 +245,11 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *Resul
 	if appendMode {
 		verb = "appended"
 	}
+	// Never deliver code/scripts to the chat — the user wants the output, not
+	// the generator (hard guard; the prompt nudge alone wasn't enough).
+	if deliver && isScriptFile(resolved) {
+		deliver = false
+	}
 	msg := fmt.Sprintf("File %s: %s (%d bytes)", verb, path, len(content))
 	if deliver {
 		msg += ". File will be automatically delivered to the user — do NOT send it again via message tool."
@@ -351,6 +356,10 @@ func (t *WriteFileTool) executeInSandbox(ctx context.Context, path, content, san
 	verb := "written"
 	if appendMode {
 		verb = "appended"
+	}
+	// Never deliver code/scripts to the chat (hard guard).
+	if deliver && isScriptFile(path) {
+		deliver = false
 	}
 	msg := fmt.Sprintf("File %s: %s (%d bytes)", verb, path, len(content))
 	if deliver {

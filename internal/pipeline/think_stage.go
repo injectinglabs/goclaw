@@ -9,6 +9,16 @@ import (
 
 const maxTruncRetries = 3
 
+// maxTextContinuations bounds how many times a length-truncated TEXT answer is
+// auto-continued before we deliver what we have. With the output cap raised to
+// the model's real max (e.g. 32k), a single turn rarely truncates; this is the
+// safety net for genuinely huge answers (each continuation adds ~one full cap).
+const maxTextContinuations = 5
+
+// continueHint re-prompts the model to resume a length-truncated answer without
+// repeating or re-prefacing. Fed as ephemeral request context (never persisted).
+const continueHint = "[System] Your previous message reached the output length limit and was cut off mid-content. Continue exactly where it stopped — do not repeat anything already sent, do not restate or summarize, do not add any preamble. Just continue the output."
+
 // ThinkStage runs per iteration. Calls LLM, handles truncation retries,
 // accumulates usage, returns BreakLoop when response has no tool calls.
 type ThinkStage struct {
@@ -41,13 +51,35 @@ func (s *ThinkStage) Execute(ctx context.Context, state *RunState) error {
 		}
 	}
 
-	// 3. Construct ChatRequest
+	// 3. Construct ChatRequest.
+	// Output cap (Fix A): request the model's real output ceiling (resolved once
+	// per run in ContextStage) instead of the small pipeline default, so long
+	// answers aren't truncated mid-content. Falls back to Config.MaxTokens when
+	// the model is unknown to the registry.
+	maxTok := s.deps.Config.MaxTokens
+	if state.Context.EffectiveMaxOutputTokens > 0 {
+		maxTok = state.Context.EffectiveMaxOutputTokens
+	}
+
+	// Continuation context (Fix B): when a prior turn's text answer hit the
+	// output cap, re-feed the accumulated partial + a continue instruction so
+	// the model resumes. These two messages are EPHEMERAL — built per-call and
+	// never AppendPending'd — so the persisted history stays a single clean
+	// assistant message (stitched by ObserveStage), not a chain of fragments.
+	msgs := state.Messages.All()
+	if state.Think.ContinuationBuffer != "" {
+		msgs = append(append([]providers.Message{}, msgs...),
+			providers.Message{Role: "assistant", Content: state.Think.ContinuationBuffer},
+			providers.Message{Role: "user", Content: continueHint},
+		)
+	}
+
 	req := providers.ChatRequest{
-		Messages: state.Messages.All(),
+		Messages: msgs,
 		Tools:    toolDefs,
 		Model:    state.Model,
 		Options: map[string]any{
-			providers.OptMaxTokens: s.deps.Config.MaxTokens,
+			providers.OptMaxTokens: maxTok,
 		},
 	}
 
@@ -111,9 +143,33 @@ func (s *ThinkStage) Execute(ctx context.Context, state *RunState) error {
 	// message with sanitization + MediaRefs, so skip AppendPending here to avoid
 	// a duplicate. Matches v2 behavior where loop breaks before appending.
 	if len(resp.ToolCalls) == 0 {
+		// Fix B: a text answer cut off by the output cap (FinishReason=="length")
+		// is NOT a finished answer — auto-continue (bounded) so the full content
+		// is delivered instead of stopping mid-output. Accumulate this chunk into
+		// the continuation buffer (re-fed as ephemeral context on the next call);
+		// ObserveStage stitches buffer + final chunk into one persisted message.
+		//
+		// Guard: only continue when there's ACTUAL partial text to extend. A
+		// length-truncation with EMPTY content means the turn was all reasoning
+		// and the output budget was exhausted before any answer text (common on
+		// thinking models) — re-prompting "continue" just loops on nothing and
+		// ends in an empty reply. Fall through to BreakLoop → the empty-reply
+		// rescue instead.
+		if resp.FinishReason == "length" && resp.Content != "" &&
+			state.Think.TextContinuations < maxTextContinuations {
+			state.Think.TextContinuations++
+			state.Think.ContinuationBuffer += resp.Content
+			s.result = Continue
+			return nil
+		}
 		s.result = BreakLoop
 		return nil
 	}
+
+	// A tool call breaks any in-progress text continuation chain — drop the
+	// buffer so a later final answer isn't mis-stitched with pre-tool text.
+	state.Think.ContinuationBuffer = ""
+	state.Think.TextContinuations = 0
 
 	// Tool iteration: append assistant message for LLM context continuity.
 	assistantMsg := providers.Message{

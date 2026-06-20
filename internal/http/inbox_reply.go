@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/mail"
 	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/providerresolve"
@@ -17,7 +18,8 @@ type emailContent struct {
 	From      string `json:"from"`
 	Recipient string `json:"recipient"` // address to reply to
 	Subject   string `json:"subject"`
-	Body      string `json:"body"`
+	Body      string `json:"body"`               // plain text (for drafting + fallback render)
+	BodyHTML  string `json:"bodyHtml,omitempty"` // sanitized-on-client HTML for rich display
 	ThreadID  string `json:"threadId,omitempty"`
 	ID        string `json:"id,omitempty"`
 }
@@ -56,12 +58,50 @@ func (h *InboxHandler) handleDraftReply(w http.ResponseWriter, r *http.Request) 
 		"recipient": email.Recipient,
 		"subject":   email.Subject,
 		"body":      email.Body,
+		"bodyHtml":  email.BodyHTML,
 		"bodyLen":   len(email.Body), // 0 → email body didn't parse from Composio
 		"threadId":  email.ThreadID,
 		"id":        email.ID,
 		"draft":     draft,
 		"status":    status, // "ok" | "no_provider" | "llm_error"
 		"detail":    detail, // error text when status != ok (for diagnosis)
+	})
+}
+
+// handleFetchEmail returns just the email content (sender/subject/body) without
+// drafting a reply — so the UI can show the original message immediately while
+// the LLM draft is generated separately. Body: {provider,id,threadId,accountId}.
+func (h *InboxHandler) handleFetchEmail(w http.ResponseWriter, r *http.Request) {
+	userID := store.UserIDFromContext(r.Context())
+	if userID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "no user"})
+		return
+	}
+	var req struct {
+		Provider  string `json:"provider"`
+		ID        string `json:"id"`
+		ThreadID  string `json:"threadId"`
+		AccountID string `json:"accountId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Provider == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider required"})
+		return
+	}
+	email, err := h.fetchEmail(r.Context(), userID, req.AccountID, req.Provider, req.ID, req.ThreadID)
+	if err != nil {
+		slog.Info("inbox.fetch_email_failed", "user", userID, "provider", req.Provider, "err", err.Error())
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "could not fetch email"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"from":      email.From,
+		"recipient": email.Recipient,
+		"subject":   email.Subject,
+		"body":      email.Body,
+		"bodyHtml":  email.BodyHTML,
+		"bodyLen":   len(email.Body),
+		"threadId":  email.ThreadID,
+		"id":        email.ID,
 	})
 }
 
@@ -86,13 +126,22 @@ func (h *InboxHandler) handleSendReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The recipient usually arrives as "Display Name <addr@host>" (it's the
+	// sender's From header). Gmail's reply action wants a BARE address, and
+	// rejects the full string ("Domain 'host>' contains invalid characters").
+	// Parse out the address; fall back to the trimmed raw value.
+	recipient := strings.TrimSpace(req.Recipient)
+	if addr, perr := mail.ParseAddress(req.Recipient); perr == nil {
+		recipient = addr.Address
+	}
+
 	var tool string
 	var args map[string]any
 	switch req.Provider {
 	case "gmail":
 		tool, args = "GMAIL_REPLY_TO_THREAD", map[string]any{
 			"thread_id":       req.ThreadID,
-			"recipient_email": req.Recipient,
+			"recipient_email": recipient,
 			"message_body":    req.Body,
 		}
 	case "outlook":
@@ -107,7 +156,9 @@ func (h *InboxHandler) handleSendReply(w http.ResponseWriter, r *http.Request) {
 
 	if _, err := h.callComposio(r.Context(), userID, req.AccountID, tool, args); err != nil {
 		slog.Info("inbox.send_reply_failed", "user", userID, "provider", req.Provider, "err", err.Error())
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "send failed"})
+		// Surface the upstream detail so a bad param / address / thread id is
+		// diagnosable from the client instead of a generic "send failed".
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "send failed", "detail": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -228,6 +279,12 @@ func parseGmailEmail(text, id, threadID string) emailContent {
 	out.From = strField(msg, "sender", "from", "From")
 	out.Subject = strField(msg, "subject", "Subject")
 	out.Body = strField(msg, "messageText", "body", "snippet", "preview", "text")
+	// Rich HTML body for display, if Composio surfaced one. Fall back to none
+	// (client renders the plain text). Some shapes put HTML in messageText.
+	out.BodyHTML = strField(msg, "messageHtml", "html", "htmlBody", "bodyHtml")
+	if out.BodyHTML == "" && looksLikeHTML(out.Body) {
+		out.BodyHTML = out.Body
+	}
 	if out.From == "" || out.Subject == "" {
 		hf, hs := gmailHeaders(msg)
 		if out.From == "" {
@@ -259,11 +316,24 @@ func parseOutlookEmail(text, id string) emailContent {
 	out.From = outlookFrom(msg)
 	out.Recipient = out.From
 	out.Subject = strField(msg, "subject", "Subject")
-	if bodyObj, ok := msg["body"].(map[string]any); ok { // Graph: body.content
-		out.Body = strField(bodyObj, "content")
+	if bodyObj, ok := msg["body"].(map[string]any); ok { // Graph: body.{contentType,content}
+		content := strField(bodyObj, "content")
+		if strings.EqualFold(strField(bodyObj, "contentType", "content_type"), "html") || looksLikeHTML(content) {
+			out.BodyHTML = content
+		} else {
+			out.Body = content
+		}
 	}
 	if out.Body == "" {
 		out.Body = strField(msg, "bodyPreview", "body_preview", "preview")
 	}
 	return out
+}
+
+// looksLikeHTML is a cheap heuristic: a provider returned markup in a field we'd
+// otherwise treat as plain text. Good enough to decide whether to render rich.
+func looksLikeHTML(s string) bool {
+	return strings.Contains(s, "<html") || strings.Contains(s, "<body") ||
+		strings.Contains(s, "<div") || strings.Contains(s, "<p>") ||
+		strings.Contains(s, "<table") || strings.Contains(s, "<br")
 }

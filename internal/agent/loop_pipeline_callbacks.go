@@ -285,10 +285,13 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 			l.reasoningConfig.Source,
 		)
 		if effort := reasoningDecision.RequestEffort(); effort != "" {
-			// Fix A+B: for browser-automation runs, cap baseline thinking and drop
-			// to minimal on routine mechanical turns (full reasoning is kept on the
-			// planning turn and on recovery turns). Non-extension runs unchanged.
-			chatReq.Options[providers.OptThinkingLevel] = browserTurnEffort(req, state, effort)
+			// Cap the per-turn thinking budget so it doesn't dominate wall-clock.
+			// The planning turn and recovery turns keep real reasoning (capped at
+			// "medium"); routine mid-task turns (write a script, run it, observe,
+			// deliver the file) drop to "low". A 100-row sheet build was spending
+			// ~70s just thinking across its tool turns — most of it wasted on
+			// mechanical steps. Browser runs use the same shape (a tighter cap).
+			chatReq.Options[providers.OptThinkingLevel] = turnEffort(req, state, effort)
 		}
 		if reasoningDecision.StripThinking {
 			chatReq.Options[providers.OptStripThinking] = true
@@ -363,16 +366,16 @@ func (l *Loop) makePruneMessages() func(msgs []providers.Message, budget int) ([
 	}
 }
 
-// browserTurnEffort implements Fix A+B. For extension (browser) runs it caps
-// the per-turn thinking budget: routine mid-task fill/click turns get "low"
-// (Fix B), while the initial planning turn and recovery turns (after a tool
-// error or an injected loop warning) keep real reasoning but capped at "medium"
-// — 32k-token extended thinking is never needed to fill a web form (Fix A).
-// Non-browser runs keep the configured effort unchanged.
-func browserTurnEffort(req *RunRequest, state *pipeline.RunState, configured string) string {
-	if req == nil || req.ClientKind != "extension" {
-		return configured
-	}
+// turnEffort caps the per-turn thinking budget for ALL runs. The initial
+// planning turn (Iteration 0) and recovery turns (after a tool error or an
+// injected loop warning) keep real reasoning but capped at "medium" — 32k-token
+// extended thinking is never needed to plan a scrape or fill a web form. Every
+// other (routine, mid-task) turn drops to "low": running a script, observing
+// its output, and delivering a file don't benefit from deep reasoning, and the
+// per-turn thinking was the dominant cost on multi-tool tasks. capEffort only
+// ever LOWERS the level, so an agent explicitly configured to "off"/"low" is
+// never raised.
+func turnEffort(_ *RunRequest, state *pipeline.RunState, configured string) string {
 	if state.Iteration == 0 || recentTroubleSignal(state) {
 		return capEffort(configured, "medium")
 	}

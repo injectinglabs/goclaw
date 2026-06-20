@@ -238,6 +238,9 @@ func setupSubagents(providerReg *providers.Registry, cfg *config.Config, msgBus 
 			reg.Register(tools.NewListFilesTool(workspace, agentCfg.RestrictToWorkspace))
 			reg.Register(tools.NewExecTool(workspace, agentCfg.RestrictToWorkspace))
 		}
+		// deliver_file: hand an existing workspace file to the user as a download
+		// link (e.g. exec-generated .xlsx/.docx). No sandbox variant needed.
+		reg.Register(tools.NewDeliverFileTool(workspace, agentCfg.RestrictToWorkspace))
 		return reg
 	}
 

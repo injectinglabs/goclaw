@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -107,7 +108,27 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 	}
 
 	// Inbox API (extension badge + unread list + mark-read + reply drafting).
-	d.server.SetInboxHandler(httpapi.NewInboxHandler("http://composio-mcp:9300", d.providerRegistry, d.pgStores.SystemConfigs))
+	inboxH := httpapi.NewInboxHandler("http://composio-mcp:9300", d.providerRegistry, d.pgStores.SystemConfigs)
+	// Push half: composio-mcp holds a Composio triggers.subscribe() socket and
+	// forwards new-mail events to /v1/internal/inbox-event → per-user WS event.
+	// Enabled via INBOX_PUSH_ENABLED; INBOX_PUSH_TOKEN (optional) authenticates
+	// the internal forward. Off ⇒ polling-only (unchanged behaviour).
+	if pe := os.Getenv("INBOX_PUSH_ENABLED"); (pe == "1" || pe == "true") && d.pgStores.Tenants != nil {
+		inboxH.EnablePush(d.msgBus, d.pgStores.Tenants, os.Getenv("INBOX_PUSH_TOKEN"))
+	}
+	// Unread reminders → folded into the badge count so toolbar == in-panel bell.
+	if d.pgStores != nil && d.pgStores.Reminders != nil {
+		inboxH.SetReminders(d.pgStores.Reminders)
+	}
+
+	// Web Push: register subscriptions + serve VAPID public key, and let the
+	// inbox new-mail path deliver a browser push (best-effort) on each event.
+	if d.pgStores != nil && d.pgStores.SystemConfigs != nil && d.pgStores.PushSubscriptions != nil {
+		pushH := httpapi.NewPushHandler(d.pgStores.SystemConfigs, d.pgStores.PushSubscriptions)
+		d.server.SetPushHandler(pushH)
+		inboxH.SetPushSender(pushH.SendToUser)
+	}
+	d.server.SetInboxHandler(inboxH)
 
 	// System configs API
 	if d.pgStores.SystemConfigs != nil {
@@ -226,6 +247,10 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 	// from S3 when the local copy is missing (cache wipe, ASG bounce, sibling
 	// instance). nil store falls back to the legacy local-only behavior.
 	d.server.SetFilesHandler(httpapi.NewFilesHandler(d.workspace, d.dataDir, mediaStore))
+
+	// sheet.preview WS RPC — parses a delivered .xlsx/.csv (same workspace/data
+	// bounds as the file server) into a JSON grid the chat UI renders inline.
+	methods.NewSheetPreviewMethods(d.workspace, d.dataDir, d.providerRegistry, d.pgStores.SystemConfigs).Register(d.server.Router())
 
 	// Storage file management — browse/delete files under the resolved workspace directory.
 	d.server.SetStorageHandler(httpapi.NewStorageHandler(d.workspace))
