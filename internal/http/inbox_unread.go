@@ -133,9 +133,15 @@ func (h *InboxHandler) handleMarkRead(w http.ResponseWriter, r *http.Request) {
 			"remove_label_ids": []string{"UNREAD"},
 		}
 	case "outlook":
-		tool, args = "OUTLOOK_UPDATE_MESSAGE", map[string]any{
-			"message_id": body.ID,
-			"is_read":    true,
+		// No plain OUTLOOK_UPDATE_MESSAGE exists in the catalog; the message
+		// update is folder-scoped. Verified params: user_id + mail_folder_id +
+		// message_id (required) and isRead (camelCase). The unread list is read
+		// from the inbox, so the message lives in the "inbox" well-known folder.
+		tool, args = "OUTLOOK_UPDATE_USER_MAIL_FOLDER_MESSAGE", map[string]any{
+			"user_id":        "me",
+			"mail_folder_id": "inbox",
+			"message_id":     body.ID,
+			"isRead":         true,
 		}
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown provider"})
