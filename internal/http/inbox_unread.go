@@ -33,6 +33,11 @@ type InboxHandler struct {
 	internalToken string             // optional shared token for the internal forward
 	provisioned   sync.Map           // dedup trigger enable (key: user|toolkit|acct)
 
+	// reminders, when set, lets /v1/inbox/unread also return the user's unread
+	// reminder count so the toolbar badge matches the in-panel bell (which sums
+	// unread emails + reminders). Wired via SetReminders.
+	reminders store.ReminderStore
+
 	// pushSender, when set, delivers a Web Push notification to the user's
 	// subscribed browsers on each new-mail event (best-effort). Wired via
 	// SetPushSender.
@@ -55,6 +60,10 @@ func NewInboxHandler(composioURL string, registry *providers.Registry, sysConfig
 		sysConfigs:  sysConfigs,
 	}
 }
+
+// SetReminders wires the reminder store so /v1/inbox/unread can include the
+// user's unread reminder count (for the unified toolbar badge). Optional.
+func (h *InboxHandler) SetReminders(rs store.ReminderStore) { h.reminders = rs }
 
 // RegisterRoutes registers the inbox routes on the given mux.
 func (h *InboxHandler) RegisterRoutes(mux *http.ServeMux) {
@@ -201,11 +210,27 @@ func (h *InboxHandler) handleUnread(w http.ResponseWriter, r *http.Request) {
 	if messages == nil {
 		messages = []unreadMessage{}
 	}
+
+	// Unread reminders for this user — so the extension's toolbar badge (set by
+	// the service worker when the panel is closed) can match the in-panel bell,
+	// which counts unread emails + unread reminders.
+	remindersN := 0
+	if h.reminders != nil {
+		if rows, err := h.reminders.List(r.Context(), store.ReminderListOpts{UserID: userID, Limit: 100}); err == nil {
+			for i := range rows {
+				if rows[i].ReadAt == nil {
+					remindersN++
+				}
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"gmail":    gmailN,
-		"outlook":  outlookN,
-		"total":    gmailN + outlookN,
-		"messages": messages, // sender/subject/date for the reminders UI list
+		"gmail":     gmailN,
+		"outlook":   outlookN,
+		"total":     gmailN + outlookN,
+		"reminders": remindersN, // unread reminders — badge = total + reminders
+		"messages":  messages,   // sender/subject/date for the reminders UI list
 	})
 }
 

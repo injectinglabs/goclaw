@@ -116,6 +116,10 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 	if pe := os.Getenv("INBOX_PUSH_ENABLED"); (pe == "1" || pe == "true") && d.pgStores.Tenants != nil {
 		inboxH.EnablePush(d.msgBus, d.pgStores.Tenants, os.Getenv("INBOX_PUSH_TOKEN"))
 	}
+	// Unread reminders → folded into the badge count so toolbar == in-panel bell.
+	if d.pgStores != nil && d.pgStores.Reminders != nil {
+		inboxH.SetReminders(d.pgStores.Reminders)
+	}
 
 	// Web Push: register subscriptions + serve VAPID public key, and let the
 	// inbox new-mail path deliver a browser push (best-effort) on each event.
