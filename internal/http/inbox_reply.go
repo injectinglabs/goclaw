@@ -107,7 +107,9 @@ func (h *InboxHandler) handleSendReply(w http.ResponseWriter, r *http.Request) {
 
 	if _, err := h.callComposio(r.Context(), userID, req.AccountID, tool, args); err != nil {
 		slog.Info("inbox.send_reply_failed", "user", userID, "provider", req.Provider, "err", err.Error())
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "send failed"})
+		// Surface the upstream detail so a bad param / address / thread id is
+		// diagnosable from the client instead of a generic "send failed".
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "send failed", "detail": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
