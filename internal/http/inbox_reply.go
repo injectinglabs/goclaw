@@ -17,7 +17,8 @@ type emailContent struct {
 	From      string `json:"from"`
 	Recipient string `json:"recipient"` // address to reply to
 	Subject   string `json:"subject"`
-	Body      string `json:"body"`
+	Body      string `json:"body"`               // plain text (for drafting + fallback render)
+	BodyHTML  string `json:"bodyHtml,omitempty"` // sanitized-on-client HTML for rich display
 	ThreadID  string `json:"threadId,omitempty"`
 	ID        string `json:"id,omitempty"`
 }
@@ -56,6 +57,7 @@ func (h *InboxHandler) handleDraftReply(w http.ResponseWriter, r *http.Request) 
 		"recipient": email.Recipient,
 		"subject":   email.Subject,
 		"body":      email.Body,
+		"bodyHtml":  email.BodyHTML,
 		"bodyLen":   len(email.Body), // 0 → email body didn't parse from Composio
 		"threadId":  email.ThreadID,
 		"id":        email.ID,
@@ -95,6 +97,7 @@ func (h *InboxHandler) handleFetchEmail(w http.ResponseWriter, r *http.Request) 
 		"recipient": email.Recipient,
 		"subject":   email.Subject,
 		"body":      email.Body,
+		"bodyHtml":  email.BodyHTML,
 		"bodyLen":   len(email.Body),
 		"threadId":  email.ThreadID,
 		"id":        email.ID,
@@ -266,6 +269,12 @@ func parseGmailEmail(text, id, threadID string) emailContent {
 	out.From = strField(msg, "sender", "from", "From")
 	out.Subject = strField(msg, "subject", "Subject")
 	out.Body = strField(msg, "messageText", "body", "snippet", "preview", "text")
+	// Rich HTML body for display, if Composio surfaced one. Fall back to none
+	// (client renders the plain text). Some shapes put HTML in messageText.
+	out.BodyHTML = strField(msg, "messageHtml", "html", "htmlBody", "bodyHtml")
+	if out.BodyHTML == "" && looksLikeHTML(out.Body) {
+		out.BodyHTML = out.Body
+	}
 	if out.From == "" || out.Subject == "" {
 		hf, hs := gmailHeaders(msg)
 		if out.From == "" {
@@ -297,11 +306,24 @@ func parseOutlookEmail(text, id string) emailContent {
 	out.From = outlookFrom(msg)
 	out.Recipient = out.From
 	out.Subject = strField(msg, "subject", "Subject")
-	if bodyObj, ok := msg["body"].(map[string]any); ok { // Graph: body.content
-		out.Body = strField(bodyObj, "content")
+	if bodyObj, ok := msg["body"].(map[string]any); ok { // Graph: body.{contentType,content}
+		content := strField(bodyObj, "content")
+		if strings.EqualFold(strField(bodyObj, "contentType", "content_type"), "html") || looksLikeHTML(content) {
+			out.BodyHTML = content
+		} else {
+			out.Body = content
+		}
 	}
 	if out.Body == "" {
 		out.Body = strField(msg, "bodyPreview", "body_preview", "preview")
 	}
 	return out
+}
+
+// looksLikeHTML is a cheap heuristic: a provider returned markup in a field we'd
+// otherwise treat as plain text. Good enough to decide whether to render rich.
+func looksLikeHTML(s string) bool {
+	return strings.Contains(s, "<html") || strings.Contains(s, "<body") ||
+		strings.Contains(s, "<div") || strings.Contains(s, "<p>") ||
+		strings.Contains(s, "<table") || strings.Contains(s, "<br")
 }
