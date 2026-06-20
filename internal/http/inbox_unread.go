@@ -179,6 +179,7 @@ func (h *InboxHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 		// moving the message to the well-known "deleteditems" folder instead.
 		tool = "OUTLOOK_MOVE_MESSAGE_TO_FOLDER"
 		args["destination_folder_id"] = "deleteditems"
+		args["user_id"] = "me" // Graph move targets /users/{id}/messages; default to the connected mailbox
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown provider"})
 		return
@@ -186,7 +187,9 @@ func (h *InboxHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	if _, err := h.callComposio(r.Context(), userID, body.AccountID, tool, args); err != nil {
 		slog.Info("inbox.delete_failed", "user", userID, "provider", body.Provider, "err", err.Error())
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "delete failed"})
+		// Surface the upstream detail so a wrong param / unresolved tool version
+		// is diagnosable from the client (it's the user's own mailbox).
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "delete failed", "detail": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
