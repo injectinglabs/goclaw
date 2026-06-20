@@ -177,8 +177,10 @@ func (h *InboxHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 		// OUTLOOK_DELETE_MESSAGE *permanently* erases the message (no Deleted
 		// Items), unlike Gmail's trash. Match Gmail's recoverable behavior by
 		// moving the message to the well-known "deleteditems" folder instead.
-		tool = "OUTLOOK_MOVE_MESSAGE_TO_FOLDER"
-		args["destination_folder_id"] = "deleteditems"
+		// Slug + params verified against the live catalog: OUTLOOK_MOVE_MESSAGE
+		// takes message_id + destination_id (accepts well-known folder names).
+		tool = "OUTLOOK_MOVE_MESSAGE"
+		args["destination_id"] = "deleteditems"
 		args["user_id"] = "me" // Graph move targets /users/{id}/messages; default to the connected mailbox
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown provider"})
