@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/mail"
 	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/providerresolve"
@@ -125,13 +126,22 @@ func (h *InboxHandler) handleSendReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The recipient usually arrives as "Display Name <addr@host>" (it's the
+	// sender's From header). Gmail's reply action wants a BARE address, and
+	// rejects the full string ("Domain 'host>' contains invalid characters").
+	// Parse out the address; fall back to the trimmed raw value.
+	recipient := strings.TrimSpace(req.Recipient)
+	if addr, perr := mail.ParseAddress(req.Recipient); perr == nil {
+		recipient = addr.Address
+	}
+
 	var tool string
 	var args map[string]any
 	switch req.Provider {
 	case "gmail":
 		tool, args = "GMAIL_REPLY_TO_THREAD", map[string]any{
 			"thread_id":       req.ThreadID,
-			"recipient_email": req.Recipient,
+			"recipient_email": recipient,
 			"message_body":    req.Body,
 		}
 	case "outlook":
