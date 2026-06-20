@@ -70,6 +70,7 @@ func (h *InboxHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/inbox/unread", requireAuth("", h.handleUnread))
 	mux.HandleFunc("POST /v1/inbox/mark-read", requireAuth("", h.handleMarkRead))
 	mux.HandleFunc("POST /v1/inbox/delete", requireAuth("", h.handleDelete))
+	mux.HandleFunc("POST /v1/inbox/email", requireAuth("", h.handleFetchEmail))
 	mux.HandleFunc("POST /v1/inbox/draft-reply", requireAuth("", h.handleDraftReply))
 	mux.HandleFunc("POST /v1/inbox/send-reply", requireAuth("", h.handleSendReply))
 	// Internal forward from composio-mcp's trigger subscription — token-guarded,

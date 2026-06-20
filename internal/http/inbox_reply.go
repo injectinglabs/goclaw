@@ -65,6 +65,42 @@ func (h *InboxHandler) handleDraftReply(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// handleFetchEmail returns just the email content (sender/subject/body) without
+// drafting a reply — so the UI can show the original message immediately while
+// the LLM draft is generated separately. Body: {provider,id,threadId,accountId}.
+func (h *InboxHandler) handleFetchEmail(w http.ResponseWriter, r *http.Request) {
+	userID := store.UserIDFromContext(r.Context())
+	if userID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "no user"})
+		return
+	}
+	var req struct {
+		Provider  string `json:"provider"`
+		ID        string `json:"id"`
+		ThreadID  string `json:"threadId"`
+		AccountID string `json:"accountId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Provider == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider required"})
+		return
+	}
+	email, err := h.fetchEmail(r.Context(), userID, req.AccountID, req.Provider, req.ID, req.ThreadID)
+	if err != nil {
+		slog.Info("inbox.fetch_email_failed", "user", userID, "provider", req.Provider, "err", err.Error())
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "could not fetch email"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"from":      email.From,
+		"recipient": email.Recipient,
+		"subject":   email.Subject,
+		"body":      email.Body,
+		"bodyLen":   len(email.Body),
+		"threadId":  email.ThreadID,
+		"id":        email.ID,
+	})
+}
+
 // handleSendReply sends a reply via the provider's Composio reply action.
 // Body: {provider,id,threadId,recipient,body}.
 func (h *InboxHandler) handleSendReply(w http.ResponseWriter, r *http.Request) {
