@@ -32,11 +32,13 @@ goclaw executes the tool calls you emit **in a single turn concurrently**. So if
 
 2. **Get the item list (the row keys).** If the N items are a well-known set you can name reliably, list them yourself. Otherwise do ONE `web_search` first to find the list of names. You need the N item names before you can fan out.
 
-3. **Chunk** the N items into K groups of ~8–12 (so K ≈ N/10, capped at ~12). Give each chunk a DISJOINT slice — chunk 1 = items 1–10, chunk 2 = 11–20, … — so no two sub-agents research the same item.
+3. **Chunk SMALL** — groups of **~5 items** (so K ≈ N/5). Small chunks are the whole game for cost/speed: each sub-agent is a full agent loop, so a chunk that takes ~6 tool calls is cheap and fast, while a chunk that needs 15+ blows up tokens (search results pile up in its context every turn) AND wall-clock (you wait for the slowest worker). Give each chunk a DISJOINT slice (chunk 1 = items 1–5, chunk 2 = 6–10, …). It's fine to have ~20 small sub-agents — they run concurrently.
 
 4. **Fan out — in ONE turn, emit all K `spawn` calls** (this is what makes them run in parallel — do NOT spawn one chunk per turn). Each call:
-   - `action: "spawn"`, `mode: "sync"`, `label: "rows 1-10"` (etc.)
-   - `task:` *"Research these items and return ONE JSON array — one object per item — with EXACTLY these keys: <your columns>. Use web_search to find REAL values for each field; do NOT invent data, and if a value genuinely can't be found use an empty string. Items (in this exact order): <the 8–12 names for this chunk>. Return ONLY the JSON array — no prose, no markdown code fences."*
+   - `action: "spawn"`, `mode: "sync"`, `label: "rows 1-5"` (etc.)
+   - `task:` *"Research these 5 items and return ONE JSON array — one object per item — with EXACTLY these keys: <your columns>. Be LEAN and FAST: run AT MOST one web_search per item, take the values straight from those results, and return immediately. Do NOT web_fetch, do NOT re-search or second-guess, do NOT verify across sources, do NOT reason at length — finish in as few tool calls as possible. If a value isn't in the search results, use an empty string rather than digging further. Items: <the 5 names for this chunk>. Return ONLY the JSON array — no prose, no markdown fences."*
+
+   Each sub-agent is hard-capped at 20 internal iterations — keeping chunks to ~5 items + one-search-per-item keeps every worker well under that, which is what makes the run cheap and fast.
 
 5. **Merge + write.** Once all K sub-agents return (inline, since `mode:"sync"`), concatenate their JSON arrays IN CHUNK ORDER, then write ONE `.xlsx` via `exec` + openpyxl: row 1 = the column headers, data immediately below, NO title/banner/merged rows. Validate you ended up with ~N rows.
 
@@ -45,12 +47,12 @@ goclaw executes the tool calls you emit **in a single turn concurrently**. So if
 ## Guardrails
 - **Disjoint chunks** — never hand two sub-agents the same items; split by the assigned slice.
 - **Strict JSON out** — sub-agents must return an array of objects with identical keys so you can merge programmatically. If one returns junk or errors, re-spawn just that chunk.
-- **Keep K ≤ ~12, chunk size ~8–12** — each sub-agent is a full research run, so too many tiny chunks adds more overhead than it saves.
+- **Keep chunks SMALL (~5 items)** and sub-agents LEAN (one search per item, extract, return — no web_fetch / re-search / verify / long reasoning). A heavy 10–15-item chunk makes a sub-agent loop ~20 times, and 10 of those cost millions of tokens and minutes of wall-clock. Many small lean chunks (~20 of them) run concurrently and stay cheap. This is the difference between a ~$0.x sheet and a multi-dollar one.
 - **Real data only** — the sub-agents must use web_search; if searches come back empty, tell the user the data source is unavailable rather than silently inventing values.
 - **Small/known data** — for < ~20 rows or trivially-known values, skip the fan-out and build directly in one script.
 
 ## Example — "top 100 VCs in the SF Bay Area"
 1. Schema: `Rank, Firm, Website, HQ, Stage, Notable Investments`.
 2. One `web_search` → list the 100 firm names.
-3. 10 chunks of 10. In ONE turn, emit 10 `spawn(mode:"sync")` calls: *"Research firms 1–10 … return a JSON array with keys [Firm, Website, HQ, Stage, Notable Investments] …"*, …, *"firms 91–100 …"*.
-4. Merge the 10 arrays → 100 rows → openpyxl `.xlsx` → `deliver_file`.
+3. **20 chunks of 5**. In ONE turn, emit 20 `spawn(mode:"sync")` calls: *"Research firms 1–5 — one web_search each, extract [Firm, Website, HQ, Stage, Notable Investments], return JSON now"*, …, *"firms 96–100 …"*. They run concurrently.
+4. Merge the 20 arrays → 100 rows → openpyxl `.xlsx` → `deliver_file`.
