@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -192,19 +191,12 @@ func (t *ResearchSheetTool) Execute(ctx context.Context, args map[string]any) *R
 		}
 	}
 
-	emailFound, withHomepage, withContent := 0, 0, 0
+	emailFound := 0
 	for _, d := range data {
 		if len(d.emails) > 0 {
 			emailFound++
 		}
-		if d.homepage != "" {
-			withHomepage++
-		}
-		if d.snippet != "" {
-			withContent++
-		}
 	}
-	slog.Info("research_sheet.summary", "items", len(items), "homepages", withHomepage, "with_content", withContent, "with_email", emailFound)
 	msg := fmt.Sprintf("Delivered %s — a researched spreadsheet with %d rows × %d columns, built from live web pages (found an email for %d/%d rows). The download link is attached to the chat. Do NOT regenerate this file or fill any values from memory, and do NOT call deliver_file — it is already delivered. Blank cells mean nothing was found on the page.", filepath.Base(path), len(rows), len(columns), emailFound, len(rows))
 	if truncated {
 		msg += fmt.Sprintf(" Note: only the first %d items were researched — call again for the rest.", maxResearchItems)
@@ -223,80 +215,43 @@ func (t *ResearchSheetTool) researchOne(ctx context.Context, chain []SearchProvi
 	if topic != "" {
 		q += " " + topic
 	}
-	q += " official website"
+	q += " official website contact"
 
-	// Resolve the firm's OWN site — skip directories/aggregators (Crunchbase,
-	// LinkedIn, listicles) whose pages are the wrong entity or un-extractable.
 	var homepage, host string
 	for _, p := range chain {
-		res, err := p.Search(ctx, searchParams{Query: q, Count: 6})
+		res, err := p.Search(ctx, searchParams{Query: q, Count: 3})
 		if err != nil || len(res) == 0 {
 			continue
 		}
-		if homepage, host = firstFirmSite(res); homepage != "" {
+		homepage, host = homepageFromURL(res[0].URL)
+		if homepage != "" {
 			break
 		}
 	}
 	if homepage == "" {
-		slog.Debug("research_sheet.item", "item", item, "homepage", "", "reason", "no non-aggregator result")
 		return perItem{}
 	}
 
-	// Extract the homepage + likely contact/about/team pages. Tavily ignores
-	// URLs that 404, so guessing common paths is cheap and catches the rest.
 	urls := []string{homepage}
-	base := strings.TrimRight(homepage, "/")
-	for _, suffix := range []string{"contact", "contact-us", "about", "about-us", "team", "people"} {
-		urls = append(urls, base+"/"+suffix)
+	for _, suffix := range []string{"contact", "about", "team", "contact-us"} {
+		urls = append(urls, strings.TrimRight(homepage, "/")+"/"+suffix)
 	}
-	contents, _ := t.extractor.Extract(ctx, urls)
+	contents, err := t.extractor.Extract(ctx, urls)
+	if err != nil || len(contents) == 0 {
+		return perItem{homepage: homepage}
+	}
+
 	var sb strings.Builder
 	for _, c := range contents {
 		sb.WriteString(c)
 		sb.WriteString("\n")
 	}
 	full := sb.String()
-	emails := extractEmails(full, host)
-	slog.Debug("research_sheet.item", "item", item, "homepage", homepage, "pages", len(contents), "content_len", len(full), "emails", len(emails))
 	return perItem{
 		homepage: homepage,
-		emails:   emails,
+		emails:   extractEmails(full, host),
 		snippet:  truncateStr(strings.TrimSpace(full), snippetChars),
 	}
-}
-
-// aggregatorHosts are directory/aggregator/social domains that are never a
-// firm's own site — their pages are the wrong entity or block extraction.
-var aggregatorHosts = []string{
-	"crunchbase.com", "linkedin.com", "pitchbook.com", "wellfound.com", "angel.co",
-	"failory.com", "seedtable.com", "growthlist.co", "signal.nfx.com", "nfx.com",
-	"visible.vc", "tracxn.com", "dealroom.co", "cbinsights.com", "f6s.com",
-	"medium.com", "twitter.com", "x.com", "facebook.com", "youtube.com",
-	"wikipedia.org", "forbes.com", "techcrunch.com", "bloomberg.com", "reddit.com",
-	"glassdoor.com", "indeed.com", "clutch.co", "g2.com", "producthunt.com",
-}
-
-// firstFirmSite returns the first search result that looks like the firm's own
-// site (not an aggregator), as (homepage, host).
-func firstFirmSite(results []searchResult) (string, string) {
-	for _, r := range results {
-		hp, host := homepageFromURL(r.URL)
-		if hp == "" || isAggregatorHost(host) {
-			continue
-		}
-		return hp, host
-	}
-	return "", ""
-}
-
-func isAggregatorHost(host string) bool {
-	host = strings.ToLower(host)
-	for _, a := range aggregatorHosts {
-		if host == a || strings.HasSuffix(host, "."+a) {
-			return true
-		}
-	}
-	return false
 }
 
 // fillSoftColumns batches items through the LLM to extract interpretive columns
@@ -433,25 +388,19 @@ var emailRe = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2
 // junkEmailHosts are noise/tracking domains we never want as a contact email.
 var junkEmailHosts = []string{"sentry", "wixpress", "example.", "domain.com", "email.com", "yourcompany", "sentry.io", ".png", ".jpg", ".webp", "wix.com"}
 
-// knownTLDs is used to repair extracted emails whose TLD bled into the next word
-// (e.g. "khoslaventures.commedia" -> "khoslaventures.com"). Ordered longest-first
-// so multi-char TLDs match before their prefixes.
-var knownTLDs = []string{"ventures", "capital", "partners", "com", "net", "org", "vc", "io", "co", "ai", "app", "dev", "xyz", "fund", "tech", "us", "uk", "ca", "edu", "gov"}
-
-// extractEmails pulls unique, cleaned emails from text, preferring ones on the
-// site's own domain (real contact addresses) and dropping tracking/placeholder
-// noise and obvious extraction artifacts.
+// extractEmails pulls unique emails from text, preferring ones on the site's own
+// domain (real contact addresses) and dropping tracking/placeholder noise.
 func extractEmails(text, host string) []string {
 	root := rootDomain(host)
 	seen := map[string]bool{}
 	var onDomain, other []string
 	for _, m := range emailRe.FindAllString(text, -1) {
-		e := cleanEmail(m)
-		if e == "" || seen[e] || isJunkEmail(e) {
+		e := strings.ToLower(strings.Trim(m, ".,;:()<>\"' "))
+		if seen[e] || isJunkEmail(e) {
 			continue
 		}
 		seen[e] = true
-		if root != "" && (strings.HasSuffix(e, "@"+root) || strings.Contains(e, "."+root)) {
+		if root != "" && strings.HasSuffix(e, "@"+root) || (root != "" && strings.Contains(e, "."+root)) {
 			onDomain = append(onDomain, e)
 		} else {
 			other = append(other, e)
@@ -459,61 +408,13 @@ func extractEmails(text, host string) []string {
 	}
 	sort.Strings(onDomain)
 	if len(onDomain) > 0 {
-		if len(onDomain) > 3 {
-			onDomain = onDomain[:3]
-		}
 		return onDomain
 	}
 	sort.Strings(other)
-	if len(other) > 2 {
-		other = other[:2]
+	if len(other) > 3 {
+		other = other[:3]
 	}
 	return other
-}
-
-// cleanEmail normalizes a raw regex match: lowercases, strips surrounding
-// punctuation, drops a leading phone/number run glued to the local part
-// ("388-9310info@x.com" -> "info@x.com"), and repairs a TLD that ran into the
-// following word ("x.commedia" -> "x.com"). Returns "" if it's not email-shaped.
-func cleanEmail(m string) string {
-	e := strings.ToLower(strings.Trim(m, ".,;:()<>[]{}\"' \t\n"))
-	at := strings.IndexByte(e, '@')
-	if at <= 0 || at == len(e)-1 {
-		return ""
-	}
-	local, domain := e[:at], e[at+1:]
-	// Strip a leading digit/dash/dot run accidentally glued to the local part.
-	local = leadingNumRunRe.ReplaceAllString(local, "")
-	if local == "" {
-		return ""
-	}
-	// Repair TLD bleed: if the last label isn't a known TLD but starts with one.
-	if dot := strings.LastIndexByte(domain, '.'); dot >= 0 {
-		last := domain[dot+1:]
-		if !isKnownTLD(last) {
-			for _, tld := range knownTLDs {
-				if strings.HasPrefix(last, tld) {
-					domain = domain[:dot+1] + tld
-					break
-				}
-			}
-		}
-	}
-	if !strings.Contains(domain, ".") {
-		return ""
-	}
-	return local + "@" + domain
-}
-
-var leadingNumRunRe = regexp.MustCompile(`^[0-9.\-]+`)
-
-func isKnownTLD(s string) bool {
-	for _, t := range knownTLDs {
-		if s == t {
-			return true
-		}
-	}
-	return false
 }
 
 func isJunkEmail(e string) bool {
