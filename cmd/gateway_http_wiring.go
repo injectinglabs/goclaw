@@ -317,6 +317,23 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 			}
 		}
 
+		// research_sheet tool: deterministic "search + extract per item" so the
+		// agent builds a researched sheet from REAL data instead of recalling
+		// values from memory. Reuses the same provider resolver, tenant store
+		// (for X-Actor-* headers), and web_search tool as the cell executor.
+		if d.toolsReg != nil {
+			resolveProvider := func(ctx context.Context, tenantID uuid.UUID) (providers.Provider, string, error) {
+				p, m := providerresolve.ResolveBackgroundProvider(ctx, tenantID, registry, sysCfgs)
+				if p == nil {
+					return nil, "", fmt.Errorf("no background provider for tenant %s", tenantID)
+				}
+				return p, m, nil
+			}
+			ws, _ := d.toolsReg.Get("web_search")
+			d.toolsReg.Register(tools.NewResearchSheetTool(resolveProvider, d.pgStores.Tenants, ws))
+			slog.Info("research_sheet tool enabled")
+		}
+
 		// composio-mcp lives on the docker internal network at a fixed
 		// host (no env override — it's a same-stack sidecar). Auth is
 		// per-call via X-Proxy-User; no shared service token.
