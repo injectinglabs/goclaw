@@ -330,12 +330,7 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 				return p, m, nil
 			}
 			ws, _ := d.toolsReg.Get("web_search")
-			rs := tools.NewResearchSheetTool(resolveProvider, d.pgStores.Tenants, ws)
-			rs.SetWorkspace(d.workspace)
-			if mediaStore != nil {
-				rs.SetMediaUploadFunc(mediaStore.SaveFile)
-			}
-			d.toolsReg.Register(rs)
+			d.toolsReg.Register(tools.NewResearchSheetTool(resolveProvider, d.pgStores.Tenants, ws))
 			slog.Info("research_sheet tool enabled")
 		}
 

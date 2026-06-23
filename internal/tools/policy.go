@@ -65,41 +65,6 @@ func LegacyToolAliases() map[string]string {
 	return legacyToolAliases
 }
 
-// skillToolDenylist maps a skill slug to the tools that must be HIDDEN from the
-// model while that skill is active this run. Used to force a deterministic tool
-// path when prompting alone can't: parallel-research-sheet only produces REAL
-// data if the model calls research_sheet (which searches + builds the .xlsx
-// itself); given exec/write_file it instead fabricates rows via a Python script.
-// Stripping the data-generation/file-writing escape hatches leaves research_sheet
-// as the only way to produce the deliverable. web_search stays available so the
-// model can still discover the row keys (item names). See SkillToolLock.
-var skillToolDenylist = map[string][]string{
-	"parallel-research-sheet": {"exec", "bash", "write_file"},
-}
-
-// SkillDeniedTools returns the set of tool names to hide while the given skill
-// slug is active, or nil if the skill imposes no restriction.
-func SkillDeniedTools(slug string) map[string]bool {
-	denied := skillToolDenylist[slug]
-	if len(denied) == 0 {
-		return nil
-	}
-	out := make(map[string]bool, len(denied))
-	for _, n := range denied {
-		out[n] = true
-	}
-	return out
-}
-
-// SkillToolDenylistSlugs returns the skill slugs that impose a tool restriction.
-func SkillToolDenylistSlugs() []string {
-	out := make([]string, 0, len(skillToolDenylist))
-	for slug := range skillToolDenylist {
-		out = append(out, slug)
-	}
-	return out
-}
-
 // Subagent deny lists — tools subagents cannot use.
 var subagentDenyList = []string{
 	"exec", // subagents should not shell out — main agent can still exec

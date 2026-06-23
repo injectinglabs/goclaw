@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"context"
 	"slices"
 
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
@@ -15,7 +14,7 @@ import (
 // (via getUserMCPTools) so they are included in policy filtering and execution.
 // Returns tool definitions for the provider, an allowed-tools map for execution validation,
 // and the (potentially modified) messages slice when final-iteration stripping appends a hint.
-func (l *Loop) buildFilteredTools(ctx context.Context, req *RunRequest, hadBootstrap bool, iteration, maxIter int, messages []providers.Message) ([]providers.ToolDefinition, map[string]bool, []providers.Message) {
+func (l *Loop) buildFilteredTools(req *RunRequest, hadBootstrap bool, iteration, maxIter int, messages []providers.Message) ([]providers.ToolDefinition, map[string]bool, []providers.Message) {
 	// Build provider request with policy-filtered tools.
 	var toolDefs []providers.ToolDefinition
 	var allowedTools map[string]bool
@@ -54,37 +53,6 @@ func (l *Loop) buildFilteredTools(ctx context.Context, req *RunRequest, hadBoots
 			}
 		}
 		toolDefs = filtered
-	}
-
-	// Skill tool lock: when a skill that needs a forced deterministic tool path
-	// has been activated this run (e.g. parallel-research-sheet), strip its
-	// denied tools so the model can't fall back to the fabrication escape hatch
-	// (exec/write_file). Leaves the skill's intended tool (research_sheet) as the
-	// only path to the deliverable. Scoped per-run via the ctx-injected lock.
-	if lock := tools.SkillToolLockFromCtx(ctx); lock != nil {
-		var denied map[string]bool
-		for _, slug := range tools.SkillToolDenylistSlugs() {
-			if !lock.IsActive(slug) {
-				continue
-			}
-			for name := range tools.SkillDeniedTools(slug) {
-				if denied == nil {
-					denied = make(map[string]bool)
-				}
-				denied[name] = true
-			}
-		}
-		if len(denied) > 0 {
-			filtered := toolDefs[:0:0]
-			for _, td := range toolDefs {
-				if denied[td.Function.Name] {
-					delete(allowedTools, td.Function.Name)
-					continue
-				}
-				filtered = append(filtered, td)
-			}
-			toolDefs = filtered
-		}
 	}
 
 	// Bootstrap mode: restrict API tool definitions to write_file only (open agents).
