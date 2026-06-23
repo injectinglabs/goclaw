@@ -212,6 +212,7 @@ var coreToolSummaries = map[string]string{
 	"memory_get":             "Read specific sections of memory files",
 	"spawn":                  "Spawn a self-clone subagent to handle a task in the background",
 	"web_search":             "Search the web",
+	"batch_web_search":       "Run many web searches at once (one query per item) — use for building a sheet/table of N items instead of many web_search calls or spawning agents",
 	"web_fetch":              "Fetch and extract content from a URL",
 	"datetime":               "Get current date/time with timezone — use before creating cron jobs",
 	"cron":                   "Manage scheduled jobs and reminders (e.g. 'remind me at 9am', 'check every morning')",
@@ -697,6 +698,9 @@ func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups ma
 		// Speed: the sandbox has common libs pre-installed — skip the pip dance.
 		"For code/exec tasks the sandbox already has these Python libs installed: requests, httpx, beautifulsoup4, lxml, pandas, openpyxl, python-docx, reportlab, tabulate, pyyaml. Import them directly — do NOT pip install / create a venv for these (it just wastes turns).",
 		"For data tasks (scrape → spreadsheet/doc), write ONE self-contained script that fetches, parses, writes the output file, AND prints a short result summary, then run it ONCE — then deliver_file. Do NOT run throwaway probe commands first (curl/echo/fetch to 'check' the page, or a script that only prints the structure): handle uncertainty INSIDE the one script — try multiple selectors/fallbacks, validate the row count, and print diagnostics in the same run. Each extra exec/observe turn adds seconds of model latency, so collapse the work into a single script+run whenever possible.",
+		// Speed: the dominant cost is YOUR output tokens + extra turns, not tool
+		// execution. Skip exploration when the data is known; keep the script tight.
+		"SPEED — minimize latency on file/data builds: (1) When the data is well-known (famous companies, top VC firms, public reference lists, etc.), build DIRECTLY from your own knowledge — do NOT spend turns on web_search/skill_search exploration first; only search when you genuinely lack the facts. (2) Keep the generated script COMPACT: emit rows as one terse data structure (a list of tuples), write it to the file in a simple loop, and add styling minimally — every output token you generate costs the user wall-clock time (~150 tok/s), so a lean 100-row script is far faster than a verbose one. (3) Never re-print the dataset in your reply. Fewer turns + fewer output tokens = a faster answer.",
 		// Interactive-sheet edit loop: the chat UI renders delivered spreadsheets
 		// as an editable grid; when the user edits it, their next message carries
 		// the new data as a ```sheet-data fenced block.

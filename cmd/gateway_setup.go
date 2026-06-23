@@ -131,6 +131,12 @@ func setupToolRegistry(
 		toolsReg.Register(webSearchTool)
 		slog.Info("web_search tool enabled")
 	}
+	// batch_web_search: run N searches concurrently in one call (build-a-sheet
+	// research) instead of N turns or N sub-agents.
+	if batchSearchTool := tools.NewBatchWebSearchTool(tools.WebSearchConfigFromConfig(cfg)); batchSearchTool != nil {
+		toolsReg.Register(batchSearchTool)
+		slog.Info("batch_web_search tool enabled")
+	}
 	webFetchTool = tools.NewWebFetchTool(tools.WebFetchConfig{
 		Policy:         cfg.Tools.WebFetch.Policy,
 		AllowedDomains: cfg.Tools.WebFetch.AllowedDomains,

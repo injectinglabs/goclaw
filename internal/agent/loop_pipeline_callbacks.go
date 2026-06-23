@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -278,9 +279,18 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 		}
 
 		// Reasoning decision: resolve effort level for thinking models (o3, DeepSeek-R1, Kimi).
+		// When an agent has no explicit effort, ParseReasoningConfig defaults to
+		// "off" — which sends NO reasoning_effort, so thinking models (notably
+		// gemini-3.5-flash, our `default`) run at their MAX thinking budget and
+		// spiral: a 100-row sheet burned 1.3–1.8M tokens / 3–4 min reasoning and
+		// often emitted no answer (→ markdown fallback). Apply a concrete bounded
+		// default so the per-turn turnEffort capping below actually engages.
+		// Tunable via GOCLAW_DEFAULT_REASONING_EFFORT; set "off" to restore the
+		// old unbounded behaviour. Non-thinking providers ignore it (ResolveReasoning
+		// Decision returns off unless the provider is ThinkingCapable).
 		reasoningDecision := providers.ResolveReasoningDecision(
 			provider, model,
-			l.reasoningConfig.Effort,
+			effectiveReasoningEffort(l.reasoningConfig.Effort),
 			l.reasoningConfig.Fallback,
 			l.reasoningConfig.Source,
 		)
@@ -375,6 +385,28 @@ func (l *Loop) makePruneMessages() func(msgs []providers.Message, budget int) ([
 // per-turn thinking was the dominant cost on multi-tool tasks. capEffort only
 // ever LOWERS the level, so an agent explicitly configured to "off"/"low" is
 // never raised.
+// defaultReasoningEffort is the effort applied to thinking-capable models when
+// an agent has no explicit reasoning config (ParseReasoningConfig → "off").
+// "medium" lets turnEffort keep real reasoning on planning/recovery turns and
+// drop routine turns to "low". Override via GOCLAW_DEFAULT_REASONING_EFFORT
+// ("off" restores the legacy unbounded behaviour).
+var defaultReasoningEffort = func() string {
+	if v := strings.TrimSpace(os.Getenv("GOCLAW_DEFAULT_REASONING_EFFORT")); v != "" {
+		return v
+	}
+	return "medium"
+}()
+
+// effectiveReasoningEffort applies the bounded default when an agent has no
+// explicit effort ("" / "off"), so the per-turn turnEffort cap engages for
+// thinking models instead of letting them run unbounded.
+func effectiveReasoningEffort(configured string) string {
+	if configured == "" || configured == "off" {
+		return defaultReasoningEffort
+	}
+	return configured
+}
+
 func turnEffort(_ *RunRequest, state *pipeline.RunState, configured string) string {
 	if state.Iteration == 0 || recentTroubleSignal(state) {
 		return capEffort(configured, "medium")
