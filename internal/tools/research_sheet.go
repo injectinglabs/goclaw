@@ -219,26 +219,28 @@ func (t *ResearchSheetTool) Execute(ctx context.Context, args map[string]any) *R
 
 // researchOne finds an item's site, extracts its pages, and regexes emails.
 func (t *ResearchSheetTool) researchOne(ctx context.Context, chain []SearchProvider, item, topic string) perItem {
-	q := item
-	if topic != "" {
-		q += " " + topic
-	}
-	q += " official website"
+	// Keep the query light: a heavy context phrase on every query pulls
+	// directory/listicle results to the top. Name→domain matching (below) does
+	// the disambiguation instead.
+	q := item + " official website"
 
-	// Resolve the firm's OWN site — skip directories/aggregators (Crunchbase,
-	// LinkedIn, listicles) whose pages are the wrong entity or un-extractable.
+	// Resolve the firm's OWN site. Prefer the result whose domain matches the
+	// firm name (e.g. "Sequoia Capital" -> sequoiacap.com); fall back to the
+	// first non-aggregator result for rebranded firms (e.g. a16z). Skipping the
+	// aggregator blocklist alone isn't enough — the tail of SEO/directory sites
+	// (vestbee, waveup, …) is unbounded, so name matching is what gets it right.
 	var homepage, host string
 	for _, p := range chain {
-		res, err := p.Search(ctx, searchParams{Query: q, Count: 6})
+		res, err := p.Search(ctx, searchParams{Query: q, Count: 8})
 		if err != nil || len(res) == 0 {
 			continue
 		}
-		if homepage, host = firstFirmSite(res); homepage != "" {
+		if homepage, host = bestFirmSite(item, res); homepage != "" {
 			break
 		}
 	}
 	if homepage == "" {
-		slog.Debug("research_sheet.item", "item", item, "homepage", "", "reason", "no non-aggregator result")
+		slog.Debug("research_sheet.item", "item", item, "homepage", "", "reason", "no usable result")
 		return perItem{}
 	}
 
@@ -276,17 +278,49 @@ var aggregatorHosts = []string{
 	"glassdoor.com", "indeed.com", "clutch.co", "g2.com", "producthunt.com",
 }
 
-// firstFirmSite returns the first search result that looks like the firm's own
-// site (not an aggregator), as (homepage, host).
-func firstFirmSite(results []searchResult) (string, string) {
+// firmStopwords are name tokens too generic to match a domain on.
+var firmStopwords = map[string]bool{
+	"capital": true, "ventures": true, "venture": true, "partners": true, "partner": true,
+	"fund": true, "funds": true, "group": true, "the": true, "and": true, "vc": true,
+	"llc": true, "lp": true, "co": true, "inc": true, "management": true, "investments": true,
+}
+
+// bestFirmSite picks the firm's own site from search results: first a result
+// whose domain matches a significant token of the firm name, else the first
+// non-aggregator result (covers rebranded firms whose domain shares no token).
+func bestFirmSite(firm string, results []searchResult) (string, string) {
+	tokens := firmTokens(firm)
+	var fallbackHP, fallbackHost string
 	for _, r := range results {
 		hp, host := homepageFromURL(r.URL)
 		if hp == "" || isAggregatorHost(host) {
 			continue
 		}
-		return hp, host
+		if fallbackHP == "" {
+			fallbackHP, fallbackHost = hp, host
+		}
+		label := strings.ReplaceAll(rootDomain(host), ".", "")
+		for _, tok := range tokens {
+			if strings.Contains(label, tok) {
+				return hp, host
+			}
+		}
 	}
-	return "", ""
+	return fallbackHP, fallbackHost
+}
+
+// firmTokens returns significant lowercased name tokens (len>=3, non-stopword)
+// for domain matching.
+func firmTokens(firm string) []string {
+	var out []string
+	for _, raw := range strings.FieldsFunc(strings.ToLower(firm), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	}) {
+		if len(raw) >= 3 && !firmStopwords[raw] {
+			out = append(out, raw)
+		}
+	}
+	return out
 }
 
 func isAggregatorHost(host string) bool {
