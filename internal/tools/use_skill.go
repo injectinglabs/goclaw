@@ -58,9 +58,6 @@ func (t *UseSkillTool) Execute(ctx context.Context, args map[string]any) *Result
 	if t.access == nil {
 		// Single-user / desktop edition — no multi-tenant boundary to enforce.
 		slog.Info("skill.activated", "skill", name, "gated", false)
-		if lock := SkillToolLockFromCtx(ctx); lock != nil {
-			lock.Mark(name)
-		}
 		return NewResult(activationMessage(name, ""))
 	}
 
@@ -80,9 +77,6 @@ func (t *UseSkillTool) Execute(ctx context.Context, args map[string]any) *Result
 	}
 
 	slog.Info("skill.activated", "skill", match.Slug, "user", userID, "gated", true)
-	if lock := SkillToolLockFromCtx(ctx); lock != nil {
-		lock.Mark(match.Slug)
-	}
 	return NewResult(activationMessage(match.Slug, match.Path))
 }
 

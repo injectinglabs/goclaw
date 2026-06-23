@@ -234,7 +234,7 @@ func (l *Loop) makeBuildFilteredTools(req *RunRequest) func(state *pipeline.RunS
 
 		maxIter := l.effectiveMaxIterations(req)
 		allMsgs := state.Messages.All()
-		toolDefs, _, returnedMsgs := l.buildFilteredTools(state.Ctx, req, state.Context.HadBootstrap,
+		toolDefs, _, returnedMsgs := l.buildFilteredTools(req, state.Context.HadBootstrap,
 			state.Iteration, maxIter, allMsgs)
 		// buildFilteredTools returns the full messages slice; only messages appended
 		// beyond the original length are injections (e.g. final-iteration hint).
@@ -545,3 +545,4 @@ func (l *Loop) makeBootstrapCleanup() func(ctx context.Context, state *pipeline.
 		return l.bootstrapCleanup(ctx, l.agentUUID, state.Input.UserID)
 	}
 }
+

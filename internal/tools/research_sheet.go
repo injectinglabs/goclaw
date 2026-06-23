@@ -4,16 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/google/uuid"
-	"github.com/xuri/excelize/v2"
 
 	"github.com/nextlevelbuilder/goclaw/internal/actorheaders"
-	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -41,12 +37,6 @@ type ResearchSheetTool struct {
 	tenantStore store.TenantStore
 	// webSearch is the registered web_search tool, reused for lookups.
 	webSearch Tool
-	// workspace is the fallback workspace root when ctx carries none.
-	workspace string
-	// mediaUpload mirrors the delivered .xlsx into the durable media store
-	// (S3 on stage/prod) so the download link survives the workspace cleanup
-	// cron. When nil, delivery falls back to the local workspace path.
-	mediaUpload MediaUploadFunc
 }
 
 func NewResearchSheetTool(
@@ -57,20 +47,12 @@ func NewResearchSheetTool(
 	return &ResearchSheetTool{resolveProvider: resolveProvider, tenantStore: tenantStore, webSearch: webSearch}
 }
 
-// SetWorkspace sets the fallback workspace root for writing the .xlsx when the
-// per-run context doesn't carry one.
-func (t *ResearchSheetTool) SetWorkspace(ws string) { t.workspace = ws }
-
-// SetMediaUploadFunc enables durable copy of the produced .xlsx to the media
-// store (mirrors deliver_file / write_file wiring).
-func (t *ResearchSheetTool) SetMediaUploadFunc(fn MediaUploadFunc) { t.mediaUpload = fn }
-
 func (t *ResearchSheetTool) Name() string { return "research_sheet" }
 
 func (t *ResearchSheetTool) Description() string {
-	return "Build and DELIVER a real, web-researched spreadsheet (.xlsx) for a list of items. " +
-		"Pass the items (row keys, e.g. company/firm names) and the columns to fill; it web-searches EACH item, extracts the column values from live results, writes them to an .xlsx, and sends the download link to the user — all in one call. " +
-		"The values come from real search, not memory. You do NOT need to write any code or call deliver_file afterward — this tool produces and delivers the finished file itself."
+	return "Build REAL, web-researched data rows for a list of items — the data engine for a researched spreadsheet/table. " +
+		"Pass the items (row keys, e.g. company/firm names) and the columns to fill; it web-searches EACH item and extracts the column values from live results, returning finished rows as JSON. " +
+		"Use this instead of filling columns from memory: the values come from real search, not recall. After it returns, write the rows to an .xlsx and deliver_file."
 }
 
 func (t *ResearchSheetTool) Parameters() map[string]any {
@@ -90,10 +72,6 @@ func (t *ResearchSheetTool) Parameters() map[string]any {
 			"context": map[string]any{
 				"type":        "string",
 				"description": "Optional context to focus the searches (e.g. 'SF Bay Area seed-stage venture capital firm').",
-			},
-			"filename": map[string]any{
-				"type":        "string",
-				"description": "Optional output file name for the delivered .xlsx (e.g. 'top_100_vcs.xlsx'). Defaults to 'researched_sheet.xlsx'.",
 			},
 		},
 		"required": []string{"items", "columns"},
@@ -147,92 +125,13 @@ func (t *ResearchSheetTool) Execute(ctx context.Context, args map[string]any) *R
 	}
 	wg.Wait()
 
-	// Build the .xlsx from the researched rows and deliver it directly. The
-	// model never sees the raw values and never writes the file itself — this is
-	// the whole point: it cannot substitute recalled data for the searched data.
-	filename := sanitizeXLSXName(strOrEmpty(args["filename"]))
-	path, err := t.writeXLSX(ctx, filename, columns, rows)
-	if err != nil {
-		return ErrorResult(fmt.Sprintf("research_sheet: built the data but failed to write the .xlsx: %v", err))
-	}
-
-	deliveredPath := path
-	if t.mediaUpload != nil {
-		if cachePath := uploadDeliveredToMediaStore(ctx, t.mediaUpload, path); cachePath != "" {
-			deliveredPath = cachePath
-		}
-	}
-
-	filled := 0
-	for _, r := range rows {
-		for _, c := range columns[1:] { // col 0 is the row key
-			if strings.TrimSpace(r[c]) != "" {
-				filled++
-				break
-			}
-		}
-	}
-	msg := fmt.Sprintf("Delivered %s — a researched spreadsheet with %d rows × %d columns, built from live web search (%d/%d rows have at least one researched value). The download link is attached to the chat. Do NOT regenerate this file or 'correct' any values from memory, and do NOT call deliver_file — it is already delivered.", filepath.Base(path), len(rows), len(columns), filled, len(rows))
+	payload := map[string]any{"columns": columns, "rows": rows}
+	buf, _ := json.Marshal(payload)
+	msg := fmt.Sprintf("Researched %d items via live web search. The rows below are real (search-derived) data — write them straight to an .xlsx (row 1 = columns) and deliver_file. Do NOT regenerate or 'correct' values from memory.\n\n%s", len(items), string(buf))
 	if truncated {
-		msg += fmt.Sprintf(" Note: only the first %d items were researched — call again for the rest.", maxResearchItems)
+		msg += fmt.Sprintf("\n\n(note: only the first %d items were researched — call again for the rest.)", maxResearchItems)
 	}
-	result := SilentResult(msg)
-	result.Media = []bus.MediaFile{{Path: deliveredPath, Filename: filepath.Base(path)}}
-	if dm := DeliveredMediaFromCtx(ctx); dm != nil {
-		dm.Mark(deliveredPath)
-	}
-	return result
-}
-
-// writeXLSX writes the researched rows to an .xlsx in the run workspace and
-// returns the absolute path. Row 1 is the column headers; data follows.
-func (t *ResearchSheetTool) writeXLSX(ctx context.Context, filename string, columns []string, rows []map[string]string) (string, error) {
-	ws := ToolWorkspaceFromCtx(ctx)
-	if ws == "" {
-		ws = t.workspace
-	}
-	if ws == "" {
-		var err error
-		if ws, err = os.MkdirTemp("", "research-sheet-"); err != nil {
-			return "", err
-		}
-	}
-	if err := os.MkdirAll(ws, 0o755); err != nil {
-		return "", err
-	}
-	path := filepath.Join(ws, filename)
-
-	f := excelize.NewFile()
-	defer f.Close()
-	const sheet = "Sheet1"
-	for j, col := range columns {
-		cell, _ := excelize.CoordinatesToCellName(j+1, 1)
-		_ = f.SetCellStr(sheet, cell, col)
-	}
-	for i, row := range rows {
-		for j, col := range columns {
-			cell, _ := excelize.CoordinatesToCellName(j+1, i+2)
-			_ = f.SetCellStr(sheet, cell, row[col])
-		}
-	}
-	if err := f.SaveAs(path); err != nil {
-		return "", err
-	}
-	return path, nil
-}
-
-func strOrEmpty(v any) string { s, _ := v.(string); return s }
-
-// sanitizeXLSXName returns a safe, workspace-relative .xlsx filename.
-func sanitizeXLSXName(name string) string {
-	name = filepath.Base(strings.TrimSpace(name)) // strip any path components
-	if name == "" || name == "." || name == "/" {
-		return "researched_sheet.xlsx"
-	}
-	if !strings.HasSuffix(strings.ToLower(name), ".xlsx") {
-		name += ".xlsx"
-	}
-	return name
+	return NewResult(msg)
 }
 
 // researchOne searches for one item and extracts the requested columns from the
