@@ -356,6 +356,11 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	// write_file(deliver=true) marks paths, message self-send guard checks before allowing.
 	ctx = tools.WithDeliveredMedia(ctx, tools.NewDeliveredMedia())
 
+	// Inject skill tool lock so use_skill can record activated skills and the
+	// per-iteration tool filter can restrict the toolset for skills that need a
+	// forced deterministic tool path (e.g. parallel-research-sheet).
+	ctx = tools.WithSkillToolLock(ctx, tools.NewSkillToolLock())
+
 	// Security: truncate oversized user messages gracefully (feed truncation notice into LLM)
 	maxChars := l.maxMessageChars
 	if maxChars <= 0 {

@@ -739,6 +739,57 @@ func DeliveredMediaFromCtx(ctx context.Context) *DeliveredMedia {
 	return v
 }
 
+// --- Skill tool lock (skill activation → tool restriction) ---
+
+const ctxSkillToolLock toolContextKey = "tool_skill_lock"
+
+// SkillToolLock records which skills have been activated during the current
+// run so the per-iteration tool filter can restrict the toolset accordingly.
+// Some skills (e.g. parallel-research-sheet) only work correctly when the model
+// is FORCED down a deterministic tool path — prompting alone doesn't stop it
+// from falling back to fabricating data via exec/write_file. When such a skill
+// is activated, its denied tools (see SkillToolDenylist) are stripped from the
+// model's tool definitions for the rest of the run. Scope is per-run: a new user
+// turn starts a fresh lock, so the restriction lifts unless the skill is
+// re-activated. Thread-safe: tools may execute in parallel goroutines.
+type SkillToolLock struct {
+	mu     sync.Mutex
+	active map[string]bool
+}
+
+// NewSkillToolLock creates an empty lock.
+func NewSkillToolLock() *SkillToolLock {
+	return &SkillToolLock{active: make(map[string]bool)}
+}
+
+// Mark records a skill slug as activated this run.
+func (s *SkillToolLock) Mark(slug string) {
+	if slug == "" {
+		return
+	}
+	s.mu.Lock()
+	s.active[slug] = true
+	s.mu.Unlock()
+}
+
+// IsActive reports whether a skill slug was activated this run.
+func (s *SkillToolLock) IsActive(slug string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active[slug]
+}
+
+// WithSkillToolLock injects a skill tool lock into context.
+func WithSkillToolLock(ctx context.Context, l *SkillToolLock) context.Context {
+	return context.WithValue(ctx, ctxSkillToolLock, l)
+}
+
+// SkillToolLockFromCtx returns the skill tool lock, or nil.
+func SkillToolLockFromCtx(ctx context.Context) *SkillToolLock {
+	v, _ := ctx.Value(ctxSkillToolLock).(*SkillToolLock)
+	return v
+}
+
 // --- Run media file paths (for team workspace auto-collect) ---
 
 const ctxRunMediaPaths toolContextKey = "tool_run_media_paths"
