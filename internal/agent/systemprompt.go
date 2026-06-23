@@ -213,6 +213,7 @@ var coreToolSummaries = map[string]string{
 	"spawn":                  "Spawn a self-clone subagent to handle a task in the background",
 	"web_search":             "Search the web",
 	"batch_web_search":       "Run many web searches at once (one query per item) — use for building a sheet/table of N items instead of many web_search calls or spawning agents",
+	"research_sheet":         "Build + deliver a real web-researched .xlsx for a list of items (searches + extracts each item's pages for emails/website/columns) — use for 'build a sheet/table of N researched items'; it writes and delivers the file itself",
 	"web_fetch":              "Fetch and extract content from a URL",
 	"datetime":               "Get current date/time with timezone — use before creating cron jobs",
 	"cron":                   "Manage scheduled jobs and reminders (e.g. 'remind me at 9am', 'check every morning')",
