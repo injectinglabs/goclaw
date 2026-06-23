@@ -268,6 +268,12 @@ func (l *Loop) finalizeRun(
 	}
 }
 
+// rescueMaxOutputTokens is the output budget the empty-reply rescue requests.
+// Generous on purpose: the turn went empty because the model had no room left
+// for visible text. Auto-clamped per model at the provider edge, so a value
+// above a model's real ceiling is safe.
+const rescueMaxOutputTokens = 32768
+
 // rescueEmptyReply fires one provider call with tools disabled and a
 // "finalise using the history above" nudge, to pull text out of a model
 // that ended its previous turn silent after a tool-call round.
@@ -320,6 +326,19 @@ func (l *Loop) rescueEmptyReply(
 		Model:    model,
 		Options: map[string]any{
 			providers.OptStripThinking: true,
+			// Why the empty turn happened in the first place is usually
+			// budget starvation: a thinking model (Gemini, DeepSeek-Reasoner,
+			// Kimi, o-series…) spends its whole max_tokens allowance on
+			// reasoning and emits zero visible text. OptStripThinking only
+			// HIDES reasoning — it doesn't free the budget. So the rescue
+			// must (a) cap the reasoning effort so tokens go to the answer,
+			// and (b) request a generous output budget. Both are model-
+			// agnostic: OptThinkingLevel is gated to thinking-capable routes
+			// (others ignore it) and max_tokens auto-clamps per model
+			// (openai_http.go clampMaxTokensFromError), so this is safe for
+			// any provider/model.
+			providers.OptThinkingLevel: "low",
+			providers.OptMaxTokens:     rescueMaxOutputTokens,
 		},
 	}
 
