@@ -61,6 +61,32 @@ func (l *Loop) resolveRunProviderModel(req *RunRequest) (providers.Provider, str
 // instead of stopping at the default 30-turn cap.
 const browserMaxIterations = 100
 
+// unresolvedMaxOutputTokens is the per-call output budget used when the model's
+// real ceiling can't be resolved. Generous on purpose so thinking models have
+// room to reason AND emit text; auto-clamped to the model's real limit at the
+// provider edge.
+const unresolvedMaxOutputTokens = 32768
+
+// resolveMaxOutputTokens returns the per-call output budget for a model. Uses
+// the registry's real ceiling when known; otherwise a generous floor.
+//
+// The floor matters in prod: the catalog alias "default" → gemini-3.5-flash is
+// registered from llm-service /v1/models, whose rows carry context_window but
+// NO max_tokens, so the registered spec has MaxTokens=0. Returning 0 fell back
+// to Config.MaxTokens (8192) — far too small for a THINKING model, which spends
+// the whole budget on reasoning and emits zero visible text (verified in prod
+// tracing: final turn finish_reason=length, output_tokens=0 → empty reply).
+// The floor is auto-clamped to the model's real ceiling at the provider edge
+// (openai_http.go clampMaxTokensFromError), so it's safe for any model.
+func (l *Loop) resolveMaxOutputTokens(provider, model string) int {
+	if l.modelRegistry != nil && model != "" {
+		if spec := l.modelRegistry.Resolve(provider, model); spec != nil && spec.MaxTokens > 0 {
+			return spec.MaxTokens
+		}
+	}
+	return unresolvedMaxOutputTokens
+}
+
 // effectiveMaxIterations resolves the per-run turn ceiling. Extension runs get a
 // raised floor so a full application doesn't stop mid-form. A per-request value
 // may only LOWER the result (never raise it).
@@ -110,16 +136,7 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 		// ThinkStage can request the model's full output capacity instead of the
 		// small pipeline default. Forward-compat resolver maps new versions
 		// (e.g. claude-opus-4-8 → claude-opus-4-6's 32k) so current models work.
-		ResolveMaxOutputTokens: func(provider, model string) int {
-			if l.modelRegistry == nil || model == "" {
-				return 0
-			}
-			spec := l.modelRegistry.Resolve(provider, model)
-			if spec == nil {
-				return 0
-			}
-			return spec.MaxTokens
-		},
+		ResolveMaxOutputTokens: l.resolveMaxOutputTokens,
 		EmitEvent: func(event any) {
 			if ae, ok := event.(AgentEvent); ok {
 				l.emit(ae)
