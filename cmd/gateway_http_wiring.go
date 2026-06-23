@@ -317,6 +317,28 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 			}
 		}
 
+		// research_sheet: search + full-page extract → real, fast spreadsheet
+		// research. Emails come from page text via regex (not snippets/memory);
+		// interpretive columns are filled by a batched LLM pass using the same
+		// per-tenant resolver + tenant store. Needs Tavily (/extract) configured.
+		if d.toolsReg != nil {
+			if rs := tools.NewResearchSheetTool(tools.WebSearchConfigFromConfig(d.cfg)); rs != nil {
+				rs.SetSoftColumnLLM(func(ctx context.Context, tenantID uuid.UUID) (providers.Provider, string, error) {
+					p, m := providerresolve.ResolveBackgroundProvider(ctx, tenantID, registry, sysCfgs)
+					if p == nil {
+						return nil, "", fmt.Errorf("no background provider for tenant %s", tenantID)
+					}
+					return p, m, nil
+				}, d.pgStores.Tenants)
+				rs.SetWorkspace(d.workspace)
+				if mediaStore != nil {
+					rs.SetMediaUploadFunc(mediaStore.SaveFile)
+				}
+				d.toolsReg.Register(rs)
+				slog.Info("research_sheet tool enabled")
+			}
+		}
+
 		// composio-mcp lives on the docker internal network at a fixed
 		// host (no env override — it's a same-stack sidecar). Auth is
 		// per-call via X-Proxy-User; no shared service token.
