@@ -75,7 +75,7 @@ func (l *Loop) finalizeRun(
 		// the parent run is using, so the UI bubble fills live instead of
 		// staying empty until reload pulls the saved finalContent from DB.
 		emitChunk := l.makeRescueChunkEmitter(req)
-		if rescued := l.rescueEmptyReply(ctx, history, emitChunk); rescued != "" {
+		if rescued := l.rescueEmptyReply(ctx, req, history, emitChunk); rescued != "" {
 			rs.finalContent = SanitizeAssistantContent(rescued)
 		}
 	}
@@ -288,10 +288,17 @@ func (l *Loop) finalizeRun(
 // on refactoring FinalizeStage to expose the provider/state plumbing.
 func (l *Loop) rescueEmptyReply(
 	ctx context.Context,
+	req *RunRequest,
 	history []providers.Message,
 	emitChunk func(content string),
 ) string {
-	if l.provider == nil || l.model == "" || len(history) == 0 {
+	// Resolve the per-run provider/model. In multi-tenant mode l.provider /
+	// l.model are nil/empty and the real tenant-scoped provider arrives via
+	// req overrides. Using l.provider directly here made the rescue silently
+	// no-op on multi-tenant deploys, so every empty model turn fell straight
+	// through to the MsgEmptyReplyFallback sentence with no retry attempted.
+	provider, model := l.resolveRunProviderModel(req)
+	if provider == nil || model == "" || len(history) == 0 {
 		return ""
 	}
 
@@ -307,10 +314,10 @@ func (l *Loop) rescueEmptyReply(
 	msgs = append(msgs, history...)
 	msgs = append(msgs, nudge)
 
-	req := providers.ChatRequest{
+	chatReq := providers.ChatRequest{
 		Messages: msgs,
 		Tools:    nil, // force text
-		Model:    l.model,
+		Model:    model,
 		Options: map[string]any{
 			providers.OptStripThinking: true,
 		},
@@ -319,13 +326,13 @@ func (l *Loop) rescueEmptyReply(
 	var resp *providers.ChatResponse
 	var err error
 	if emitChunk != nil {
-		resp, err = l.provider.ChatStream(ctx, req, func(chunk providers.StreamChunk) {
+		resp, err = provider.ChatStream(ctx, chatReq, func(chunk providers.StreamChunk) {
 			if chunk.Content != "" {
 				emitChunk(chunk.Content)
 			}
 		})
 	} else {
-		resp, err = l.provider.Chat(ctx, req)
+		resp, err = provider.Chat(ctx, chatReq)
 	}
 	if err != nil {
 		slog.Warn("agent: rescue retry failed", "error", err)

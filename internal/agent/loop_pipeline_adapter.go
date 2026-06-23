@@ -21,14 +21,7 @@ func (l *Loop) runViaPipeline(ctx context.Context, req RunRequest) (*RunResult, 
 	bridgeRS := &runState{}
 	deps := l.buildPipelineDeps(&req, bridgeRS)
 
-	model := l.model
-	if req.ModelOverride != "" {
-		model = req.ModelOverride
-	}
-	provider := l.provider
-	if req.ProviderOverride != nil {
-		provider = req.ProviderOverride
-	}
+	provider, model := l.resolveRunProviderModel(&req)
 
 	p := pipeline.NewDefaultPipeline(deps)
 	state := pipeline.NewRunState(input, nil, model, provider)
@@ -38,6 +31,26 @@ func (l *Loop) runViaPipeline(ctx context.Context, req RunRequest) (*RunResult, 
 		return nil, err
 	}
 	return convertRunResult(pResult), nil
+}
+
+// resolveRunProviderModel returns the provider/model to use for THIS run.
+// In multi-tenant mode the global l.provider/l.model are nil/empty and the
+// tenant-scoped provider arrives per-run via req.ProviderOverride/ModelOverride
+// (see cmd/gateway_agents.go — "no global primary provider (multi-tenant mode)").
+// Anything that makes its own LLM call for a run — the pipeline turn AND the
+// empty-reply rescue — MUST resolve through here, or it silently no-ops on
+// multi-tenant deploys.
+func (l *Loop) resolveRunProviderModel(req *RunRequest) (providers.Provider, string) {
+	provider, model := l.provider, l.model
+	if req != nil {
+		if req.ProviderOverride != nil {
+			provider = req.ProviderOverride
+		}
+		if req.ModelOverride != "" {
+			model = req.ModelOverride
+		}
+	}
+	return provider, model
 }
 
 // buildPipelineDeps maps Loop fields + methods to PipelineDeps callbacks.
@@ -235,7 +248,7 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 			// WS subscription as the primary turn, so the assistant bubble
 			// fills live instead of staying empty until the user reloads.
 			emitChunk := l.makeRescueChunkEmitter(req)
-			if rescued := l.rescueEmptyReply(ctx, history, emitChunk); rescued != "" {
+			if rescued := l.rescueEmptyReply(ctx, req, history, emitChunk); rescued != "" {
 				return SanitizeAssistantContent(rescued)
 			}
 			// Rescue also empty — return a localised sentence so the user
