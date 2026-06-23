@@ -1,7 +1,7 @@
 ---
 name: parallel-research-sheet
 description: |
-  Build a DOWNLOADABLE spreadsheet (.xlsx) of N items where each row needs REAL, researched data (looked up on the web), FAST — by running all the lookups concurrently with the `batch_web_search` tool, then extracting the columns in one pass.
+  Build a DOWNLOADABLE spreadsheet (.xlsx) of N items where each row needs REAL, researched data (looked up on the web), FAST — using the `research_sheet` tool, which searches each item and extracts the columns for you in one call, then writing the returned rows to an .xlsx.
 
   Use this skill when ALL of these hold:
   - The user asks you to BUILD / MAKE / CREATE / GENERATE a spreadsheet, table, excel, or sheet of MANY items (≈20+ rows) — e.g. "build an excel of the top 100 VCs in the SF Bay Area", "make a sheet of the 50 biggest SaaS companies with their funding", "table of the top 100 companies by market cap with website + HQ + revenue".
@@ -14,37 +14,39 @@ description: |
   - The user only wants a quick markdown answer to read in chat.
 metadata:
   author: injecting.ai
-  version: "2.0.0"
+  version: "3.0.0"
 ---
 
 # Parallel Research Sheet
 
-Build a downloadable `.xlsx` of N researched rows FAST. The trick is to do all the web lookups **concurrently in a single `batch_web_search` call** — NOT one `web_search` at a time, and **NOT by spawning sub-agents**.
+Build a downloadable `.xlsx` of N researched rows FAST. The data lookup is done for you by the **`research_sheet` tool** — it web-searches EACH item and extracts the column values from live results, concurrently, and returns finished rows. You do NOT search or fill values yourself.
 
-## ⚠️ Do NOT spawn sub-agents
-Do **not** use the `spawn` tool for this. Spawning one agent per chunk runs a full LLM loop per chunk — it's slow (you wait on the slowest agent), wildly token-expensive, and over-searches. Use `batch_web_search` instead: the searches fan out as plain concurrent HTTP, with zero extra model turns.
+## ⚠️ Two hard rules
+1. **Do NOT fill column values from memory.** Your recalled numbers/websites/locations are stale and wrong. The whole point of this skill is that `research_sheet` sources every value from live search. Never "correct" or "complete" the returned rows from prior knowledge.
+2. **Do NOT spawn sub-agents** (`spawn`) for the lookups, and do NOT loop `web_search` one row at a time. `research_sheet` already fans the searches out concurrently in a single call — that's faster, cheaper, and more reliable.
 
 ## Recipe
 
-1. **Decide the schema** — the exact column headers (e.g. `Firm, Website, HQ, Stage, Notable Investments`) and the total row count N.
+1. **Decide the schema** — the exact column headers (e.g. `Firm, Website, HQ, Stage, Notable Investments`) and the total row count N. Put the row-key column (the item name) first.
 
-2. **Get the item list (row keys).** If the N items are a well-known set, list them yourself; otherwise do ONE `web_search` to find the names. You need the N names before the batch lookup.
+2. **Get the item list (row keys).** If the N items are a well-known set, list them yourself; otherwise do ONE `web_search` to find the names. You need the N names before calling `research_sheet`.
 
-3. **One `batch_web_search` call.** Pass an array of N queries — **one focused query per item** that targets the columns you need, e.g. `"Sequoia Capital venture firm official website headquarters stage focus"`. All N searches run concurrently and come back together. (Up to 100 queries per call; for N>100, split into a few calls.)
+3. **One `research_sheet` call.** Pass:
+   - `items`: the array of N row keys (e.g. the firm names),
+   - `columns`: the column headers to fill,
+   - `context` (optional): a phrase to focus the searches, e.g. `"SF Bay Area seed-stage venture capital firm"`.
+   It returns `{columns, rows}` where each row is real, search-derived data. (Up to 120 items per call; for N>120, call again for the rest.)
 
-4. **Extract in ONE pass.** From the combined results, pull the column values for every item — the top result URL is usually the official website; HQ/stage/focus come from the titles + snippets. If a value isn't in the results, use an empty string (don't go re-searching). Do this in your own turn — no extra tool calls per row.
-
-5. **Write + deliver.** Write ONE `.xlsx` via `exec` + openpyxl (row 1 = headers, data below, no banner/merged rows), validate ~N rows, then `deliver_file` it. Reply with a one/two-sentence summary — do NOT paste the data back as a markdown table (it renders as an interactive grid).
+4. **Write + deliver.** Write ONE `.xlsx` via `exec` + openpyxl from the returned rows (row 1 = columns, data below, no banner/merged rows), validate ~N rows, then `deliver_file` it. Reply with a one/two-sentence summary — do NOT paste the data back as a markdown table (it renders as an interactive grid).
 
 ## Guardrails
-- **`batch_web_search`, not `spawn`** — this is the whole point. One concurrent batch call beats N sub-agents on speed, cost, and reliability.
-- **One query per item**, focused on the columns you need. Don't issue multiple searches per item.
-- **Extract from what you get** — if the batch results don't contain a value, leave it blank rather than firing more searches.
-- **Real data** — if the batch comes back with no results at all, tell the user the search source is unavailable instead of inventing values.
-- Small N (< ~20) or trivially-known data: skip the batch, build directly.
+- **`research_sheet`, not `spawn` and not memory** — this is the whole point.
+- **Write exactly what the tool returns.** Blank cells the tool left empty stay blank — don't fill them in from recall.
+- **Real data** — if `research_sheet` reports the search source is unavailable / returns all-blank rows, tell the user rather than inventing values.
+- Small N (< ~20) or trivially-known data: skip the tool, build directly.
 
 ## Example — "top 100 VCs in the SF Bay Area"
 1. Schema: `Firm, Website, HQ, Stage, Notable Investments`.
 2. One `web_search` → list the 100 firm names.
-3. ONE `batch_web_search` with 100 queries: `["Sequoia Capital venture firm website headquarters stage", "Andreessen Horowitz a16z website headquarters stage", … (100 total)]`.
-4. Extract the 5 columns for all 100 firms from the combined results → openpyxl `.xlsx` → `deliver_file`.
+3. ONE `research_sheet` with `items=[the 100 firm names]`, `columns=["Firm","Website","HQ","Stage","Notable Investments"]`, `context="SF Bay Area venture capital firm"`.
+4. Take the returned `rows` → openpyxl `.xlsx` → `deliver_file`.
