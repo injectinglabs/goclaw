@@ -47,3 +47,48 @@ func TestRescueEmptyReply_UsesPerRunProviderWhenGlobalNil(t *testing.T) {
 		t.Fatalf("with override: want %q, got %q", "rescued answer", got)
 	}
 }
+
+// capturingProvider records the last ChatRequest so a test can assert which
+// options the caller set.
+type capturingProvider struct {
+	response string
+	lastReq  providers.ChatRequest
+}
+
+func (c *capturingProvider) Chat(_ context.Context, req providers.ChatRequest) (*providers.ChatResponse, error) {
+	c.lastReq = req
+	return &providers.ChatResponse{Content: c.response}, nil
+}
+
+func (c *capturingProvider) ChatStream(_ context.Context, req providers.ChatRequest, _ func(providers.StreamChunk)) (*providers.ChatResponse, error) {
+	c.lastReq = req
+	return &providers.ChatResponse{Content: c.response}, nil
+}
+func (c *capturingProvider) DefaultModel() string { return "cap-model" }
+func (c *capturingProvider) Name() string         { return "cap" }
+
+// Universal empty-reply fix: the rescue must constrain the reasoning budget
+// (OptThinkingLevel) AND request a generous, auto-clamped output budget
+// (OptMaxTokens), so a thinking model that starved its visible-text budget on
+// the primary turn gets room to actually emit the answer on retry. These are
+// model-agnostic (thinking level is gated to thinking routes; max_tokens
+// clamps per model), so the fix holds for any provider.
+func TestRescueEmptyReply_ConstrainsThinkingAndRaisesOutputBudget(t *testing.T) {
+	cap := &capturingProvider{response: "answer"}
+	l := &Loop{provider: nil, model: ""}
+	req := &RunRequest{ProviderOverride: cap, ModelOverride: "m"}
+	history := []providers.Message{{Role: "user", Content: "hi"}}
+
+	if got := l.rescueEmptyReply(context.Background(), req, history, nil); got != "answer" {
+		t.Fatalf("want %q, got %q", "answer", got)
+	}
+	if lvl, _ := cap.lastReq.Options[providers.OptThinkingLevel].(string); lvl != "low" {
+		t.Fatalf("rescue must cap reasoning: OptThinkingLevel = %q, want \"low\"", lvl)
+	}
+	if mt, _ := cap.lastReq.Options[providers.OptMaxTokens].(int); mt != rescueMaxOutputTokens {
+		t.Fatalf("rescue must request a generous budget: OptMaxTokens = %d, want %d", mt, rescueMaxOutputTokens)
+	}
+	if strip, _ := cap.lastReq.Options[providers.OptStripThinking].(bool); !strip {
+		t.Fatalf("rescue must still strip thinking from the reply")
+	}
+}
