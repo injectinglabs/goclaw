@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/actorheaders"
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
@@ -48,14 +49,19 @@ type AgentSummoner struct {
 	agents      store.AgentStore
 	providerReg *providers.Registry
 	msgBus      *bus.MessageBus
+	// tenantStore lets the summon LLM call attach X-Actor-Org-ID (infra source)
+	// so the service-token receiver (web-agent-api) accepts it. Without it the
+	// call 400s ("Service-token auth requires X-Actor-* headers") and summon fails.
+	tenantStore store.TenantStore
 }
 
 // NewAgentSummoner creates a summoner backed by the given stores and provider registry.
-func NewAgentSummoner(agents store.AgentStore, providerReg *providers.Registry, msgBus *bus.MessageBus) *AgentSummoner {
+func NewAgentSummoner(agents store.AgentStore, providerReg *providers.Registry, msgBus *bus.MessageBus, tenantStore store.TenantStore) *AgentSummoner {
 	return &AgentSummoner{
 		agents:      agents,
 		providerReg: providerReg,
 		msgBus:      msgBus,
+		tenantStore: tenantStore,
 	}
 }
 
@@ -73,6 +79,11 @@ const singleCallTimeout = 300 * time.Second
 func (s *AgentSummoner) SummonAgent(agentID uuid.UUID, tenantID uuid.UUID, providerName, model, description string) {
 	ctx, cancel := context.WithTimeout(store.WithTenantID(context.Background(), tenantID), 600*time.Second)
 	defer cancel()
+	// Summon is system-initiated work: attach X-Actor-Org-ID + X-Actor-Source:infra
+	// so the service-token receiver accepts the LLM call (org pays, no user).
+	if s.tenantStore != nil {
+		ctx = actorheaders.AttachInfra(ctx, s.tenantStore, tenantID)
+	}
 
 	s.ensureBackfillFiles(ctx, agentID)
 	s.emitEvent(agentID, tenantID, SummonEventStarted, "", "")
