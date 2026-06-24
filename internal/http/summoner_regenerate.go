@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/actorheaders"
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
@@ -23,6 +24,9 @@ import (
 func (s *AgentSummoner) RegenerateAgent(agentID uuid.UUID, tenantID uuid.UUID, providerName, model, editPrompt string) {
 	ctx, cancel := context.WithTimeout(store.WithTenantID(context.Background(), tenantID), 300*time.Second)
 	defer cancel()
+	if s.tenantStore != nil {
+		ctx = actorheaders.AttachInfra(ctx, s.tenantStore, tenantID)
+	}
 
 	s.ensureBackfillFiles(ctx, agentID)
 
