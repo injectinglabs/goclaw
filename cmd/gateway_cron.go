@@ -12,6 +12,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
 	"github.com/nextlevelbuilder/goclaw/internal/sessions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -190,7 +191,7 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 						// sessions, so team-org members don't see another
 						// member's reminder pop up live (reminders.list already
 						// SQL-filters by user_id; this aligns the runtime path).
-						"user_id":          job.UserID,
+						"user_id": job.UserID,
 					})
 			} else {
 				outMsg := bus.OutboundMessage{
@@ -203,6 +204,23 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 				}
 				appendMediaToOutbound(&outMsg, result.Media)
 				msgBus.PublishOutbound(outMsg)
+
+				// Record the delivered message in the channel's INTERACTIVE session
+				// so a follow-up reply (e.g. "approve") sees it as conversation
+				// context. Cron runs in an isolated session (agent:..:cron:..) and
+				// reset each run, so without this the delivered proposal/draft is
+				// invisible to the interactive turn that responds to it — the agent
+				// then loops on empty lookups and trips the no-progress guard.
+				// Key must match what the inbound consumer builds (gateway_consumer_normal.go).
+				if sessionMgr != nil && strings.TrimSpace(result.Content) != "" {
+					ipk := peerKind
+					if ipk == "" {
+						ipk = string(sessions.PeerDirect)
+					}
+					ik := sessions.BuildScopedSessionKey(agentID, job.DeliverChannel, sessions.PeerKind(ipk), job.DeliverTo)
+					sessionMgr.AddMessage(cronCtx, ik, providers.Message{Role: "assistant", Content: result.Content})
+					sessionMgr.Save(cronCtx, ik)
+				}
 			}
 		} else if job.Deliver {
 			slog.Warn("cron: delivery configured but channel/chatID missing — output discarded",
