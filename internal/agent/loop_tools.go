@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
@@ -136,10 +138,10 @@ func (l *Loop) processToolResult(
 	if level, msg := rs.loopDetector.detect(registryName, argsHash); level != "" {
 		if level == "critical" {
 			slog.Warn("tool loop critical", "agent", l.id, "tool", registryName, "message", msg)
-			rs.finalContent = "I was unable to complete this task — I kept repeating the same step" +
+			rs.finalContent = "I had to stop — I kept repeating the same step" +
 				stuckToolDetail(registryName, tc.Arguments) +
-				" without making progress. This often means a form field won't accept the value, or a required field is empty. " +
-				"Tell me the missing detail (or what you'd like me to do differently) and I'll continue."
+				" without making progress." + stuckResultDetail(result) +
+				"\n\nTell me how you'd like to proceed (or fix the issue above) and I'll continue."
 			rs.loopKilled = true
 			return toolMsg, nil, toolResultBreak
 		}
@@ -158,9 +160,8 @@ func (l *Loop) processToolResult(
 				// the user (the same-args path above uses a friendly message too).
 				// Any artifact already produced is still attached via deliverables.
 				rs.finalContent = "I've stopped because the same step kept producing the same result without moving forward" +
-					stuckToolDetail(registryName, tc.Arguments) +
-					". This usually means a required field is missing or the page rejected the input. " +
-					"If you can give me the missing detail (or tell me what to do differently), I'll continue."
+					stuckToolDetail(registryName, tc.Arguments) + "." + stuckResultDetail(result) +
+					"\n\nIf that's something you can fix (a permission, setting, or missing detail), let me know — otherwise tell me what to do differently."
 				rs.loopKilled = true
 				return toolMsg, nil, toolResultBreak
 			}
@@ -176,6 +177,49 @@ func (l *Loop) processToolResult(
 // repeatedly doing, appended to loop-stop messages so the user can see what got
 // stuck (and supply a missing value) instead of a generic "I repeated a step".
 // Returns "" when there's nothing specific worth surfacing.
+// jsonDetailRe pulls a human-readable message out of a JSON error body
+// (e.g. X's {"detail":"You are not permitted to perform this action."}).
+var jsonDetailRe = regexp.MustCompile(`"(?:detail|message|error|error_description)"\s*:\s*"([^"]{1,400})"`)
+
+// stuckResultDetail surfaces the ACTUAL tool output that kept repeating, so the
+// stop message tells the user the real problem (e.g. an X "not permitted" error)
+// instead of guessing. Returns "" when there's nothing useful to show.
+func stuckResultDetail(result *tools.Result) string {
+	if result == nil {
+		return ""
+	}
+	msg := cleanToolResultForUser(result.ForLLM)
+	if msg == "" {
+		return ""
+	}
+	if result.IsError {
+		return "\n\nThe tool reported this error:\n  " + msg
+	}
+	return "\n\nThe tool kept returning:\n  " + msg
+}
+
+// cleanToolResultForUser turns a raw tool result into a concise, user-facing
+// snippet: drops the untrusted-content wrapper, prefers a JSON detail/message/
+// error field, collapses whitespace, and truncates. Credentials are already
+// scrubbed upstream (registry.ScrubCredentials).
+func cleanToolResultForUser(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if i := strings.Index(s, "<<<EXTERNAL_UNTRUSTED_CONTENT>>>"); i >= 0 {
+		s = s[i+len("<<<EXTERNAL_UNTRUSTED_CONTENT>>>"):]
+	}
+	if m := jsonDetailRe.FindStringSubmatch(s); m != nil {
+		return strings.TrimSpace(m[1])
+	}
+	s = strings.Join(strings.Fields(s), " ") // collapse newlines/whitespace
+	if len(s) > 300 {
+		s = s[:300] + "…"
+	}
+	return s
+}
+
 func stuckToolDetail(toolName string, args map[string]any) string {
 	if toolName == "execute_action" {
 		action, _ := args["action"].(string)
