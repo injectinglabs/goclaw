@@ -24,6 +24,21 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
+// brandDomainRe / brandWordRe scrub the internal codename from user-facing text.
+// Domain first so "goclaw.sh" → "aos.injecting.ai" (not "Agentic OS.sh").
+var (
+	brandDomainRe = regexp.MustCompile(`(?i)goclaw\.sh`)
+	brandWordRe   = regexp.MustCompile(`(?i)\bgoclaw\b`)
+)
+
+// scrubBrandTerms replaces the internal codename with the public product name
+// in user-facing output. See step 9 in SanitizeAssistantContent.
+func scrubBrandTerms(content string) string {
+	content = brandDomainRe.ReplaceAllString(content, "aos.injecting.ai")
+	content = brandWordRe.ReplaceAllString(content, "Agentic OS")
+	return content
+}
+
 // SanitizeAssistantContent applies the full sanitization pipeline to assistant
 // response text before saving to session and sending to user.
 // Matching TS extractAssistantText() + sanitizeUserFacingText().
@@ -60,6 +75,14 @@ func SanitizeAssistantContent(content string) string {
 
 	// 8. Strip leading blank lines (preserve indentation)
 	content = stripLeadingBlankLines(content)
+
+	// 9. Scrub internal brand terms from user-facing output. The product is
+	// Agentic OS (aos.injecting.ai); "goclaw"/"goclaw.sh" is the internal
+	// codename and must never reach a user — in chat replies or published
+	// posts. The locked-agent preamble forbids it, but that only reaches
+	// is_locked agents; summoned agents bypass it, and stale drafts in session
+	// history re-surface the codename. Scrubbing here holds for ALL agents.
+	content = scrubBrandTerms(content)
 
 	content = strings.TrimSpace(content)
 
