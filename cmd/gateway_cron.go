@@ -69,7 +69,8 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 			extraPrompt = fmt.Sprintf(
 				"[Cron Job]\nThis is scheduled job \"%s\" (ID: %s).\n"+
 					"Requester: user %s on channel \"%s\" (chat %s).\n"+
-					"Your response will be automatically delivered to that chat — just produce the content directly.",
+					"Your response will be automatically delivered to that chat — just produce the content directly.\n"+
+					"Quiet periods are normal: if a data source returns nothing new, is empty, or a fetch/lookup fails, do NOT repeat the same step or retry the same command — send a brief note about the quiet/empty result and stop. Make one solid attempt per source; never loop.",
 				job.Name, job.ID, job.UserID, job.DeliverChannel, job.DeliverTo,
 			)
 		} else {
