@@ -38,7 +38,7 @@ type telegramInstanceConfig struct {
 	BlockReply      *bool    `json:"block_reply,omitempty"`
 	ForceIPv4       bool     `json:"force_ipv4,omitempty"`
 	AllowFrom       []string `json:"allow_from,omitempty"`
-	Mode            string   `json:"mode,omitempty"` // "polling" (default) or "webhook"
+	Mode            string   `json:"mode,omitempty"` // DEPRECATED/ignored: Telegram is webhook-only (long-polling removed)
 }
 
 // Factory creates a Telegram channel from DB instance data (no extra stores).
