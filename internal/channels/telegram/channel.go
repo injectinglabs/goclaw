@@ -39,8 +39,7 @@ type Channel struct {
 	reactions         sync.Map                    // localKey string → *StatusReactionController
 	threadIDs         sync.Map                    // localKey string → messageThreadID int (for forum topic routing)
 	mentionMode       string             // "strict" (default) or "yield"
-	pollCancel        context.CancelFunc // cancels the long polling / webhook dispatch context
-	pollDone          chan struct{}      // closed when polling goroutine exits
+	pollCancel        context.CancelFunc // cancels the webhook dispatch handler context (set in startWebhook)
 	instanceID        uuid.UUID          // DB channel_instance id (uuid.Nil for config-based); used for webhook routing
 	webhookMode       bool               // true when started in webhook mode (no long-poll goroutine)
 	webhookSecret     string             // per-instance secret validated on inbound webhook requests
@@ -171,32 +170,30 @@ func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.Pai
 	return ch, nil
 }
 
-// Start connects the bot using the configured ingestion mode. Webhook mode
-// (DB instances only, requires a public base URL) registers a webhook and
-// scales across replicas; polling is the default and single-consumer per bot.
+// Start connects the bot. Telegram runs in WEBHOOK MODE ONLY — long-polling has
+// been removed. (Polling can't run across multiple replicas: every instance
+// calls getUpdates with the same token and Telegram 409s all but one, so a
+// 2-instance deploy thrashes and drops inbound. Webhooks let every replica serve
+// the shared route with no conflict.)
+//
+// Webhook mode requires (a) a DB-backed instance — for /telegram/webhook/{id}
+// routing — and (b) a configured public base URL. If either is missing we fail
+// loudly (mark the channel failed + return an error) rather than silently
+// degrading; the gateway keeps running and other channels are unaffected.
 func (c *Channel) Start(ctx context.Context) error {
-	if c.useWebhookMode() {
-		return c.startWebhook(ctx)
-	}
-	return c.startPolling(ctx)
-}
-
-// useWebhookMode reports whether this channel should run in webhook mode,
-// falling back to polling (with a warning) when prerequisites are missing.
-func (c *Channel) useWebhookMode() bool {
-	if !strings.EqualFold(c.config.Mode, "webhook") {
-		return false
-	}
 	if c.instanceID == uuid.Nil {
-		slog.Warn("telegram: webhook mode requires a DB channel instance; falling back to polling")
-		return false
+		err := fmt.Errorf("telegram requires webhook mode but this is not a DB-backed instance (long-polling has been removed)")
+		c.MarkFailed("Telegram needs a DB-backed instance", err.Error(), channels.ChannelFailureKindConfig, false)
+		slog.Error("telegram: cannot start — webhook mode requires a DB channel instance (polling removed)")
+		return err
 	}
 	if !WebhookConfigured() {
-		slog.Warn("telegram: webhook mode requested but gateway.public_webhook_base is unset; falling back to polling",
-			"instance", c.instanceID)
-		return false
+		err := fmt.Errorf("telegram requires webhook mode but gateway public_webhook_base (GOCLAW_PUBLIC_WEBHOOK_BASE) is unset (long-polling has been removed)")
+		c.MarkFailed("Telegram webhook base URL not set", err.Error(), channels.ChannelFailureKindConfig, false)
+		slog.Error("telegram: cannot start — set GOCLAW_PUBLIC_WEBHOOK_BASE for webhook mode (polling removed)", "instance", c.instanceID)
+		return err
 	}
-	return true
+	return c.startWebhook(ctx)
 }
 
 // startWebhook validates the bot, registers a Telegram webhook pointing at this
@@ -254,87 +251,7 @@ func (c *Channel) startWebhook(ctx context.Context) error {
 	return nil
 }
 
-// startPolling begins long polling for Telegram updates.
-func (c *Channel) startPolling(ctx context.Context) error {
-	slog.Info("starting telegram bot (polling mode)")
-	c.MarkStarting("Validating Telegram bot")
-
-	probeCtx, probeCancel := context.WithTimeout(ctx, probeOverallTimeout)
-	me, err := c.bot.GetMe(probeCtx)
-	probeCancel()
-	if err != nil {
-		return fmt.Errorf("validate telegram bot: %w", err)
-	}
-	username := ""
-	if me != nil {
-		username = me.Username
-	}
-
-	// A bot token may have a webhook registered from prior use (another tool or
-	// environment). Telegram then rejects getUpdates with 409 "can't use
-	// getUpdates while webhook is active", so long-polling never receives any
-	// message and the bot silently never replies. Clear any webhook before
-	// polling so re-used tokens self-heal. Best-effort: log and continue.
-	delCtx, delCancel := context.WithTimeout(ctx, probeOverallTimeout)
-	if delErr := c.bot.DeleteWebhook(delCtx, &telego.DeleteWebhookParams{}); delErr != nil {
-		slog.Warn("telegram: deleteWebhook before polling failed (continuing)", "err", delErr)
-	}
-	delCancel()
-
-	// Create a cancellable context for the polling goroutine.
-	// Stop() cancels this context to cleanly shut down long polling.
-	pollCtx, cancel := context.WithCancel(ctx)
-	c.pollCancel = cancel
-	c.pollDone = make(chan struct{})
-
-	updates, err := c.bot.UpdatesViaLongPolling(pollCtx, &telego.GetUpdatesParams{
-		Timeout: 25, // Long-poll seconds; keep below HTTP client Timeout (#361)
-		AllowedUpdates: []string{
-			"message",
-			"edited_message",
-			"callback_query",
-			"my_chat_member",
-		},
-	})
-	if err != nil {
-		cancel()
-		return fmt.Errorf("start long polling: %w", err)
-	}
-
-	c.SetRunning(true)
-	c.MarkHealthy(connectedSummary(username))
-	if gh := c.GroupHistory(); gh != nil {
-		gh.StartFlusher()
-	}
-	c.handlerSem = make(chan struct{}, 20) // limit concurrent message handlers
-	slog.Info("telegram bot connected", "username", username)
-
-	go c.syncMenuCommandsWithRetry(pollCtx)
-
-	go func() {
-		defer close(c.pollDone)
-		for {
-			select {
-			case <-pollCtx.Done():
-				return
-			case update, ok := <-updates:
-				if !ok {
-					if pollCtx.Err() == nil {
-						c.MarkFailed("Polling stopped unexpectedly", "Telegram updates channel closed unexpectedly.", channels.ChannelFailureKindNetwork, true)
-					}
-					slog.Info("telegram updates channel closed")
-					return
-				}
-				c.dispatchUpdate(pollCtx, update)
-			}
-		}
-	}()
-
-	return nil
-}
-
 // syncMenuCommandsWithRetry registers the bot menu commands, retrying briefly.
-// Shared by polling and webhook startup.
 func (c *Channel) syncMenuCommandsWithRetry(parent context.Context) {
 	commands := DefaultMenuCommands()
 	syncCtx, cancel := context.WithTimeout(parent, probeOverallTimeout)
@@ -493,19 +410,9 @@ func (c *Channel) Stop(ctx context.Context) error {
 		delCancel()
 	}
 
+	// Cancel the webhook handler context to halt in-flight dispatch.
 	if c.pollCancel != nil {
 		c.pollCancel()
-	}
-
-	// Wait for the polling goroutine to fully exit so that
-	// Telegram releases the getUpdates lock before a new instance starts.
-	if c.pollDone != nil {
-		select {
-		case <-c.pollDone:
-			slog.Info("telegram polling goroutine stopped")
-		case <-time.After(10 * time.Second):
-			slog.Warn("telegram polling goroutine did not exit within timeout")
-		}
 	}
 
 	// Wait for in-flight handler goroutines to finish processing.
