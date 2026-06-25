@@ -70,7 +70,7 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 				"[Cron Job]\nThis is scheduled job \"%s\" (ID: %s).\n"+
 					"Requester: user %s on channel \"%s\" (chat %s).\n"+
 					"Your response will be automatically delivered to that chat — just produce the content directly.\n"+
-					"Quiet periods are normal: if a data source returns nothing new, is empty, or a fetch/lookup fails, do NOT repeat the same step or retry the same command — send a brief note about the quiet/empty result and stop. Make one solid attempt per source; never loop.",
+					"Work efficiently and DO NOT loop. If the task is to draft or write content, WRITE IT DIRECTLY from what you already know — do not scan the workspace (list_files), re-search skills/memory/knowledge graph, or browse the web unless the task explicitly needs external data you don't have. Never call the same tool again after it returned the same result. Quiet periods are normal: if a data source is empty or a fetch fails, make ONE attempt, then send a brief note and stop.",
 				job.Name, job.ID, job.UserID, job.DeliverChannel, job.DeliverTo,
 			)
 		} else {
