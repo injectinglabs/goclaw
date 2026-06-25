@@ -4,10 +4,28 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
+
+// isTelegramChatID reports whether s looks like a Telegram chat_id (an optionally
+// negative integer) rather than a @username/handle. Telegram routes DMs by
+// numeric id only; a bare username silently fails to deliver.
+func isTelegramChatID(s string) bool {
+	s = strings.TrimPrefix(strings.TrimSpace(s), "-")
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
 
 // CronTool lets agents manage Gateway cron jobs.
 // Matching OpenClaw src/agents/tools/cron-tool.ts.
@@ -323,6 +341,19 @@ func (t *CronTool) handleAdd(ctx context.Context, args map[string]any, agentID, 
 				if ctxChatID := ToolChatIDFromCtx(ctx); ctxChatID != "" {
 					to = ctxChatID
 				}
+			}
+		}
+
+		// Telegram routes DMs by NUMERIC chat_id, never by @username. Models
+		// often copy a handle (e.g. "x0nick"/"@x0nick") from the Connected
+		// Channels list into `to`, which Telegram silently drops. When delivering
+		// to a Telegram channel with a non-numeric `to`, prefer the originating
+		// chat_id from context (the real chat_id of the chat we're running in).
+		if strings.HasPrefix(channel, "telegram") && to != "" && !isTelegramChatID(to) {
+			if ctxChatID := ToolChatIDFromCtx(ctx); isTelegramChatID(ctxChatID) {
+				slog.Warn("cron: corrected non-numeric telegram deliver_to",
+					"supplied", to, "corrected", ctxChatID, "channel", channel)
+				to = ctxChatID
 			}
 		}
 	}
