@@ -151,7 +151,13 @@ func (l *Loop) processToolResult(
 	}
 
 	// Check for same tool returning identical results with different args.
-	if rh := hashResult(result.ForLLM); rh != "" {
+	// Skip EMPTY/no-data results: when an agent legitimately scans many inputs
+	// (e.g. TWITTER_RECENT_SEARCH across 8 handles), the ones with no matches all
+	// return a byte-identical empty body ({"data":[],"result_count":0}). That is
+	// a valid distinct "nothing found" per query — real progress, not a runaway
+	// loop — so counting 3 such empties as "same result" would falsely kill the
+	// run mid-scan. A tool stuck returning the same NON-empty payload still trips.
+	if rh := hashResult(result.ForLLM); rh != "" && !isEmptyToolResult(result.ForLLM) {
 		if level, msg := rs.loopDetector.detectSameResult(registryName, rh); level != "" {
 			if level == "critical" {
 				slog.Warn("tool loop critical: same result",
@@ -218,6 +224,32 @@ func cleanToolResultForUser(s string) string {
 		s = s[:300] + "…"
 	}
 	return s
+}
+
+// isEmptyToolResult reports whether a tool result represents "no data found" —
+// an empty search/list/fetch. Such results are a valid distinct outcome per
+// input (real progress when scanning many items), NOT a stuck loop, so they are
+// excluded from the same-result loop guard. A tool returning the same NON-empty
+// payload across calls still trips the guard.
+func isEmptyToolResult(content string) bool {
+	s := content
+	if i := strings.Index(s, "<<<EXTERNAL_UNTRUSTED_CONTENT>>>"); i >= 0 {
+		s = s[i+len("<<<EXTERNAL_UNTRUSTED_CONTENT>>>"):]
+	}
+	s = strings.TrimSpace(s)
+	if s == "" || s == "[]" || s == "{}" {
+		return true
+	}
+	compact := strings.Join(strings.Fields(s), "") // strip all whitespace for robust matching
+	for _, sig := range []string{
+		`"result_count":0`, `"resultcount":0`, `"total_results":0`, `"total":0`,
+		`"data":[]`, `"results":[]`, `"items":[]`, `"messages":[]`, `"tweets":[]`,
+	} {
+		if strings.Contains(compact, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 func stuckToolDetail(toolName string, args map[string]any) string {
