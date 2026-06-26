@@ -151,13 +151,17 @@ func (l *Loop) processToolResult(
 	}
 
 	// Check for same tool returning identical results with different args.
-	// Skip EMPTY/no-data results: when an agent legitimately scans many inputs
-	// (e.g. TWITTER_RECENT_SEARCH across 8 handles), the ones with no matches all
-	// return a byte-identical empty body ({"data":[],"result_count":0}). That is
-	// a valid distinct "nothing found" per query — real progress, not a runaway
-	// loop — so counting 3 such empties as "same result" would falsely kill the
-	// run mid-scan. A tool stuck returning the same NON-empty payload still trips.
-	if rh := hashResult(result.ForLLM); rh != "" && !isEmptyToolResult(result.ForLLM) {
+	// Skip this guard for (a) EMPTY/no-data results and (b) mcp_* (external)
+	// tools. goclaw cannot tell whether an external MCP tool reads or writes
+	// (see recordMutation), and legitimate BATCH work over many inputs returns
+	// byte-identical results that are PROGRESS, not a stuck loop:
+	//   - TWITTER_RECENT_SEARCH across 8 handles → identical empty {"data":[]}
+	//   - TWITTER_FOLLOW_USER over 20 users → identical {"following":true}
+	//   - like/retweet/send/etc. → identical success confirmations
+	// At the critical threshold of 3, the old guard killed these runs mid-batch.
+	// Real loops are still bounded by the same-ARGS detector (exact repeats),
+	// the read-only-streak guard, and the overall iteration cap.
+	if rh := hashResult(result.ForLLM); rh != "" && !isEmptyToolResult(result.ForLLM) && !strings.HasPrefix(registryName, "mcp_") {
 		if level, msg := rs.loopDetector.detectSameResult(registryName, rh); level != "" {
 			if level == "critical" {
 				slog.Warn("tool loop critical: same result",
